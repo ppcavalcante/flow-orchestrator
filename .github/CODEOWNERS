@@ -1,0 +1,5 @@
+# Flow Orchestrator CODEOWNERS file
+# This file defines code ownership and review requirements
+
+# Default owner for everything in the repo
+* @pparaujo 

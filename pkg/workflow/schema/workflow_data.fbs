@@ -1,0 +1,48 @@
+// FlatBuffers schema for WorkflowData
+
+namespace workflow;
+
+enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4 }
+
+table KeyValueString {
+  key:string;
+  value:string;
+}
+
+table KeyValueInt {
+  key:string;
+  value:int;
+}
+
+table KeyValueBool {
+  key:string;
+  value:bool;
+}
+
+table KeyValueDouble {
+  key:string;
+  value:double;
+}
+
+table NodeStatusEntry {
+  node_name:string;
+  status:NodeStatus;
+}
+
+table NodeOutputEntry {
+  node_name:string;
+  output:string; // JSON encoded
+}
+
+table WorkflowState {
+  workflow_id:string;
+  string_data:[KeyValueString];
+  int_data:[KeyValueInt];
+  bool_data:[KeyValueBool];
+  double_data:[KeyValueDouble];
+  node_statuses:[NodeStatusEntry];
+  node_outputs:[NodeOutputEntry];
+  timestamp:long; // Unix timestamp in milliseconds
+}
+
+root_type WorkflowState; 

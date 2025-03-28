@@ -1,0 +1,54 @@
+codecov:
+  require_ci_to_pass: yes
+
+coverage:
+  precision: 2
+  round: down
+  range: "70...100"
+
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        base: auto
+        branches: null
+        if_no_uploads: error
+        if_not_found: success
+        if_ci_failed: error
+        only_pulls: false
+        flags: null
+        paths: null
+
+      # Enforce per-flag coverage (must be a list)
+      critical:
+        flags: 
+          - critical
+        target: 90%
+      high:
+        flags:
+          - high
+        target: 90%
+      medium:
+        flags:
+          - medium
+        target: 70%
+
+flags:
+  critical:
+    paths:
+      - pkg/workflow/
+    carryforward: true
+
+  high:
+    paths:
+      - internal/workflow/arena/
+      - internal/workflow/memory/
+    carryforward: true
+
+  medium:
+    paths:
+      - internal/workflow/metrics/
+      - internal/workflow/utils/
+      - internal/workflow/concurrent/
+    carryforward: true
