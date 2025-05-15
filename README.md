@@ -137,7 +137,7 @@ dag, _ := workflow.Build()
 err := dag.Execute(context.Background(), workflowData)
 ```
 
-For a detailed explanation of the DAG execution model, see our [DAG Execution Model](docs/dag_execution_model.md) documentation.
+For a detailed explanation of the DAG execution model, see our [DAG Execution Model](docs/architecture/dag-execution.md) documentation.
 
 ### WorkflowData
 
@@ -173,7 +173,7 @@ stack.Use(workflow.TimeoutMiddleware(30*time.Second))
 wrappedAction := stack.Apply(myAction)
 ```
 
-For more information on the middleware system, see our [Middleware System](docs/middleware_system.md) documentation.
+For more information on the middleware system, see our [Middleware System](docs/guides/middleware.md) documentation.
 
 ### Property-Based Testing
 

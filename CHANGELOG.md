@@ -7,15 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0-alpha] - 2025-03-12
+### Added
+- Comprehensive documentation structure
+- Development guides and references
+
+## [0.1.0-alpha] - 2023-07-15
 
 ### Added
-- Initial project structure
-- Core workflow functionality
-- DAG implementation
+- Initial alpha release
+- Core workflow engine
+- DAG execution model
+- WorkflowData management
 - Basic middleware system
-- Memory optimization with arena allocator
-- Benchmarking suite
+- Simple persistence layer
+- Memory optimization components
+- Concurrent data structures
+- Workflow builder API
+- Basic examples
+
+### Known Issues
+- API may change before the stable release
+- Limited persistence options
+- Documentation is being improved
 
 [Unreleased]: https://github.com/yourusername/flow-orchestrator/compare/v0.1.0-alpha...HEAD
 [0.1.0-alpha]: https://github.com/yourusername/flow-orchestrator/releases/tag/v0.1.0-alpha
