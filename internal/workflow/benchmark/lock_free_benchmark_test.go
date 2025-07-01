@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // wrapDefaultConfig wraps the DefaultWorkflowDataConfig to match the function signature

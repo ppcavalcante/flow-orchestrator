@@ -3,7 +3,7 @@ package workflow
 import (
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/metrics"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 )
 
 func TestDefaultWorkflowDataConfig(t *testing.T) {

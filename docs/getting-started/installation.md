@@ -23,13 +23,13 @@ The recommended way to install Flow Orchestrator is using Go modules:
 
 ```bash
 # Add to your project
-go get github.com/pparaujo/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
 ```
 
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/pparaujo/flow-orchestrator v0.1.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.1.0-alpha
 ```
 
 ### Using Traditional GOPATH
@@ -37,7 +37,7 @@ require github.com/pparaujo/flow-orchestrator v0.1.0-alpha
 If you're using GOPATH without modules:
 
 ```bash
-go get -u github.com/pparaujo/flow-orchestrator
+go get -u github.com/ppcavalcante/flow-orchestrator
 ```
 
 ### Building from Source
@@ -46,7 +46,7 @@ If you want to build from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/pparaujo/flow-orchestrator.git
+git clone https://github.com/ppcavalcante/flow-orchestrator.git
 
 # Navigate to the project directory
 cd flow-orchestrator
@@ -64,7 +64,7 @@ Once installed, you can import Flow Orchestrator in your Go code:
 
 ```go
 import (
-    "github.com/pparaujo/flow-orchestrator/pkg/workflow"
+    "github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 ```
 
@@ -78,7 +78,7 @@ package main
 import (
     "fmt"
     
-    "github.com/pparaujo/flow-orchestrator/pkg/workflow"
+    "github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 func main() {
@@ -142,7 +142,7 @@ go mod tidy
 
 ### Common Issues
 
-**Issue**: Unable to find package "github.com/pparaujo/flow-orchestrator/pkg/workflow"
+**Issue**: Unable to find package "github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 
 **Solution**: Ensure your Go modules are properly set up and try running `go mod tidy`.
 
@@ -156,7 +156,7 @@ go mod tidy
 
 ```
 require (
-    github.com/pparaujo/flow-orchestrator v0.1.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.1.0-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 
@@ -169,7 +169,7 @@ If you encounter issues with installation, please:
 
 1. Check the [examples directory](../../examples/) for working code examples
 2. Review the [Troubleshooting Guide](../guides/troubleshooting.md) for common issues
-3. Check for [known issues](https://github.com/pparaujo/flow-orchestrator/issues) on GitHub
+3. Check for [known issues](https://github.com/ppcavalcante/flow-orchestrator/issues) on GitHub
 
 ## Next Steps
 

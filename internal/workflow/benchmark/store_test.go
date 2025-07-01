@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // createBenchmarkDataForStore creates a workflow data with n nodes for benchmarking storage

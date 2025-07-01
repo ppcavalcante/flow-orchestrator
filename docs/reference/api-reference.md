@@ -1,6 +1,6 @@
 # API Reference
 
-This document provides a comprehensive reference for the public API of Flow Orchestrator. It covers the core types, interfaces, and functions available in the `github.com/pparaujo/flow-orchestrator/pkg/workflow` package.
+This document provides a comprehensive reference for the public API of Flow Orchestrator. It covers the core types, interfaces, and functions available in the `github.com/ppcavalcante/flow-orchestrator/pkg/workflow` package.
 
 ## Core Types
 

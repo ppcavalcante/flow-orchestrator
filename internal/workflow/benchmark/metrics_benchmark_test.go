@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/metrics"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 )
 
 // BenchmarkWithMetrics benchmarks operations with metrics enabled

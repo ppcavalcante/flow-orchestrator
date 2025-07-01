@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // BenchmarkWorkflowStateManagement measures performance of workflow state operations

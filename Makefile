@@ -137,12 +137,12 @@ verify-slsa:
 	echo "Latest tag: $$latest_tag"; \
 	echo "Downloading provenance from GitHub..."; \
 	mkdir -p .verify-temp; \
-	curl -sSL "https://github.com/pparaujo/flow-orchestrator/releases/download/$$latest_tag/flow-orchestrator.spdx.json" -o .verify-temp/flow-orchestrator.spdx.json; \
-	curl -sSL "https://github.com/pparaujo/flow-orchestrator/releases/download/$$latest_tag/flow-orchestrator.intoto.jsonl" -o .verify-temp/flow-orchestrator.intoto.jsonl; \
+	curl -sSL "https://github.com/ppcavalcante/flow-orchestrator/releases/download/$$latest_tag/flow-orchestrator.spdx.json" -o .verify-temp/flow-orchestrator.spdx.json; \
+	curl -sSL "https://github.com/ppcavalcante/flow-orchestrator/releases/download/$$latest_tag/flow-orchestrator.intoto.jsonl" -o .verify-temp/flow-orchestrator.intoto.jsonl; \
 	echo "Verifying provenance..."; \
 	slsa-verifier verify-artifact \
 		--provenance-path .verify-temp/flow-orchestrator.intoto.jsonl \
-		--source-uri github.com/pparaujo/flow-orchestrator \
+		--source-uri github.com/ppcavalcante/flow-orchestrator \
 		--source-tag $$latest_tag \
 		.verify-temp/flow-orchestrator.spdx.json || echo "Verification failed - this is expected for existing releases that don't have SLSA provenance"; \
 	rm -rf .verify-temp

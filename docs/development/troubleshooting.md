@@ -154,7 +154,7 @@ fmt.Println(dot)
 
 If you've tried the solutions above and are still experiencing issues:
 
-1. Check the [GitHub Issues](https://github.com/pparaujo/flow-orchestrator/issues) to see if others have encountered similar problems
+1. Check the [GitHub Issues](https://github.com/ppcavalcante/flow-orchestrator/issues) to see if others have encountered similar problems
 2. Search the documentation for relevant information
 3. Create a new issue with:
    - A clear description of the problem

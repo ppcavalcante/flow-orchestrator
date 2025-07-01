@@ -191,7 +191,7 @@ type WorkflowStore interface {
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/). The current version information is available via:
 
 ```go
-import "github.com/pparaujo/flow-orchestrator/pkg/workflow"
+import "github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 
 // Get version string
 version := workflow.Version

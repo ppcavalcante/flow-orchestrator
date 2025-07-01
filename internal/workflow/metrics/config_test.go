@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/internal/workflow/utils"
+	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
 )
 
 func TestDefaultMetricsConfig(t *testing.T) {

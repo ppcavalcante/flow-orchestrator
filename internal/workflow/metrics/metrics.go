@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/internal/workflow/utils"
+	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
 )
 
 // OperationType represents different operations that we want to track

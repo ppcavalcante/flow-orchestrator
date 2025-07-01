@@ -15,7 +15,7 @@ We currently support the following versions with security updates:
 We take the security of Flow Orchestrator seriously. If you believe you've found a security vulnerability, please follow these steps:
 
 1. **Do not disclose the vulnerability publicly**
-2. Report the vulnerability through [GitHub Security Advisories](https://github.com/pparaujo/flow-orchestrator/security/advisories/new)
+2. Report the vulnerability through [GitHub Security Advisories](https://github.com/ppcavalcante/flow-orchestrator/security/advisories/new)
 3. Provide detailed information including:
    - Description of the vulnerability
    - Steps to reproduce

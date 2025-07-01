@@ -1,7 +1,7 @@
 package workflow
 
 import (
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/metrics"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 )
 
 // WorkflowDataConfig defines the configuration for WorkflowData

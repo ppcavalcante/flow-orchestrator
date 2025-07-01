@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/arena"
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/metrics"
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/utils"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/utils"
 )
 
 // WorkflowData is the central data store for workflow execution.

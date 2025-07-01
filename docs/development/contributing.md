@@ -10,13 +10,13 @@ Please read and follow our [Code of Conduct](../../CODE_OF_CONDUCT.md).
 
 ### Reporting Bugs
 
-1. Ensure the bug has not already been reported by searching on GitHub under [Issues](https://github.com/pparaujo/flow-orchestrator/issues)
-2. If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/pparaujo/flow-orchestrator/issues/new)
+1. Ensure the bug has not already been reported by searching on GitHub under [Issues](https://github.com/ppcavalcante/flow-orchestrator/issues)
+2. If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/ppcavalcante/flow-orchestrator/issues/new)
 3. Include a clear title and description, as much relevant information as possible, and a code sample or an executable test case demonstrating the expected behavior that is not occurring
 
 ### Suggesting Enhancements
 
-1. [Open a new issue](https://github.com/pparaujo/flow-orchestrator/issues/new)
+1. [Open a new issue](https://github.com/ppcavalcante/flow-orchestrator/issues/new)
 2. Provide a clear title and description of the enhancement
 3. Include any relevant examples or use cases
 
@@ -62,8 +62,8 @@ Please refer to our [Git Workflow](../gw.md) documentation for details on our br
 
 If you need help with contributing, please:
 
-1. Check the [documentation](https://github.com/pparaujo/flow-orchestrator/docs)
-2. Ask in the [issue tracker](https://github.com/pparaujo/flow-orchestrator/issues)
+1. Check the [documentation](https://github.com/ppcavalcante/flow-orchestrator/docs)
+2. Ask in the [issue tracker](https://github.com/ppcavalcante/flow-orchestrator/issues)
 
 ## License
 

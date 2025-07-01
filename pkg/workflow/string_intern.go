@@ -3,7 +3,7 @@ package workflow
 import (
 	"time"
 
-	internal "github.com/pparaujo/flow-orchestrator/internal/workflow"
+	internal "github.com/ppcavalcante/flow-orchestrator/internal/workflow"
 )
 
 // StringInterner provides string interning functionality to reduce memory usage

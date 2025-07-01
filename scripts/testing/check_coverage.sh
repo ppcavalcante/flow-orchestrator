@@ -68,16 +68,16 @@ check_package() {
 
 # Check each package according to the test coverage strategy
 # Critical packages (90% coverage)
-check_package "github.com/pparaujo/flow-orchestrator/pkg/workflow" 90 "Critical"
+check_package "github.com/ppcavalcante/flow-orchestrator/pkg/workflow" 90 "Critical"
 
 # High priority packages (90% coverage)
-check_package "github.com/pparaujo/flow-orchestrator/internal/workflow/arena" 90 "High"
-check_package "github.com/pparaujo/flow-orchestrator/internal/workflow/memory" 90 "High"
+check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena" 90 "High"
+check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/memory" 90 "High"
 
 # Medium priority packages (70-80% coverage)
-check_package "github.com/pparaujo/flow-orchestrator/internal/workflow/metrics" 70 "Medium"
-check_package "github.com/pparaujo/flow-orchestrator/internal/workflow/utils" 70 "Medium"
-check_package "github.com/pparaujo/flow-orchestrator/internal/workflow/concurrent" 80 "Medium"
+check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics" 70 "Medium"
+check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils" 70 "Medium"
+check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/concurrent" 80 "Medium"
 
 # Print summary
 print_header "Coverage Summary"

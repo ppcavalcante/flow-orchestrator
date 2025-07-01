@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/metrics"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 )
 
 // BenchmarkRealWorldScenarios benchmarks realistic workflow patterns

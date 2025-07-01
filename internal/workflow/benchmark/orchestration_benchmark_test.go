@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // BenchmarkDependencyResolution measures how quickly the system can determine which nodes are ready to execute

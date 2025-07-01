@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // BenchConfig holds common benchmark configuration parameters

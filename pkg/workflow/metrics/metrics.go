@@ -5,7 +5,7 @@ package metrics
 import (
 	"sync"
 
-	internal "github.com/pparaujo/flow-orchestrator/internal/workflow/metrics"
+	internal "github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics"
 )
 
 // OperationType represents a type of operation being measured

@@ -1,10 +1,10 @@
 # Flow Orchestrator
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/pparaujo/flow-orchestrator)](https://goreportcard.com/report/github.com/pparaujo/flow-orchestrator)
-[![Go Reference](https://pkg.go.dev/badge/github.com/pparaujo/flow-orchestrator.svg)](https://pkg.go.dev/github.com/pparaujo/flow-orchestrator)
-[![GitHub tag](https://img.shields.io/github/v/tag/pparaujo/flow-orchestrator?include_prereleases&label=release)](https://github.com/pparaujo/flow-orchestrator/tags)
-[![Build Status](https://github.com/pparaujo/flow-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/pparaujo/flow-orchestrator/actions)
-[![Coverage Status](https://codecov.io/gh/pparaujo/flow-orchestrator/branch/main/graph/badge.svg?token=CRL74YL94M)](https://codecov.io/gh/pparaujo/flow-orchestrator)
+[![Go Report Card](https://goreportcard.com/badge/github.com/ppcavalcante/flow-orchestrator)](https://goreportcard.com/report/github.com/ppcavalcante/flow-orchestrator)
+[![Go Reference](https://pkg.go.dev/badge/github.com/ppcavalcante/flow-orchestrator.svg)](https://pkg.go.dev/github.com/ppcavalcante/flow-orchestrator)
+[![GitHub tag](https://img.shields.io/github/v/tag/ppcavalcante/flow-orchestrator?include_prereleases&label=release)](https://github.com/ppcavalcante/flow-orchestrator/tags)
+[![Build Status](https://github.com/ppcavalcante/flow-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/ppcavalcante/flow-orchestrator/actions)
+[![Coverage Status](https://codecov.io/gh/ppcavalcante/flow-orchestrator/branch/main/graph/badge.svg?token=CRL74YL94M)](https://codecov.io/gh/ppcavalcante/flow-orchestrator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes.
@@ -32,7 +32,7 @@ Flow Orchestrator is a flexible workflow engine designed for embedding within Go
 ### Installation
 
 ```bash
-go get github.com/pparaujo/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
 ```
 
 ### Providing Feedback
@@ -50,7 +50,7 @@ import (
     "log"
     "time"
     
-    "github.com/pparaujo/flow-orchestrator/pkg/workflow"
+    "github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 func main() {

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
-	fb "github.com/pparaujo/flow-orchestrator/pkg/workflow/fb/workflow"
+	fb "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/fb/workflow"
 )
 
 // WorkflowStore defines the interface for persisting workflow state.

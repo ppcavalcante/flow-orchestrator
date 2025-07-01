@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // MockWorkflowStore is a test implementation of WorkflowStore interface

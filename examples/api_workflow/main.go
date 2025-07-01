@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // Configuration flags for testing scenarios

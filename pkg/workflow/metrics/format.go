@@ -3,7 +3,7 @@
 package metrics
 
 import (
-	internal "github.com/pparaujo/flow-orchestrator/internal/workflow/metrics"
+	internal "github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics"
 )
 
 // FormatDuration formats a duration in nanoseconds to a human-readable string

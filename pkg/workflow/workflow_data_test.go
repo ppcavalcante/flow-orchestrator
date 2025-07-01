@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pparaujo/flow-orchestrator/internal/workflow/utils"
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/metrics"
+	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

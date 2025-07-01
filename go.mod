@@ -1,10 +1,10 @@
-module github.com/pparaujo/flow-orchestrator
+module github.com/ppcavalcante/flow-orchestrator
 
 go 1.24.0
 
 require github.com/google/flatbuffers v25.2.10+incompatible
 
-require github.com/leanovate/gopter v0.2.11 // indirect
+require github.com/leanovate/gopter v0.2.11
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect

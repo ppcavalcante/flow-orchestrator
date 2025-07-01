@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // ExecutorI is an interface for workflow executors

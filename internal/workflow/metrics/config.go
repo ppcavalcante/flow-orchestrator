@@ -3,7 +3,7 @@ package metrics
 import (
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/internal/workflow/utils"
+	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
 )
 
 // MetricsConfig defines configuration options for metrics collection

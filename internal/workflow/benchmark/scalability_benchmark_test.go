@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // WorkerCounts defines the worker counts to test

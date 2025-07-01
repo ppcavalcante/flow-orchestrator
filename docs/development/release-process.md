@@ -74,7 +74,7 @@ git push origin develop
 
 ### 6. Create GitHub Release
 
-1. Go to the [GitHub Releases page](https://github.com/pparaujo/flow-orchestrator/releases)
+1. Go to the [GitHub Releases page](https://github.com/ppcavalcante/flow-orchestrator/releases)
 2. Click on "Draft a new release"
 3. Select the tag version
 4. Set the title to the version number (e.g., "v1.2.0")
@@ -85,7 +85,7 @@ git push origin develop
 ### 7. Publish the Package
 
 ```bash
-GOPROXY=proxy.golang.org go list -m github.com/pparaujo/flow-orchestrator@v1.2.0
+GOPROXY=proxy.golang.org go list -m github.com/ppcavalcante/flow-orchestrator@v1.2.0
 ```
 
 ## Handling Pre-releases

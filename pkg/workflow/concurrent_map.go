@@ -1,7 +1,7 @@
 package workflow
 
 import (
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow/concurrent"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/concurrent"
 )
 
 // ConcurrentMap is a thread-safe map implementation.

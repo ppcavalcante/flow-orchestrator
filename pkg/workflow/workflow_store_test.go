@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	fb "github.com/pparaujo/flow-orchestrator/pkg/workflow/fb/workflow"
+	fb "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/fb/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

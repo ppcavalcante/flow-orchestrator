@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // TestDeadlockDetection runs a series of tests with timeouts to identify where deadlocks might occur

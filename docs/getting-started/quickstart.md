@@ -7,7 +7,7 @@ This guide will help you get up and running with Flow Orchestrator in just a few
 Install Flow Orchestrator using Go modules:
 
 ```bash
-go get github.com/pparaujo/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
 ```
 
 ## Creating a Simple Workflow
@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pparaujo/flow-orchestrator/pkg/workflow"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 func main() {
