@@ -7,7 +7,7 @@ This guide will help you get up and running with Flow Orchestrator in just a few
 Install Flow Orchestrator using Go modules:
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
 ```
 
 ## Creating a Simple Workflow

@@ -23,13 +23,13 @@ The recommended way to install Flow Orchestrator is using Go modules:
 
 ```bash
 # Add to your project
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
 ```
 
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.1.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.1.1-alpha
 ```
 
 ### Using Traditional GOPATH
@@ -156,7 +156,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.1.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.1.1-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

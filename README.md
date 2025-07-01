@@ -32,7 +32,7 @@ Flow Orchestrator is a flexible workflow engine designed for embedding within Go
 ### Installation
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
 ```
 
 ### Providing Feedback

@@ -43,7 +43,7 @@ go mod init order-workflow
 Add Flow Orchestrator as a dependency:
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.0-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
 ```
 
 ## Step 1: Create the Main Application File
