@@ -96,7 +96,10 @@ func (t *TestAction) ToAction() workflow.Action {
 			time.Sleep(t.Delay)
 		}
 		if t.ShouldFail {
-			return fmt.Errorf("%s: %w", t.ErrorMsg, t.Err)
+			if t.Err != nil {
+				return fmt.Errorf("%s: %w", t.ErrorMsg, t.Err)
+			}
+			return fmt.Errorf("%s", t.ErrorMsg)
 		}
 		if t.Output != "" {
 			data.SetOutput(t.Name, t.Output)

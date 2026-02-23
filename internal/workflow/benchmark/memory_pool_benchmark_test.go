@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/memory"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // BenchmarkNodeCreation compares the performance of creating nodes with and without pooling

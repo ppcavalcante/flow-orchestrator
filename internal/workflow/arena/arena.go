@@ -1,7 +1,6 @@
 package arena
 
 import (
-	"runtime"
 	"sync"
 )
 
@@ -109,7 +108,9 @@ func (a *Arena) AllocString(s string) string {
 	return string(mem[:len(s)])
 }
 
-// Reset resets the arena, allowing all memory to be reused
+// Reset resets the arena, allowing all memory to be reused.
+// Reset invalidates all previous allocations. Any byte slices obtained from
+// Alloc before Reset must not be used after calling Reset.
 func (a *Arena) Reset() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -132,9 +133,6 @@ func (a *Arena) Free() {
 	a.blocks = nil
 	a.currentBlock = 0
 	a.offset = 0
-
-	// Suggest garbage collection
-	runtime.GC()
 
 	// Reinitialize with a fresh block
 	initialBlock := make([]byte, a.blockSize)
@@ -275,6 +273,8 @@ func (p *StringPool) InternBatch(strs []string) []string {
 	}
 
 	result := make([]string, len(strs))
+	// Track which indices still need interning (avoids sentinel collision with "")
+	needsIntern := make([]bool, len(strs))
 
 	// First pass: try to intern strings without write locking
 	needWriteLock := false
@@ -316,7 +316,7 @@ func (p *StringPool) InternBatch(strs []string) []string {
 			p.statsMu.Lock()
 			p.stats.misses++
 			p.statsMu.Unlock()
-			result[i] = ""
+			needsIntern[i] = true
 			needWriteLock = true
 		}
 	}
@@ -331,7 +331,7 @@ func (p *StringPool) InternBatch(strs []string) []string {
 	defer p.mu.Unlock()
 
 	for i, s := range strs {
-		if result[i] == "" && s != "" {
+		if needsIntern[i] {
 			// Check again after acquiring write lock
 			if pooled, ok := p.pool[s]; ok {
 				result[i] = pooled

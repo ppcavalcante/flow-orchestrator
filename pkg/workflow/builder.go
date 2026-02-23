@@ -11,6 +11,7 @@ import (
 type NodeBuilder struct {
 	name         string
 	action       Action
+	actionErr    error // stores error if WithAction received an unsupported type
 	dependencies []string
 	retryCount   int
 	timeout      time.Duration
@@ -97,10 +98,11 @@ func (n *NodeBuilder) WithAction(action interface{}) *NodeBuilder {
 			return nil
 		})
 	default:
-		// Default handler if we can't recognize the type
-		// Here we create a no-op action that logs an error
+		// Record the error for Build() to report, and create a stub action
+		// so callers that test the action directly get a clear error message.
+		n.actionErr = fmt.Errorf("unsupported action type: %T", action)
 		n.action = ActionFunc(func(_ context.Context, _ *WorkflowData) error {
-			return fmt.Errorf("unsupported action type: %T", action)
+			return n.actionErr
 		})
 	}
 	return n
@@ -152,6 +154,9 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 
 	// Create real nodes from builders
 	for _, builder := range b.nodes {
+		if builder.actionErr != nil {
+			return nil, fmt.Errorf("node %s has invalid action: %w", builder.name, builder.actionErr)
+		}
 		if builder.action == nil {
 			return nil, fmt.Errorf("node %s has no action defined", builder.name)
 		}

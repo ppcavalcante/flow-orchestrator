@@ -71,9 +71,8 @@ func (w *Workflow) Execute(ctx context.Context) error {
 	if err := w.DAG.Execute(ctx, data); err != nil {
 		// Save failed state
 		if w.Store != nil {
-			saveErr := w.Store.Save(data)
-			if saveErr != nil {
-				fmt.Printf("Failed to save state: %v\n", saveErr)
+			if saveErr := w.Store.Save(data); saveErr != nil {
+				return fmt.Errorf("%w (additionally, failed to save state: %w)", err, saveErr)
 			}
 		}
 		return err
@@ -81,10 +80,8 @@ func (w *Workflow) Execute(ctx context.Context) error {
 
 	// Save final state
 	if w.Store != nil {
-		err := w.Store.Save(data)
-		if err != nil {
-			fmt.Printf("Failed to save state: %v\n", err)
-			return err
+		if err := w.Store.Save(data); err != nil {
+			return fmt.Errorf("failed to save state: %w", err)
 		}
 	}
 

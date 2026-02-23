@@ -99,6 +99,8 @@ func (si *StringInterner) InternBatch(strs []string) []string {
 	}
 
 	result := make([]string, len(strs))
+	// Track which indices still need interning (avoids sentinel collision with "")
+	needsIntern := make([]bool, len(strs))
 
 	// First pass: try to intern strings without write locking
 	needWriteLock := false
@@ -130,7 +132,7 @@ func (si *StringInterner) InternBatch(strs []string) []string {
 		} else {
 			// Mark for second pass with write lock
 			atomic.AddInt64(&si.stats.misses, 1)
-			result[i] = ""
+			needsIntern[i] = true
 			needWriteLock = true
 		}
 	}
@@ -145,7 +147,7 @@ func (si *StringInterner) InternBatch(strs []string) []string {
 	defer si.mu.Unlock()
 
 	for i, s := range strs {
-		if result[i] == "" && s != "" {
+		if needsIntern[i] {
 			// Check again after acquiring write lock
 			if interned, ok := si.cache[s]; ok {
 				result[i] = interned
@@ -220,7 +222,11 @@ func GlobalStringInterner() *StringInterner {
 	return globalStringInterner
 }
 
-// ConfigureGlobalStringInterner configures the global string interner
-func ConfigureGlobalStringInterner(_ int, _ time.Duration, _ float64) {
-	// Implementation details
+// ConfigureGlobalStringInterner replaces the global string interner with one
+// using the specified capacity. The refreshInterval and loadFactor parameters
+// are reserved for future use.
+func ConfigureGlobalStringInterner(capacity int, _ time.Duration, _ float64) {
+	if capacity > 0 {
+		globalStringInterner = NewStringInternerWithCapacity(capacity, 1024)
+	}
 }

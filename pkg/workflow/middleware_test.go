@@ -256,19 +256,19 @@ func TestValidationMiddleware(t *testing.T) {
 		return nil
 	})
 
-	// Create a validator function
+	// Create a validator function that checks pre-conditions (input data)
 	validatorCalled := false
 	validator := func(data *WorkflowData) error {
 		validatorCalled = true
 
-		// Check if the result is valid
-		result, ok := data.Get("result")
+		// Check if the required input is present
+		input, ok := data.Get("input")
 		if !ok {
-			return errors.New("result not found")
+			return errors.New("input not found")
 		}
 
-		if result != "test-result" {
-			return errors.New("invalid result")
+		if input != "valid-input" {
+			return errors.New("invalid input")
 		}
 
 		return nil
@@ -278,11 +278,12 @@ func TestValidationMiddleware(t *testing.T) {
 	middleware := ValidationMiddleware(validator)
 	wrappedAction := middleware(action)
 
-	// Execute the wrapped action
+	// Execute the wrapped action with valid input
 	data := NewWorkflowData("test")
+	data.Set("input", "valid-input")
 	err := wrappedAction.Execute(context.Background(), data)
 
-	// Check results
+	// Check results — validator passes, then action runs
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -293,7 +294,7 @@ func TestValidationMiddleware(t *testing.T) {
 		t.Error("Validator was not called")
 	}
 
-	// Test with a failing validator
+	// Test with a failing validator — action should NOT be called
 	failingValidator := func(data *WorkflowData) error {
 		return errors.New("validation error")
 	}
@@ -308,15 +309,15 @@ func TestValidationMiddleware(t *testing.T) {
 	data = NewWorkflowData("test")
 	err = wrappedAction.Execute(context.Background(), data)
 
-	// Check results
+	// Check results — validator fails, action should not run
 	if err == nil {
 		t.Error("Expected an error, got nil")
 	}
-	if !actionCalled {
-		t.Error("Action was not called")
+	if actionCalled {
+		t.Error("Action should not have been called when validation fails")
 	}
 
-	// Test with a failing action
+	// Test with a failing action but passing validator
 	failingAction := ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 		return errors.New("action error")
 	})
@@ -325,16 +326,17 @@ func TestValidationMiddleware(t *testing.T) {
 	middleware = ValidationMiddleware(validator)
 	wrappedAction = middleware(failingAction)
 
-	// Execute the wrapped action
+	// Execute with valid input — validator passes, action fails
 	data = NewWorkflowData("test")
+	data.Set("input", "valid-input")
 	err = wrappedAction.Execute(context.Background(), data)
 
 	// Check results
 	if err == nil {
 		t.Error("Expected an error, got nil")
 	}
-	if validatorCalled {
-		t.Error("Validator should not have been called when action fails")
+	if !validatorCalled {
+		t.Error("Validator should have been called before the action")
 	}
 }
 

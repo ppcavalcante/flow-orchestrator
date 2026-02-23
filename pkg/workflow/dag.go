@@ -76,7 +76,7 @@ func (d *DAG) GetNode(name string) (*Node, bool) {
 }
 
 // AddDependency creates a dependency between two nodes.
-// The fromNode will depend on the toNode, meaning toNode must complete before fromNode can start.
+// The toNode will depend on the fromNode, meaning fromNode must complete before toNode can start.
 // Returns an error if either node doesn't exist or if adding the dependency would create a cycle.
 func (d *DAG) AddDependency(fromNode, toNode string) error {
 	d.mu.Lock()
@@ -93,7 +93,7 @@ func (d *DAG) AddDependency(fromNode, toNode string) error {
 		return fmt.Errorf("node %s does not exist", toNode)
 	}
 
-	// Add dependency
+	// toNode depends on fromNode (fromNode must complete first)
 	to.DependsOn = append(to.DependsOn, from)
 	return nil
 }
@@ -101,8 +101,8 @@ func (d *DAG) AddDependency(fromNode, toNode string) error {
 // Validate checks the DAG for validity, including cycle detection.
 // Returns an error if the DAG is invalid.
 func (d *DAG) Validate() error {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	// Reset start and end nodes with capacity hints
 	nodesCount := len(d.Nodes)
@@ -137,27 +137,20 @@ func (d *DAG) Validate() error {
 		}
 	}
 
+	// Build set of nodes that are depended upon
+	hasDependents := make(map[string]bool, nodesCount)
+	for _, node := range d.Nodes {
+		for _, dep := range node.DependsOn {
+			hasDependents[dep.Name] = true
+		}
+	}
+
 	// Identify start and end nodes
 	for name, node := range d.Nodes {
 		if len(node.DependsOn) == 0 {
 			d.StartNodes = append(d.StartNodes, node)
 		}
-
-		// Check if this is an end node (no nodes depend on it)
-		isEndNode := true
-		for _, checkNode := range d.Nodes {
-			for _, dep := range checkNode.DependsOn {
-				if dep.Name == name {
-					isEndNode = false
-					break
-				}
-			}
-			if !isEndNode {
-				break
-			}
-		}
-
-		if isEndNode {
+		if !hasDependents[name] {
 			d.EndNodes = append(d.EndNodes, node)
 		}
 	}
@@ -188,7 +181,8 @@ func (d *DAG) detectCycle(nodeName string, visited, inProgress map[string]bool) 
 	return false
 }
 
-// GetLevels returns the nodes organized into levels for parallel execution
+// GetLevels returns the nodes organized into levels for parallel execution.
+// Uses O(V+E) algorithm with a reverse adjacency list.
 func (d *DAG) GetLevels() [][]*Node {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -197,40 +191,42 @@ func (d *DAG) GetLevels() [][]*Node {
 		return nil
 	}
 
-	// Create a map to track the level of each node
-	nodeLevels := make(map[string]int)
-	inDegree := make(map[string]int)
+	// Build reverse adjacency list: for each node, which nodes depend on it
+	dependents := make(map[string][]*Node, len(d.Nodes))
+	inDegree := make(map[string]int, len(d.Nodes))
+	nodeLevels := make(map[string]int, len(d.Nodes))
 	queue := make([]*Node, 0)
 
-	// Calculate in-degree for each node
+	// Initialize and build reverse edges
 	for _, node := range d.Nodes {
 		inDegree[node.Name] = len(node.DependsOn)
 		if len(node.DependsOn) == 0 {
 			queue = append(queue, node)
 			nodeLevels[node.Name] = 0
 		}
+		for _, dep := range node.DependsOn {
+			dependents[dep.Name] = append(dependents[dep.Name], node)
+		}
 	}
 
-	// Process nodes level by level
+	// Process nodes level by level using reverse adjacency list
 	maxLevel := 0
 	for len(queue) > 0 {
 		node := queue[0]
 		queue = queue[1:]
 
-		// Process nodes that depend on this node
-		for _, otherNode := range d.Nodes {
-			for _, depNode := range otherNode.DependsOn {
-				if depNode.Name == node.Name {
-					inDegree[otherNode.Name]--
-					if inDegree[otherNode.Name] == 0 {
-						level := nodeLevels[node.Name] + 1
-						nodeLevels[otherNode.Name] = level
-						if level > maxLevel {
-							maxLevel = level
-						}
-						queue = append(queue, otherNode)
-					}
+		// Process only nodes that depend on this node (O(out-degree))
+		for _, dependent := range dependents[node.Name] {
+			// Track max level from all parents
+			if candidateLevel := nodeLevels[node.Name] + 1; candidateLevel > nodeLevels[dependent.Name] {
+				nodeLevels[dependent.Name] = candidateLevel
+			}
+			inDegree[dependent.Name]--
+			if inDegree[dependent.Name] == 0 {
+				if nodeLevels[dependent.Name] > maxLevel {
+					maxLevel = nodeLevels[dependent.Name]
 				}
+				queue = append(queue, dependent)
 			}
 		}
 	}
@@ -251,7 +247,7 @@ func (d *DAG) GetLevels() [][]*Node {
 	return levels
 }
 
-// TopologicalSort returns the nodes sorted into levels for execution
+// TopologicalSort returns the nodes sorted in topological order for execution
 func (d *DAG) TopologicalSort() ([][]*Node, error) {
 	if err := d.Validate(); err != nil {
 		return nil, err
@@ -261,16 +257,19 @@ func (d *DAG) TopologicalSort() ([][]*Node, error) {
 		return make([][]*Node, 0), nil
 	}
 
-	// Create a map to track visited nodes and a queue for processing
-	inDegree := make(map[string]int)
+	// Build reverse adjacency list
+	dependents := make(map[string][]*Node, len(d.Nodes))
+	inDegree := make(map[string]int, len(d.Nodes))
 	queue := make([]*Node, 0)
 	sorted := make([]*Node, 0, len(d.Nodes))
 
-	// Calculate in-degree for each node
 	for _, node := range d.Nodes {
 		inDegree[node.Name] = len(node.DependsOn)
 		if len(node.DependsOn) == 0 {
 			queue = append(queue, node)
+		}
+		for _, dep := range node.DependsOn {
+			dependents[dep.Name] = append(dependents[dep.Name], node)
 		}
 	}
 
@@ -289,15 +288,11 @@ func (d *DAG) TopologicalSort() ([][]*Node, error) {
 		queue = append(queue[:minIdx], queue[minIdx+1:]...)
 		sorted = append(sorted, node)
 
-		// Process nodes that depend on this node
-		for _, otherNode := range d.Nodes {
-			for _, depNode := range otherNode.DependsOn {
-				if depNode.Name == node.Name {
-					inDegree[otherNode.Name]--
-					if inDegree[otherNode.Name] == 0 {
-						queue = append(queue, otherNode)
-					}
-				}
+		// Process dependents using reverse adjacency list
+		for _, dependent := range dependents[node.Name] {
+			inDegree[dependent.Name]--
+			if inDegree[dependent.Name] == 0 {
+				queue = append(queue, dependent)
 			}
 		}
 	}
@@ -309,12 +304,12 @@ func (d *DAG) TopologicalSort() ([][]*Node, error) {
 // Nodes are executed in topological order, with independent nodes potentially running in parallel.
 // Returns an error if execution fails.
 func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
-	// Validate the DAG first
+	// Validate the DAG (also computes StartNodes/EndNodes)
 	if err := d.Validate(); err != nil {
 		return err
 	}
 
-	// Get the levels for parallel execution
+	// Get the levels for parallel execution (uses already-validated DAG)
 	levels := d.GetLevels()
 
 	// Execute each level in sequence

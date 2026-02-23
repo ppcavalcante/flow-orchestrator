@@ -33,8 +33,13 @@ func NewParallelNodeExecutor(config ExecutionConfig) *ParallelNodeExecutor {
 	}
 }
 
-// ExecuteNodes executes multiple nodes in parallel
+// ExecuteNodes executes multiple nodes in parallel.
+// If any node fails, the context is cancelled to stop sibling goroutines.
 func (e *ParallelNodeExecutor) ExecuteNodes(ctx context.Context, nodes []*Node, data *WorkflowData) error {
+	// Create a cancellable context so we can stop siblings on first failure
+	execCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Create error channel and wait group
 	errChan := make(chan error, len(nodes))
 	var wg sync.WaitGroup
@@ -76,11 +81,12 @@ func (e *ParallelNodeExecutor) ExecuteNodes(ctx context.Context, nodes []*Node, 
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			// Execute the node
+			// Execute the node with the cancellable context
 			startTime := time.Now()
-			err := n.Execute(ctx, data)
+			err := n.Execute(execCtx, data)
 
 			if err != nil {
+				cancel()
 				errChan <- fmt.Errorf("node %s failed after %v: %w", n.Name, time.Since(startTime), err)
 			}
 		}(node)
@@ -100,11 +106,19 @@ func (e *ParallelNodeExecutor) ExecuteNodes(ctx context.Context, nodes []*Node, 
 	return nil
 }
 
-// ExecuteNodesInLevel executes all nodes in a level in parallel
+// ExecuteNodesInLevel executes all nodes in a level in parallel.
+// If any node fails, the context is cancelled to stop sibling goroutines.
 func ExecuteNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData) error {
+	// Create a cancellable context so we can stop siblings on first failure
+	levelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Create error channel and wait group
 	errChan := make(chan error, len(level))
 	var wg sync.WaitGroup
+
+	// Semaphore to limit concurrency (default 16)
+	semaphore := make(chan struct{}, 16)
 
 	// Execute each node in this level in parallel
 	for _, node := range level {
@@ -132,11 +146,17 @@ func ExecuteNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData)
 		go func(n *Node) {
 			defer wg.Done()
 
-			// Execute the node
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			// Execute the node with the cancellable context
 			startTime := time.Now()
-			err := n.Execute(ctx, data)
+			err := n.Execute(levelCtx, data)
 
 			if err != nil {
+				// Cancel sibling goroutines on failure
+				cancel()
 				errChan <- fmt.Errorf("node %s failed after %v: %w", n.Name, time.Since(startTime), err)
 			}
 		}(node)

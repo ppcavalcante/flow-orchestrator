@@ -218,9 +218,6 @@ func (r *RetryableAction) Execute(ctx context.Context, data *WorkflowData) error
 			break
 		}
 
-		// Log retry (in real implementation, you'd want better logging)
-		fmt.Printf("Attempt %d failed: %v. Retrying...\n", attempt+1, err)
-
 		// Wait before retry with exponential backoff
 		backoffMultiplier := math.Pow(r.backoff, float64(attempt))
 		delay := time.Duration(float64(r.delay) * backoffMultiplier)

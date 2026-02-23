@@ -64,9 +64,10 @@ func (m *MetricsCollector) WithSamplingRate(rate float64) *MetricsCollector {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	config := m.collector.GetConfig()
-	config.SamplingRate = rate
-	m.collector.UpdateConfig(config)
+	oldConfig := m.collector.GetConfig()
+	newConfig := *oldConfig
+	newConfig.SamplingRate = rate
+	m.collector.UpdateConfig(&newConfig)
 
 	return m
 }
@@ -76,9 +77,10 @@ func (m *MetricsCollector) Enable() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	config := m.collector.GetConfig()
-	config.Enabled = true
-	m.collector.UpdateConfig(config)
+	oldConfig := m.collector.GetConfig()
+	newConfig := *oldConfig
+	newConfig.Enabled = true
+	m.collector.UpdateConfig(&newConfig)
 }
 
 // Disable disables metrics collection
@@ -86,9 +88,10 @@ func (m *MetricsCollector) Disable() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	config := m.collector.GetConfig()
-	config.Enabled = false
-	m.collector.UpdateConfig(config)
+	oldConfig := m.collector.GetConfig()
+	newConfig := *oldConfig
+	newConfig.Enabled = false
+	m.collector.UpdateConfig(&newConfig)
 }
 
 // IsEnabled returns whether metrics collection is enabled

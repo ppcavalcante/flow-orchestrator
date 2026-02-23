@@ -3,3 +3,11 @@ benchmark_profiles/*
 notes
 flm.sh
 docs/gw.md
+
+# Compiled example binaries
+api_workflow
+comprehensive
+dag_patterns
+error_handling
+integration_check
+new_simple

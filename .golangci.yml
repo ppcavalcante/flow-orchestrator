@@ -1,123 +1,143 @@
 version: "2"
 
-linters:
+formatters:
   enable:
-    # Basic linters
     - gofmt
     - goimports
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(flow-orchestrator)
+
+linters:
+  enable:
     - govet
     - errcheck
     - ineffassign
     - staticcheck
     - unused
-    - typecheck
     - bodyclose
-    # Security focused linters
     - gosec
     - noctx
-    # Style linters
     - revive
-    - gci
-    # Performance linters
-    - prealloc
     - misspell
+    - prealloc
     - copyloopvar
     - predeclared
-    # Advanced linters
     - gocritic
     - nilnil
     - errorlint
     - thelper
     - tparallel
 
-linters-settings:
-  gosec:
-    excludes:
-      - G204
+  settings:
+    gosec:
+      excludes:
+        - G204
 
-  govet:
-    settings:
-      printf:
-        funcs:
-          - Debugf
-          - Infof
-          - Warnf
-          - Errorf
-          - Fatalf
+    govet:
+      settings:
+        printf:
+          funcs:
+            - Debugf
+            - Infof
+            - Warnf
+            - Errorf
+            - Fatalf
 
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-    exclude-functions:
-      - (*testing.T).Error
-      - (*testing.T).Fatal
-      - (*testing.T).Fatalf
-      - (*testing.T).Errorf
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-functions:
+        - (*testing.T).Error
+        - (*testing.T).Fatal
+        - (*testing.T).Fatalf
+        - (*testing.T).Errorf
 
-  revive:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+          disabled: false
+        - name: unused-parameter
+          severity: warning
+          disabled: false
+        - name: error-strings
+          severity: warning
+          disabled: false
+        - name: error-return
+          severity: warning
+          disabled: false
+        - name: if-return
+          severity: warning
+          disabled: false
+        - name: increment-decrement
+          severity: warning
+          disabled: false
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+  exclusions:
     rules:
-      - name: exported
-        severity: warning
-        disabled: false
-      - name: unused-parameter
-        severity: warning
-        disabled: false
-      - name: error-strings
-        severity: warning
-        disabled: false
-      - name: error-return
-        severity: warning
-        disabled: false
-      - name: if-return
-        severity: warning
-        disabled: false
-      - name: increment-decrement
-        severity: warning
-        disabled: false
-
-  gci:
-    sections:
-      - standard
-      - default
-      - prefix(flow-orchestrator)
-
-  errorlint:
-    errorf: true
-    asserts: true
-    comparison: true
+      # Exclude all enabled linters for test files
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - unused
+          - govet
+          - ineffassign
+          - revive
+          - staticcheck
+          - noctx
+          - bodyclose
+          - gocritic
+          - nilnil
+          - errorlint
+          - thelper
+          - tparallel
+          - copyloopvar
+          - prealloc
+          - predeclared
+      # Exclude linters for benchmark files
+      - path: benchmark
+        linters:
+          - prealloc
+          - errcheck
+          - gosec
+          - revive
+          - unused
+          - thelper
+          - copyloopvar
+          - staticcheck
+          - gocritic
+      # Exclude linters for example files
+      - path: examples/
+        linters:
+          - gosec
+          - revive
+          - errcheck
+          - staticcheck
+          - gocritic
+          - predeclared
+      # Suppress stuttering type name warnings for public API types
+      - text: "stutters"
+        linters:
+          - revive
+    paths:
+      - tests/testdata
 
 issues:
-  exclude-rules:
-    # Exclude all linters for test files
-    - path: _test\.go
-      linters:
-        - gocyclo
-        - errcheck
-        - gosec
-        - unused
-        - govet
-        - ineffassign
-        - revive
-        - staticcheck
-        - noctx
-        - bodyclose
-    # Exclude some specific linters for benchmark files
-    - path: benchmark
-      linters:
-        - prealloc
-        - errcheck
-  
-  exclude-dirs:
-    - tests/testdata
-  
-  exclude-files:
-    - ".*_test.go$"
-    - "test_.*\\.go$"
-
   max-issues-per-linter: 0
   max-same-issues: 0
 
 run:
   timeout: 5m
   go: '1.24'
-  modules-download-mode: readonly

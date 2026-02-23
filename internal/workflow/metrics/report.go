@@ -81,14 +81,14 @@ func formatOperationStats(sb *strings.Builder, ops []OperationType, allStats map
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("%s:\n", op))
-		sb.WriteString(fmt.Sprintf("  Count: %d\n", stats.Count))
+		fmt.Fprintf(sb, "%s:\n", op)
+		fmt.Fprintf(sb, "  Count: %d\n", stats.Count)
 		if stats.Count > 0 {
-			sb.WriteString(fmt.Sprintf("  Min Time: %s\n", FormatDuration(stats.MinTimeNs)))
-			sb.WriteString(fmt.Sprintf("  Max Time: %s\n", FormatDuration(stats.MaxTimeNs)))
-			sb.WriteString(fmt.Sprintf("  Avg Time: %s\n", FormatDuration(stats.AvgTimeNs)))
+			fmt.Fprintf(sb, "  Min Time: %s\n", FormatDuration(stats.MinTimeNs))
+			fmt.Fprintf(sb, "  Max Time: %s\n", FormatDuration(stats.MaxTimeNs))
+			fmt.Fprintf(sb, "  Avg Time: %s\n", FormatDuration(stats.AvgTimeNs))
 		}
-		sb.WriteString(fmt.Sprintf("  Active: %d\n", stats.Active))
+		fmt.Fprintf(sb, "  Active: %d\n", stats.Active)
 	}
 }
 
@@ -117,10 +117,10 @@ func identifyHotspots(sb *strings.Builder, stats map[OperationType]OperationStat
 		count := minInt(5, len(sortedStats))
 		for i := 0; i < count; i++ {
 			op := sortedStats[i]
-			sb.WriteString(fmt.Sprintf("  %s: %s (%d calls)\n",
+			fmt.Fprintf(sb, "  %s: %s (%d calls)\n",
 				op.op,
 				FormatDuration(op.stats.TotalTimeNs),
-				op.stats.Count))
+				op.stats.Count)
 		}
 	}
 
@@ -135,9 +135,9 @@ func identifyHotspots(sb *strings.Builder, stats map[OperationType]OperationStat
 		count := minInt(5, len(sortedStats))
 		for i := 0; i < count; i++ {
 			op := sortedStats[i]
-			sb.WriteString(fmt.Sprintf("  %s: %s/call\n",
+			fmt.Fprintf(sb, "  %s: %s/call\n",
 				op.op,
-				FormatDuration(op.stats.AvgTimeNs)))
+				FormatDuration(op.stats.AvgTimeNs))
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -182,11 +183,11 @@ func (s *JSONFileStore) Delete(workflowID string) error {
 // The original JSON files are left intact unless cleanupJSON is set to true.
 func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStore, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	// Create a new FlatBuffersStore with the same base directory
 	fbStore, err := NewFlatBuffersStore(s.baseDir)
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, fmt.Errorf("failed to create FlatBuffers store: %w", err)
 	}
 
@@ -194,33 +195,52 @@ func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStor
 	pattern := filepath.Join(s.baseDir, "*.json")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, fmt.Errorf("failed to list JSON files: %w", err)
 	}
 
-	// Convert each file
+	// Collect paths to delete and convert each file
+	var toDelete []string
 	for _, jsonPath := range matches {
 		// Extract workflow ID from filename
 		filename := filepath.Base(jsonPath)
 		workflowID := filename[:len(filename)-5] // Remove ".json"
 
-		// Load the workflow data from JSON
-		data, err := s.Load(workflowID)
+		// Load the workflow data from JSON (note: Load also takes RLock, so
+		// we need to read the file directly here to avoid double-locking)
+		filePath := filepath.Join(s.baseDir, workflowID+".json")
+		// nolint:gosec // This is an internal function with controlled file paths
+		jsonData, err := os.ReadFile(filePath)
 		if err != nil {
+			s.mu.RUnlock()
+			return nil, fmt.Errorf("failed to read workflow %s: %w", workflowID, err)
+		}
+
+		data := NewWorkflowData(workflowID)
+		if err := data.LoadSnapshot(jsonData); err != nil {
+			s.mu.RUnlock()
 			return nil, fmt.Errorf("failed to load workflow %s: %w", workflowID, err)
 		}
 
 		// Save it in FlatBuffers format
 		err = fbStore.Save(data)
 		if err != nil {
+			s.mu.RUnlock()
 			return nil, fmt.Errorf("failed to save workflow %s in FlatBuffers format: %w", workflowID, err)
 		}
 
-		// Optionally remove the JSON file
 		if cleanupJSON {
-			err = os.Remove(jsonPath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to cleanup JSON file %s: %w", jsonPath, err)
-			}
+			toDelete = append(toDelete, jsonPath)
+		}
+	}
+
+	// Release the read lock before deleting files
+	s.mu.RUnlock()
+
+	// Delete JSON files outside the lock
+	for _, jsonPath := range toDelete {
+		if err := os.Remove(jsonPath); err != nil {
+			return nil, fmt.Errorf("failed to cleanup JSON file %s: %w", jsonPath, err)
 		}
 	}
 
@@ -270,15 +290,80 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	// Create the workflow ID string
 	fbWorkflowID := builder.CreateString(workflowID)
 
-	// Create string data vector
+	// Create typed data vectors — use appropriate typed vector for each value type
 	stringDataOffsets := make([]flatbuffers.UOffsetT, 0)
+	intDataOffsets := make([]flatbuffers.UOffsetT, 0)
+	boolDataOffsets := make([]flatbuffers.UOffsetT, 0)
+	doubleDataOffsets := make([]flatbuffers.UOffsetT, 0)
+
 	data.ForEach(func(k string, value interface{}) {
-		if v, ok := value.(string); ok {
-			// Create key and value strings
+		switch v := value.(type) {
+		case int:
+			fbKey := builder.CreateString(k)
+			fb.KeyValueIntStart(builder)
+			fb.KeyValueIntAddKey(builder, fbKey)
+			if v > math.MaxInt32 {
+				fb.KeyValueIntAddValue(builder, math.MaxInt32)
+			} else if v < math.MinInt32 {
+				fb.KeyValueIntAddValue(builder, math.MinInt32)
+			} else {
+				fb.KeyValueIntAddValue(builder, int32(v)) //nolint:gosec // bounds checked above
+			}
+			intDataOffsets = append(intDataOffsets, fb.KeyValueIntEnd(builder))
+		case int32:
+			fbKey := builder.CreateString(k)
+			fb.KeyValueIntStart(builder)
+			fb.KeyValueIntAddKey(builder, fbKey)
+			fb.KeyValueIntAddValue(builder, v)
+			intDataOffsets = append(intDataOffsets, fb.KeyValueIntEnd(builder))
+		case int64:
+			fbKey := builder.CreateString(k)
+			fb.KeyValueIntStart(builder)
+			fb.KeyValueIntAddKey(builder, fbKey)
+			if v > math.MaxInt32 {
+				fb.KeyValueIntAddValue(builder, math.MaxInt32)
+			} else if v < math.MinInt32 {
+				fb.KeyValueIntAddValue(builder, math.MinInt32)
+			} else {
+				fb.KeyValueIntAddValue(builder, int32(v)) //nolint:gosec // bounds checked above
+			}
+			intDataOffsets = append(intDataOffsets, fb.KeyValueIntEnd(builder))
+		case bool:
+			fbKey := builder.CreateString(k)
+			fb.KeyValueBoolStart(builder)
+			fb.KeyValueBoolAddKey(builder, fbKey)
+			fb.KeyValueBoolAddValue(builder, v)
+			boolDataOffsets = append(boolDataOffsets, fb.KeyValueBoolEnd(builder))
+		case float64:
+			fbKey := builder.CreateString(k)
+			fb.KeyValueDoubleStart(builder)
+			fb.KeyValueDoubleAddKey(builder, fbKey)
+			fb.KeyValueDoubleAddValue(builder, v)
+			doubleDataOffsets = append(doubleDataOffsets, fb.KeyValueDoubleEnd(builder))
+		case float32:
+			fbKey := builder.CreateString(k)
+			fb.KeyValueDoubleStart(builder)
+			fb.KeyValueDoubleAddKey(builder, fbKey)
+			fb.KeyValueDoubleAddValue(builder, float64(v))
+			doubleDataOffsets = append(doubleDataOffsets, fb.KeyValueDoubleEnd(builder))
+		case string:
 			fbKey := builder.CreateString(k)
 			fbValue := builder.CreateString(v)
-
-			// Create KeyValueString table
+			fb.KeyValueStringStart(builder)
+			fb.KeyValueStringAddKey(builder, fbKey)
+			fb.KeyValueStringAddValue(builder, fbValue)
+			stringDataOffsets = append(stringDataOffsets, fb.KeyValueStringEnd(builder))
+		default:
+			// Complex types: fall back to JSON string
+			jsonBytes, err := json.Marshal(v)
+			var strValue string
+			if err != nil {
+				strValue = fmt.Sprintf("%v", v)
+			} else {
+				strValue = string(jsonBytes)
+			}
+			fbKey := builder.CreateString(k)
+			fbValue := builder.CreateString(strValue)
 			fb.KeyValueStringStart(builder)
 			fb.KeyValueStringAddKey(builder, fbKey)
 			fb.KeyValueStringAddValue(builder, fbValue)
@@ -294,6 +379,36 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 			builder.PrependUOffsetT(stringDataOffsets[i])
 		}
 		stringDataVector = builder.EndVector(len(stringDataOffsets))
+	}
+
+	// Create IntData vector
+	var intDataVector flatbuffers.UOffsetT
+	if len(intDataOffsets) > 0 {
+		fb.WorkflowStateStartIntDataVector(builder, len(intDataOffsets))
+		for i := len(intDataOffsets) - 1; i >= 0; i-- {
+			builder.PrependUOffsetT(intDataOffsets[i])
+		}
+		intDataVector = builder.EndVector(len(intDataOffsets))
+	}
+
+	// Create BoolData vector
+	var boolDataVector flatbuffers.UOffsetT
+	if len(boolDataOffsets) > 0 {
+		fb.WorkflowStateStartBoolDataVector(builder, len(boolDataOffsets))
+		for i := len(boolDataOffsets) - 1; i >= 0; i-- {
+			builder.PrependUOffsetT(boolDataOffsets[i])
+		}
+		boolDataVector = builder.EndVector(len(boolDataOffsets))
+	}
+
+	// Create DoubleData vector
+	var doubleDataVector flatbuffers.UOffsetT
+	if len(doubleDataOffsets) > 0 {
+		fb.WorkflowStateStartDoubleDataVector(builder, len(doubleDataOffsets))
+		for i := len(doubleDataOffsets) - 1; i >= 0; i-- {
+			builder.PrependUOffsetT(doubleDataOffsets[i])
+		}
+		doubleDataVector = builder.EndVector(len(doubleDataOffsets))
 	}
 
 	// Create node status vector
@@ -364,6 +479,18 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 		fb.WorkflowStateAddStringData(builder, stringDataVector)
 	}
 
+	if len(intDataOffsets) > 0 {
+		fb.WorkflowStateAddIntData(builder, intDataVector)
+	}
+
+	if len(boolDataOffsets) > 0 {
+		fb.WorkflowStateAddBoolData(builder, boolDataVector)
+	}
+
+	if len(doubleDataOffsets) > 0 {
+		fb.WorkflowStateAddDoubleData(builder, doubleDataVector)
+	}
+
 	if len(nodeStatusOffsets) > 0 {
 		fb.WorkflowStateAddNodeStatuses(builder, statusesVector)
 	}
@@ -415,7 +542,31 @@ func (s *FlatBuffersStore) Load(workflowID string) (*WorkflowData, error) {
 	// Create new workflow data
 	data := NewWorkflowData(workflowID)
 
-	// Load string data
+	// Load int data
+	for i := 0; i < fbState.IntDataLength(); i++ {
+		var kv fb.KeyValueInt
+		if fbState.IntData(&kv, i) {
+			data.Set(string(kv.Key()), int(kv.Value()))
+		}
+	}
+
+	// Load bool data
+	for i := 0; i < fbState.BoolDataLength(); i++ {
+		var kv fb.KeyValueBool
+		if fbState.BoolData(&kv, i) {
+			data.Set(string(kv.Key()), kv.Value())
+		}
+	}
+
+	// Load double data
+	for i := 0; i < fbState.DoubleDataLength(); i++ {
+		var kv fb.KeyValueDouble
+		if fbState.DoubleData(&kv, i) {
+			data.Set(string(kv.Key()), kv.Value())
+		}
+	}
+
+	// Load string data (fallback for strings and complex JSON-serialized types)
 	for i := 0; i < fbState.StringDataLength(); i++ {
 		var kv fb.KeyValueString
 		if fbState.StringData(&kv, i) {

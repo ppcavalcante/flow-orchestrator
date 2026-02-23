@@ -3,23 +3,13 @@
 package utils
 
 import (
-	"crypto/rand"
-	"encoding/binary"
-	"math"
+	internalutils "github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
 )
 
 // SecureRandomFloat64 returns a cryptographically secure random float64 in the range [0.0, 1.0).
+// It delegates to the internal implementation which supports test mocking.
 func SecureRandomFloat64() float64 {
-	var buf [8]byte
-	_, err := rand.Read(buf[:])
-	if err != nil {
-		// Fall back to a deterministic value if crypto/rand fails
-		return 0.5
-	}
-
-	// Convert to uint64 and then to float64 in [0, 1)
-	val := binary.BigEndian.Uint64(buf[:])
-	return float64(val) / float64(math.MaxUint64)
+	return internalutils.SecureRandomFloat64()
 }
 
 // StringIntern is a simple string interning function.

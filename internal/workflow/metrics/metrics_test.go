@@ -13,7 +13,7 @@ func TestNewMetricsCollector(t *testing.T) {
 		t.Fatal("NewMetricsCollector returned nil")
 	}
 
-	if collector.config == nil {
+	if collector.config.Load() == nil {
 		t.Error("MetricsCollector should have a non-nil config")
 	}
 
@@ -55,7 +55,7 @@ func TestNewMetricsCollector(t *testing.T) {
 func TestNewMetricsCollectorWithConfig(t *testing.T) {
 	// Test with nil config
 	collector := NewMetricsCollectorWithConfig(nil)
-	if collector.config == nil {
+	if collector.config.Load() == nil {
 		t.Error("MetricsCollector should have a non-nil config even when nil is passed")
 	}
 
@@ -71,7 +71,7 @@ func TestNewMetricsCollectorWithConfig(t *testing.T) {
 	}
 
 	collector = NewMetricsCollectorWithConfig(customConfig)
-	if collector.config != customConfig {
+	if collector.config.Load() != customConfig {
 		t.Error("MetricsCollector should use the provided config")
 	}
 
@@ -151,7 +151,7 @@ func TestUpdateConfigComprehensive(t *testing.T) {
 
 	// Test updating with nil config (should not change anything)
 	collector.UpdateConfig(nil)
-	if collector.config != initialConfig {
+	if collector.config.Load() != initialConfig {
 		t.Error("Updating with nil config should not change the config")
 	}
 
@@ -160,12 +160,12 @@ func TestUpdateConfigComprehensive(t *testing.T) {
 	collector.UpdateConfig(disabledConfig)
 
 	// Check that config was updated
-	if collector.config.Enabled {
+	if collector.config.Load().Enabled {
 		t.Error("Config should be disabled after update")
 	}
-	if collector.config.SamplingRate != disabledConfig.SamplingRate {
+	if collector.config.Load().SamplingRate != disabledConfig.SamplingRate {
 		t.Errorf("SamplingRate not updated correctly, got %f, expected %f",
-			collector.config.SamplingRate, disabledConfig.SamplingRate)
+			collector.config.Load().SamplingRate, disabledConfig.SamplingRate)
 	}
 
 	// Test updating with production config
@@ -173,18 +173,18 @@ func TestUpdateConfigComprehensive(t *testing.T) {
 	collector.UpdateConfig(prodConfig)
 
 	// Check that config was updated
-	if !collector.config.Enabled {
+	if !collector.config.Load().Enabled {
 		t.Error("Config should be enabled after update to production config")
 	}
-	if !collector.config.EnableOperationTiming {
+	if !collector.config.Load().EnableOperationTiming {
 		t.Error("EnableOperationTiming should be true in production config")
 	}
-	if !collector.config.EnableLockContention {
+	if !collector.config.Load().EnableLockContention {
 		t.Error("EnableLockContention should be true in production config")
 	}
-	if collector.config.SamplingRate != prodConfig.SamplingRate {
+	if collector.config.Load().SamplingRate != prodConfig.SamplingRate {
 		t.Errorf("SamplingRate not updated correctly, got %f, expected %f",
-			collector.config.SamplingRate, prodConfig.SamplingRate)
+			collector.config.Load().SamplingRate, prodConfig.SamplingRate)
 	}
 }
 
@@ -375,7 +375,7 @@ func TestRecordOperationTiming(t *testing.T) {
 	collector.UpdateConfig(config)
 
 	// Verify the configuration is properly set
-	if !collector.config.ShouldCollectOperationTiming() {
+	if !collector.config.Load().ShouldCollectOperationTiming() {
 		t.Fatal("Operation timing collection should be enabled")
 	}
 
@@ -439,7 +439,7 @@ func TestRecordLockContention(t *testing.T) {
 	collector.UpdateConfig(config)
 
 	// Verify the configuration is properly set
-	if !collector.config.ShouldCollectLockContention() {
+	if !collector.config.Load().ShouldCollectLockContention() {
 		t.Fatal("Lock contention collection should be enabled")
 	}
 
@@ -500,7 +500,7 @@ func TestGetOperationStats(t *testing.T) {
 	collector.UpdateConfig(config)
 
 	// Verify the configuration is properly set
-	if !collector.config.ShouldCollectOperationTiming() {
+	if !collector.config.Load().ShouldCollectOperationTiming() {
 		t.Fatal("Operation timing collection should be enabled")
 	}
 
@@ -551,7 +551,7 @@ func TestGetLockContentionStats(t *testing.T) {
 	collector.UpdateConfig(config)
 
 	// Verify the configuration is properly set
-	if !collector.config.ShouldCollectLockContention() {
+	if !collector.config.Load().ShouldCollectLockContention() {
 		t.Fatal("Lock contention collection should be enabled")
 	}
 
@@ -597,7 +597,7 @@ func TestGetAllOperationStats(t *testing.T) {
 	collector.UpdateConfig(config)
 
 	// Verify the configuration is properly set
-	if !collector.config.ShouldCollectOperationTiming() {
+	if !collector.config.Load().ShouldCollectOperationTiming() {
 		t.Fatal("Operation timing collection should be enabled")
 	}
 

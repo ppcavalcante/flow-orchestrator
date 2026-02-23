@@ -67,7 +67,12 @@ func LoggingMiddleware() Middleware {
 }
 
 // TimeoutMiddleware creates middleware that adds a timeout to actions.
-// If the action doesn't complete within the timeout, it is cancelled.
+// If the action doesn't complete within the timeout, the context is cancelled
+// and the middleware waits for the goroutine to finish before returning.
+//
+// Actions used with TimeoutMiddleware MUST respect context cancellation.
+// If an action ignores ctx.Done(), the middleware will block indefinitely
+// waiting for it to return.
 func TimeoutMiddleware(timeout time.Duration) Middleware {
 	return func(next Action) Action {
 		return ActionFunc(func(ctx context.Context, data *WorkflowData) error {
@@ -78,7 +83,8 @@ func TimeoutMiddleware(timeout time.Duration) Middleware {
 			// Use channels to handle timeout
 			resultChan := make(chan error, 1)
 
-			// Execute in a goroutine
+			// Execute in a goroutine — the action receives timeoutCtx
+			// so it can detect cancellation and exit promptly.
 			go func() {
 				resultChan <- next.Execute(timeoutCtx, data)
 			}()
@@ -88,10 +94,15 @@ func TimeoutMiddleware(timeout time.Duration) Middleware {
 			case err := <-resultChan:
 				return err
 			case <-timeoutCtx.Done():
-				if ctx.Err() == context.DeadlineExceeded {
-					return fmt.Errorf("action timed out after %v: %w", timeout, ctx.Err())
+				// Context expired. Wait for the goroutine to finish so it
+				// doesn't keep mutating shared WorkflowData after we return.
+				err := <-resultChan
+				// If the action returned a real error, prefer reporting the timeout.
+				if timeoutCtx.Err() == context.DeadlineExceeded {
+					_ = err
+					return fmt.Errorf("action timed out after %v: %w", timeout, context.DeadlineExceeded)
 				}
-				return ctx.Err()
+				return timeoutCtx.Err()
 			}
 		})
 	}
@@ -110,24 +121,25 @@ func RetryMiddleware(maxRetries int, backoff time.Duration) Middleware {
 					// log.Printf("Attempt %d failed: %v", attempt, lastErr)
 
 					// Apply backoff with some jitter
-					var jitterBytes [4]byte
-					if _, err := rand.Read(jitterBytes[:]); err != nil {
-						// If we can't get random bytes, just use a simple calculation
-						jitterInt := int64(attempt * 7919) // Use a prime number
-						jitter := time.Duration(jitterInt % (int64(backoff) / 4))
-						select {
-						case <-time.After(backoff + jitter):
-						case <-ctx.Done():
-							return fmt.Errorf("retry aborted: %w", ctx.Err())
+					jitterRange := int64(backoff) / 4
+					var jitter time.Duration
+					if jitterRange > 0 {
+						var jitterBytes [4]byte
+						if _, err := rand.Read(jitterBytes[:]); err != nil {
+							jitterInt := int64(attempt * 7919)
+							jitter = time.Duration(jitterInt % jitterRange)
+						} else {
+							jitterInt := int64(jitterBytes[0]) | int64(jitterBytes[1])<<8 | int64(jitterBytes[2])<<16 | int64(jitterBytes[3])<<24
+							if jitterInt < 0 {
+								jitterInt = -jitterInt
+							}
+							jitter = time.Duration(jitterInt % jitterRange)
 						}
-					} else {
-						jitterInt := int64(jitterBytes[0]) | int64(jitterBytes[1])<<8 | int64(jitterBytes[2])<<16 | int64(jitterBytes[3])<<24
-						jitter := time.Duration(jitterInt % (int64(backoff) / 4))
-						select {
-						case <-time.After(backoff + jitter):
-						case <-ctx.Done():
-							return fmt.Errorf("retry aborted: %w", ctx.Err())
-						}
+					}
+					select {
+					case <-time.After(backoff + jitter):
+					case <-ctx.Done():
+						return fmt.Errorf("retry aborted: %w", ctx.Err())
 					}
 				}
 
@@ -209,23 +221,18 @@ func MetricsMiddleware() Middleware {
 	}
 }
 
-// ValidationMiddleware creates middleware that validates workflow data.
-// It runs the validator function before executing the action.
+// ValidationMiddleware creates middleware that validates workflow data before executing the action.
+// If validation fails, the action is not executed.
 func ValidationMiddleware(validator func(*WorkflowData) error) Middleware {
 	return func(next Action) Action {
 		return ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			// Execute the wrapped action
-			err := next.Execute(ctx, data)
-			if err != nil {
-				return err
-			}
-
-			// Validate the result
+			// Validate before executing
 			if err := validator(data); err != nil {
 				return fmt.Errorf("validation failed: %w", err)
 			}
 
-			return nil
+			// Execute the wrapped action
+			return next.Execute(ctx, data)
 		})
 	}
 }

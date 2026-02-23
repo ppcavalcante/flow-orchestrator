@@ -154,12 +154,16 @@ func (m *ReadMap) Clear() {
 	m.value.Store(newData)
 }
 
-// Snapshot returns a snapshot of the map for atomic operations
-// This allows you to perform multiple reads from the same state
+// Snapshot returns a copy of the map for atomic operations.
+// This allows you to perform multiple reads from the same consistent state.
 func (m *ReadMap) Snapshot() map[string]interface{} {
-	// Simply return the current data (which is already a snapshot)
 	currentData := m.value.Load()
-	return currentData.data
+	// Return a copy to prevent callers from mutating the internal map
+	result := make(map[string]interface{}, len(currentData.data))
+	for k, v := range currentData.data {
+		result[k] = v
+	}
+	return result
 }
 
 // ForEach executes a function for each item in the map

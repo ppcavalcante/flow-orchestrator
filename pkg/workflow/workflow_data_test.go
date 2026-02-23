@@ -61,26 +61,34 @@ func TestWorkflowData(t *testing.T) {
 	t.Run("NodeRunnable", func(t *testing.T) {
 		data := NewWorkflowData("test")
 
-		// Test when node doesn't exist
+		// Test when node doesn't exist (no status set) — should be runnable
 		require.True(t, data.IsNodeRunnable("nonexistent"))
 
-		// Test when node exists but has no dependencies
+		// Test when node is completed — should not be runnable
 		data.SetNodeStatus("node1", Completed)
 		require.False(t, data.IsNodeRunnable("node1"))
 
-		// Test when node has completed dependencies
-		data.SetNodeStatus("dep1", Completed)
-		data.SetNodeStatus("dep2", Completed)
+		// Test when node is running — should not be runnable
+		data.SetNodeStatus("node1b", Running)
+		require.False(t, data.IsNodeRunnable("node1b"))
+
+		// Test when node is pending — should be runnable (status-only check)
 		data.SetNodeStatus("node2", Pending)
-		data.SetNodeStatus("node2:depends:dep1", Pending)
-		data.SetNodeStatus("node2:depends:dep2", Pending)
 		require.True(t, data.IsNodeRunnable("node2"))
 
-		// Test when node has incomplete dependencies
-		data.SetNodeStatus("dep3", Running)
+		// Test IsNodeRunnableWithDeps with completed dependencies
+		data.SetNodeStatus("dep1", Completed)
+		data.SetNodeStatus("dep2", Completed)
 		data.SetNodeStatus("node3", Pending)
-		data.SetNodeStatus("node3:depends:dep3", Pending)
-		require.False(t, data.IsNodeRunnable("node3"))
+		require.True(t, data.IsNodeRunnableWithDeps("node3", []string{"dep1", "dep2"}))
+
+		// Test IsNodeRunnableWithDeps with incomplete dependencies
+		data.SetNodeStatus("dep3", Running)
+		data.SetNodeStatus("node4", Pending)
+		require.False(t, data.IsNodeRunnableWithDeps("node4", []string{"dep3"}))
+
+		// Test IsNodeRunnableWithDeps when node itself is already completed
+		require.False(t, data.IsNodeRunnableWithDeps("node1", []string{}))
 	})
 
 	t.Run("GettersAndStats", func(t *testing.T) {
@@ -185,7 +193,7 @@ func TestWorkflowData(t *testing.T) {
 
 		val, exists = newData.Get("int1")
 		require.True(t, exists)
-		require.Equal(t, 42, val)
+		require.Equal(t, int64(42), val)
 
 		status, exists := newData.GetNodeStatus("node1")
 		require.True(t, exists)

@@ -65,7 +65,6 @@ func (s *testStore) Save(_ *workflow.WorkflowData) error {
 func (s *testStore) Load(id string) (*workflow.WorkflowData, error) {
 	// For benchmarking, just return a dummy workflow data
 	data := workflow.NewWorkflowData(id)
-	time.Sleep(1 * time.Microsecond)
 	return data, nil
 }
 

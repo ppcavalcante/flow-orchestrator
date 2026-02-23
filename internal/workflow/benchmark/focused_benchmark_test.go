@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena"
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // BenchmarkFocusedStringInterning tests string interning performance

@@ -3,6 +3,8 @@ package metrics
 import (
 	"sync"
 	"time"
+
+	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
 )
 
 // InstrumentedRWMutex is a wrapper around sync.RWMutex that tracks lock contention
@@ -12,84 +14,95 @@ type InstrumentedRWMutex struct {
 	config *MetricsConfig
 }
 
+// shouldSample makes a single sampling decision for a lock operation.
+// Returns true if this operation should be instrumented, false otherwise.
+func (m *InstrumentedRWMutex) shouldSample() bool {
+	if m.config == nil || !m.config.ShouldCollectLockContention() {
+		return false
+	}
+	if m.config.SamplingRate < 1.0 && utils.SecureRandomFloat64() > m.config.SamplingRate {
+		return false
+	}
+	return true
+}
+
 // Lock acquires an exclusive lock and tracks contention
 func (m *InstrumentedRWMutex) Lock() {
-	// If metrics are disabled, just acquire the lock without instrumentation
-	if m.config == nil || !m.config.ShouldCollectLockContention() {
+	sampled := m.shouldSample()
+	if !sampled {
 		m.mu.Lock()
 		return
 	}
 
 	// Start with a quick try to acquire the lock without blocking
 	if m.mu.TryLock() {
-		TrackOperation(OpLockAcquire, func() {})
+		// Record the acquire with zero-cost operation
+		RecordOperationTimingDirect(OpLockAcquire, 0)
 		return
 	}
 
 	// If we couldn't acquire immediately, there's contention
 	start := time.Now()
-	TrackOperation(OpLockAcquire, func() {
-		m.mu.Lock()
-	})
-
-	// Record contention time
+	m.mu.Lock()
 	contentionTime := time.Since(start)
-	if contentionTime > 10*time.Microsecond { // Threshold to consider it contention
+
+	// Record both timing and contention with the same sampling decision
+	RecordOperationTimingDirect(OpLockAcquire, contentionTime)
+	if contentionTime > 10*time.Microsecond {
 		RecordLockContention(contentionTime)
 	}
 }
 
 // Unlock releases an exclusive lock
 func (m *InstrumentedRWMutex) Unlock() {
-	// If metrics are disabled, just release the lock without instrumentation
-	if m.config == nil || !m.config.ShouldCollectLockContention() {
+	sampled := m.shouldSample()
+	if !sampled {
 		m.mu.Unlock()
 		return
 	}
 
-	TrackOperation(OpLockRelease, func() {
-		m.mu.Unlock()
-	})
+	start := time.Now()
+	m.mu.Unlock()
+	RecordOperationTimingDirect(OpLockRelease, time.Since(start))
 }
 
 // RLock acquires a shared lock and tracks contention
 func (m *InstrumentedRWMutex) RLock() {
-	// If metrics are disabled, just acquire the lock without instrumentation
-	if m.config == nil || !m.config.ShouldCollectLockContention() {
+	sampled := m.shouldSample()
+	if !sampled {
 		m.mu.RLock()
 		return
 	}
 
 	// Start with a quick try to acquire the lock without blocking
 	if m.mu.TryRLock() {
-		TrackOperation(OpRLockAcquire, func() {})
+		RecordOperationTimingDirect(OpRLockAcquire, 0)
 		return
 	}
 
 	// If we couldn't acquire immediately, there's contention
 	start := time.Now()
-	TrackOperation(OpRLockAcquire, func() {
-		m.mu.RLock()
-	})
-
-	// Record contention time
+	m.mu.RLock()
 	contentionTime := time.Since(start)
-	if contentionTime > 10*time.Microsecond { // Threshold to consider it contention
+
+	// Record both timing and contention with the same sampling decision
+	RecordOperationTimingDirect(OpRLockAcquire, contentionTime)
+	if contentionTime > 10*time.Microsecond {
 		RecordLockContention(contentionTime)
 	}
 }
 
 // RUnlock releases a shared lock
 func (m *InstrumentedRWMutex) RUnlock() {
-	// If metrics are disabled, just release the lock without instrumentation
-	if m.config == nil || !m.config.ShouldCollectLockContention() {
+	sampled := m.shouldSample()
+	if !sampled {
 		m.mu.RUnlock()
 		return
 	}
 
-	TrackOperation(OpRLockRelease, func() {
-		m.mu.RUnlock()
-	})
+	start := time.Now()
+	m.mu.RUnlock()
+	RecordOperationTimingDirect(OpRLockRelease, time.Since(start))
 }
 
 // NewInstrumentedRWMutex creates a new instrumented RWMutex with the default configuration

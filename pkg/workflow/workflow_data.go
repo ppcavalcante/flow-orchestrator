@@ -3,8 +3,8 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
@@ -246,8 +246,8 @@ func (w *WorkflowData) IsNodeRunnable(nodeName string) bool {
 	return result
 }
 
-// isNodeRunnableInternal is the internal implementation of IsNodeRunnable
-// Caller must hold the read lock
+// isNodeRunnableInternal is the internal implementation of IsNodeRunnable.
+// Caller must hold the read lock.
 func (w *WorkflowData) isNodeRunnableInternal(nodeName string) bool {
 	// If the node is already running, completed, failed, or skipped, it's not runnable
 	if status, ok := w.nodeStatus[w.internKey(nodeName)]; ok {
@@ -256,20 +256,32 @@ func (w *WorkflowData) isNodeRunnableInternal(nodeName string) bool {
 		}
 	}
 
-	// Check dependencies by looking for keys with the pattern nodeName:depends:*
-	prefix := nodeName + ":depends:"
-	for key := range w.nodeStatus {
-		if strings.HasPrefix(key, prefix) {
-			depName := strings.TrimPrefix(key, prefix)
-			depStatus, exists := w.nodeStatus[w.internKey(depName)]
-			// If dependency doesn't exist or isn't completed, node is not runnable
-			if !exists || depStatus != Completed {
-				return false
-			}
+	// Node is considered runnable from the data perspective (status is pending/not_started).
+	// Actual dependency checking requires DAG structure and is handled by the executor.
+	return true
+}
+
+// IsNodeRunnableWithDeps checks if a node is runnable by verifying its status
+// and that all specified dependencies have completed.
+func (w *WorkflowData) IsNodeRunnableWithDeps(nodeName string, depNames []string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	// Check own status first
+	if status, ok := w.nodeStatus[w.internKey(nodeName)]; ok {
+		if status == Running || status == Completed || status == Failed || status == Skipped {
+			return false
 		}
 	}
 
-	// Node is runnable if it has no dependencies or all dependencies are completed
+	// Check all dependencies are completed
+	for _, depName := range depNames {
+		depStatus, exists := w.nodeStatus[w.internKey(depName)]
+		if !exists || depStatus != Completed {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -351,8 +363,9 @@ func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
 			switch val := v.(type) {
 			case float64:
 				// Check if it's actually an integer
-				if float64(int(val)) == val {
-					w.data[w.internKey(k)] = int(val)
+				if val == math.Trunc(val) && !math.IsInf(val, 0) && !math.IsNaN(val) &&
+					val >= math.MinInt64 && val <= math.MaxInt64 {
+					w.data[w.internKey(k)] = int64(val)
 				} else {
 					w.data[w.internKey(k)] = val
 				}
@@ -447,20 +460,21 @@ func (w *WorkflowData) ForEachOutput(fn func(nodeName string, output interface{}
 	}
 }
 
-// Clone creates a deep copy of the WorkflowData
+// Clone creates a deep copy of the WorkflowData.
+// The clone gets its own metrics collector and string interner to avoid shared mutable state.
+// Arena and string pool are not shared — the clone uses a standard string interner instead.
 func (w *WorkflowData) Clone() *WorkflowData {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	// Create a new WorkflowData with the same ID and configuration
+	// Create a new WorkflowData with independent metrics and interning
 	clone := &WorkflowData{
-		ID:         w.ID,
-		metrics:    w.metrics,
-		data:       make(map[string]interface{}, len(w.data)),
-		nodeStatus: make(map[string]NodeStatus, len(w.nodeStatus)),
-		outputs:    make(map[string]interface{}, len(w.outputs)),
-		arena:      w.arena,
-		stringPool: w.stringPool,
+		ID:             w.ID,
+		metrics:        metrics.NewMetricsCollector(),
+		data:           make(map[string]interface{}, len(w.data)),
+		nodeStatus:     make(map[string]NodeStatus, len(w.nodeStatus)),
+		outputs:        make(map[string]interface{}, len(w.outputs)),
+		stringInterner: NewStringInterner(),
 	}
 
 	// Copy data
@@ -564,9 +578,16 @@ func (w *WorkflowData) GetInt(key string) (int, bool) {
 			found = false
 			return
 		}
-		intVal, ok := val.(int)
-		result = intVal
-		found = ok
+		switch v := val.(type) {
+		case int:
+			result, found = v, true
+		case int64:
+			result, found = int(v), true
+		case int32:
+			result, found = int(v), true
+		default:
+			found = false
+		}
 	})
 	return result, found
 }
@@ -606,9 +627,13 @@ func (w *WorkflowData) LoadFromJSON(filePath string) error {
 	return nil
 }
 
-// SaveToFlatBuffer saves the workflow data to a FlatBuffer file
+// SaveToFlatBuffer saves the workflow data to a file.
+// NOTE: Currently uses JSON serialization internally. For true FlatBuffer persistence,
+// use FlatBuffersStore.Save() instead.
+//
+// Deprecated: Use FlatBuffersStore for actual FlatBuffer serialization.
 func (w *WorkflowData) SaveToFlatBuffer(filePath string) error {
-	// Create a snapshot of the data
+	// Create a snapshot of the data (JSON format)
 	data, err := w.createSnapshot()
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %w", err)
@@ -623,16 +648,20 @@ func (w *WorkflowData) SaveToFlatBuffer(filePath string) error {
 	return nil
 }
 
-// LoadFromFlatBuffer loads the workflow data from a FlatBuffer file
+// LoadFromFlatBuffer loads the workflow data from a file.
+// NOTE: Currently uses JSON deserialization internally. For true FlatBuffer persistence,
+// use FlatBuffersStore.Load() instead.
+//
+// Deprecated: Use FlatBuffersStore for actual FlatBuffer deserialization.
 func (w *WorkflowData) LoadFromFlatBuffer(filePath string) error {
 	// Read the file
 	// nolint:gosec // This is an internal function with controlled file paths
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to read FlatBuffer file: %w", err)
+		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Load snapshot (just using JSON for now)
+	// Load snapshot (JSON format)
 	err = w.LoadSnapshot(data)
 	if err != nil {
 		return fmt.Errorf("failed to load snapshot: %w", err)
@@ -658,6 +687,7 @@ func (w *WorkflowData) HasKey(key string) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
+	key = w.internKey(key)
 	_, exists := w.data[key]
 	return exists
 }

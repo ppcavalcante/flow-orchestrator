@@ -13,10 +13,6 @@ import (
 type NodePool struct {
 	pool sync.Pool
 
-	// Pre-allocated slices to avoid allocations
-	dependsOnPool [][]string
-	mu            sync.Mutex
-
 	// Statistics for monitoring
 	stats struct {
 		gets     int64
@@ -36,12 +32,6 @@ func NewNodePool(capacity int) *NodePool {
 				}
 			},
 		},
-		dependsOnPool: make([][]string, 0, capacity),
-	}
-
-	// Pre-allocate string slices for dependencies
-	for i := 0; i < capacity; i++ {
-		p.dependsOnPool = append(p.dependsOnPool, make([]string, 0, 8)) // Typical number of dependencies
 	}
 
 	p.stats.capacity = capacity
@@ -79,17 +69,16 @@ func (p *NodePool) Put(node *workflow.Node) {
 
 	p.pool.Put(node)
 
-	// Update stats
-	p.mu.Lock()
-	p.stats.puts++
-	p.mu.Unlock()
+	// Update stats atomically (consistent with Get/misses)
+	atomic.AddInt64(&p.stats.puts, 1)
 }
 
 // GetStats returns statistics about the pool's usage
 func (p *NodePool) GetStats() (gets, puts, misses, capacity int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return int(p.stats.gets), int(p.stats.puts), int(p.stats.misses), p.stats.capacity
+	return int(atomic.LoadInt64(&p.stats.gets)),
+		int(atomic.LoadInt64(&p.stats.puts)),
+		int(atomic.LoadInt64(&p.stats.misses)),
+		p.stats.capacity
 }
 
 // Global node pool for package-wide use

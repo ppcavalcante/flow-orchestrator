@@ -109,29 +109,40 @@ func NewExecutorWithConfig(config *Config) *OptimizedExecutor {
 	}
 }
 
-// Execute executes a workflow with parallel execution
+// Execute executes a workflow respecting DAG dependency levels with parallel execution within each level
 func (e *OptimizedExecutor) Execute(ctx context.Context, dag *workflow.DAG, data *workflow.WorkflowData) (interface{}, error) {
-	// Execute nodes in parallel
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(dag.Nodes))
-
-	for _, node := range dag.Nodes {
-		wg.Add(1)
-		go func(n *workflow.Node) {
-			defer wg.Done()
-			if err := n.Action.Execute(ctx, data); err != nil {
-				errChan <- err
-			}
-		}(node)
-	}
-
-	wg.Wait()
-	select {
-	case err := <-errChan:
-		return nil, err
-	default:
+	// Get levels for dependency-respecting execution
+	levels := dag.GetLevels()
+	if len(levels) == 0 {
 		return data, nil
 	}
+
+	for _, level := range levels {
+		var wg sync.WaitGroup
+		errChan := make(chan error, len(level))
+
+		for _, node := range level {
+			wg.Add(1)
+			go func(n *workflow.Node) {
+				defer wg.Done()
+				if err := n.Action.Execute(ctx, data); err != nil {
+					errChan <- err
+				}
+			}(node)
+		}
+
+		wg.Wait()
+		close(errChan)
+
+		// Check for errors in this level before proceeding
+		for err := range errChan {
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return data, nil
 }
 
 // ExecuteAsync executes a workflow asynchronously

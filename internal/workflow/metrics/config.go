@@ -72,19 +72,22 @@ func (c *MetricsConfig) ShouldCollect() bool {
 	return utils.SecureRandomFloat64() < c.SamplingRate
 }
 
-// ShouldCollectOperationTiming determines whether operation timing metrics should be collected
+// ShouldCollectOperationTiming determines whether operation timing metrics should be collected.
+// Uses a single sampling decision to avoid redundant crypto/rand calls.
 func (c *MetricsConfig) ShouldCollectOperationTiming() bool {
-	return c.ShouldCollect() && c.EnableOperationTiming
+	return c.EnableOperationTiming && c.ShouldCollect()
 }
 
-// ShouldCollectLockContention determines whether lock contention metrics should be collected
+// ShouldCollectLockContention determines whether lock contention metrics should be collected.
+// Uses a single sampling decision to avoid redundant crypto/rand calls.
 func (c *MetricsConfig) ShouldCollectLockContention() bool {
-	return c.ShouldCollect() && c.EnableLockContention
+	return c.EnableLockContention && c.ShouldCollect()
 }
 
-// ShouldCollectMemoryTracking determines whether memory tracking metrics should be collected
+// ShouldCollectMemoryTracking determines whether memory tracking metrics should be collected.
+// Uses a single sampling decision to avoid redundant crypto/rand calls.
 func (c *MetricsConfig) ShouldCollectMemoryTracking() bool {
-	return c.ShouldCollect() && c.EnableMemoryTracking
+	return c.EnableMemoryTracking && c.ShouldCollect()
 }
 
 // WithSamplingRate returns a copy of the config with the specified sampling rate

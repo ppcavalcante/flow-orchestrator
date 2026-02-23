@@ -166,8 +166,9 @@ func WithBuffer(size int, fn func(*[]byte) error) error {
 	return fn(buf)
 }
 
-// AppendBuffer appends data to a buffer, growing it if necessary
-func AppendBuffer(buf *[]byte, data []byte) {
+// AppendBuffer appends data to a buffer, growing it if necessary.
+// Returns the (possibly new) buffer pointer. Callers must use the returned value.
+func AppendBuffer(buf *[]byte, data []byte) *[]byte {
 	// Check if we need to grow the buffer
 	if cap(*buf)-len(*buf) < len(data) {
 		// Create a new buffer with sufficient capacity
@@ -186,4 +187,5 @@ func AppendBuffer(buf *[]byte, data []byte) {
 
 	// Append data
 	*buf = append(*buf, data...)
+	return buf
 }

@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 )
 
-// Ensure ConcurrentMap implements ConcurrentMapI
-var _ ConcurrentMapI = (*ConcurrentMap)(nil)
+// Ensure ConcurrentMap implements concurrentMapI
+var _ concurrentMapI = (*ConcurrentMap)(nil)
 
 // ShardCount is the number of shards in the concurrent map
 // This should be a power of 2 for efficient hashing

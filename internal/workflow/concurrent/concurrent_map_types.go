@@ -1,9 +1,8 @@
 package concurrent
 
-// ConcurrentMapI defines the interface for thread-safe maps
-// This allows us to abstract implementation details and use
-// different map implementations based on workload characteristics
-type ConcurrentMapI interface {
+// concurrentMapI is the internal interface for thread-safe maps.
+// The canonical public interface is defined in pkg/workflow/concurrent_map.go.
+type concurrentMapI interface {
 	// Core operations
 	Set(key string, value interface{})
 	Get(key string) (interface{}, bool)
@@ -57,7 +56,7 @@ func ReadOptimizedMapConfig(capacity int) MapConfig {
 }
 
 // NewConcurrentMapFromConfig creates the appropriate concurrent map based on the config
-func NewConcurrentMapFromConfig(config MapConfig) ConcurrentMapI {
+func NewConcurrentMapFromConfig(config MapConfig) concurrentMapI {
 	switch config.Type {
 	case MapTypeReadOptimized:
 		return NewReadMapWithCapacity(config.Capacity)

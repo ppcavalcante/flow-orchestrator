@@ -179,12 +179,12 @@ func (r *Reporter) formatOperationStats(sb *strings.Builder, ops []OperationType
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("%s:\n", op))
-		sb.WriteString(fmt.Sprintf("  Count: %d\n", stats.Count))
+		fmt.Fprintf(sb, "%s:\n", op)
+		fmt.Fprintf(sb, "  Count: %d\n", stats.Count)
 		if stats.Count > 0 {
-			sb.WriteString(fmt.Sprintf("  Min Time: %s\n", FormatDuration(stats.MinTimeNs)))
-			sb.WriteString(fmt.Sprintf("  Max Time: %s\n", FormatDuration(stats.MaxTimeNs)))
-			sb.WriteString(fmt.Sprintf("  Avg Time: %s\n", FormatDuration(stats.AvgTimeNs)))
+			fmt.Fprintf(sb, "  Min Time: %s\n", FormatDuration(stats.MinTimeNs))
+			fmt.Fprintf(sb, "  Max Time: %s\n", FormatDuration(stats.MaxTimeNs))
+			fmt.Fprintf(sb, "  Avg Time: %s\n", FormatDuration(stats.AvgTimeNs))
 		}
 	}
 }

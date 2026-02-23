@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	internalconcurrent "github.com/ppcavalcante/flow-orchestrator/internal/workflow/concurrent"
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/concurrent"
 )
 
@@ -136,18 +137,55 @@ func ReadOptimizedMapConfig(capacity int) MapConfig {
 	}
 }
 
-// NewReadMap creates a new read-optimized map
+// ReadOptimizedMap wraps the internal read-optimized map (copy-on-write)
+// for read-heavy workloads where lock-free reads are beneficial.
+type ReadOptimizedMap struct {
+	m *internalconcurrent.ReadMap
+}
+
+// NewReadMap creates a new read-optimized map using copy-on-write semantics.
 func NewReadMap() ConcurrentMapI {
-	return NewConcurrentMap()
+	return &ReadOptimizedMap{m: internalconcurrent.NewReadMap()}
 }
 
-// NewReadMapWithCapacity creates a new read-optimized map with the specified capacity
+// NewReadMapWithCapacity creates a new read-optimized map with the specified capacity.
 func NewReadMapWithCapacity(capacity int) ConcurrentMapI {
-	return NewConcurrentMapWithCapacity(capacity)
+	return &ReadOptimizedMap{m: internalconcurrent.NewReadMapWithCapacity(capacity)}
 }
 
-// NewConcurrentMapFromConfig creates the appropriate concurrent map based on the config
+// Set stores a key-value pair in the map.
+func (r *ReadOptimizedMap) Set(key string, value interface{}) { r.m.Set(key, value) }
+
+// Get retrieves a value by key, returning the value and whether it exists.
+func (r *ReadOptimizedMap) Get(key string) (interface{}, bool) { return r.m.Get(key) }
+
+// Delete removes a key from the map.
+func (r *ReadOptimizedMap) Delete(key string) { r.m.Delete(key) }
+
+// Clear removes all entries from the map.
+func (r *ReadOptimizedMap) Clear() { r.m.Clear() }
+
+// Has returns true if the key exists in the map.
+func (r *ReadOptimizedMap) Has(key string) bool { return r.m.Has(key) }
+
+// Count returns the number of entries in the map.
+func (r *ReadOptimizedMap) Count() int { return r.m.Count() }
+
+// Keys returns all keys in the map.
+func (r *ReadOptimizedMap) Keys() []string { return r.m.Keys() }
+
+// Items returns a copy of all key-value pairs in the map.
+func (r *ReadOptimizedMap) Items() map[string]interface{} { return r.m.Items() }
+
+// ForEach iterates over all key-value pairs, calling fn for each entry.
+func (r *ReadOptimizedMap) ForEach(fn func(key string, value interface{})) { r.m.ForEach(fn) }
+
+// NewConcurrentMapFromConfig creates the appropriate concurrent map based on the config.
 func NewConcurrentMapFromConfig(config MapConfig) ConcurrentMapI {
-	// For now, we only have one implementation, so we ignore the type
-	return NewConcurrentMapWithCapacity(config.Capacity)
+	switch config.Type {
+	case MapTypeReadOptimized:
+		return NewReadMapWithCapacity(config.Capacity)
+	default:
+		return NewConcurrentMapWithCapacity(config.Capacity)
+	}
 }

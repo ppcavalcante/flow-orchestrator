@@ -48,8 +48,8 @@ const (
 
 // MetricsCollector collects metrics for the workflow system
 type MetricsCollector struct {
-	// Configuration
-	config *MetricsConfig
+	// Configuration (accessed atomically to avoid data races)
+	config atomic.Pointer[MetricsConfig]
 
 	// Operation counters
 	operationCounts map[OperationType]*int64
@@ -83,7 +83,6 @@ func NewMetricsCollectorWithConfig(config *MetricsConfig) *MetricsCollector {
 	}
 
 	m := &MetricsCollector{
-		config:                config,
 		operationCounts:       make(map[OperationType]*int64),
 		operationTimes:        make(map[OperationType]*int64),
 		operationTimesMin:     make(map[OperationType]*int64),
@@ -93,6 +92,8 @@ func NewMetricsCollectorWithConfig(config *MetricsConfig) *MetricsCollector {
 		lockContentionTimeMax: new(int64),
 		activeOperations:      make(map[OperationType]*int64),
 	}
+
+	m.config.Store(config)
 
 	// Initialize counters for all operation types
 	for _, op := range []OperationType{
@@ -118,7 +119,7 @@ func NewMetricsCollectorWithConfig(config *MetricsConfig) *MetricsCollector {
 
 // GetConfig returns the current metrics configuration
 func (m *MetricsCollector) GetConfig() *MetricsConfig {
-	return m.config
+	return m.config.Load()
 }
 
 // UpdateConfig updates the metrics configuration
@@ -126,19 +127,27 @@ func (m *MetricsCollector) UpdateConfig(config *MetricsConfig) {
 	if config == nil {
 		return
 	}
-	m.config = config
+	m.config.Store(config)
 }
 
 // TrackOperation tracks the execution time of an operation
 func (m *MetricsCollector) TrackOperation(op OperationType, f func()) {
+	if m == nil {
+		f()
+		return
+	}
+
+	// Load config once atomically
+	cfg := m.config.Load()
+
 	// Skip if metrics are disabled
-	if m == nil || !m.config.Enabled {
+	if !cfg.Enabled {
 		f()
 		return
 	}
 
 	// Skip based on sampling rate
-	if m.config.SamplingRate < 1.0 && utils.SecureRandomFloat64() > m.config.SamplingRate {
+	if cfg.SamplingRate < 1.0 && utils.SecureRandomFloat64() > cfg.SamplingRate {
 		f()
 		return
 	}
@@ -200,7 +209,7 @@ func (m *MetricsCollector) TrackOperation(op OperationType, f func()) {
 // StartOperation starts tracking an operation
 func (m *MetricsCollector) StartOperation(op OperationType) time.Time {
 	// Skip if metrics are disabled
-	if m == nil || !m.config.Enabled {
+	if m == nil || !m.config.Load().Enabled {
 		return time.Now()
 	}
 
@@ -226,7 +235,7 @@ func (m *MetricsCollector) EndOperation(op OperationType, start time.Time) time.
 	duration := end.Sub(start)
 
 	// Skip if metrics are disabled
-	if m == nil || !m.config.Enabled {
+	if m == nil || !m.config.Load().Enabled {
 		return duration
 	}
 
@@ -245,7 +254,7 @@ func (m *MetricsCollector) EndOperation(op OperationType, start time.Time) time.
 // RecordOperationTiming records the timing for an operation
 func (m *MetricsCollector) RecordOperationTiming(op OperationType, duration time.Duration) {
 	// Skip metrics collection if disabled or not sampled
-	if !m.config.ShouldCollectOperationTiming() {
+	if !m.config.Load().ShouldCollectOperationTiming() {
 		return
 	}
 
@@ -305,7 +314,7 @@ func (m *MetricsCollector) RecordOperationTiming(op OperationType, duration time
 // RecordLockContention records lock contention if lock contention metrics are enabled
 func (m *MetricsCollector) RecordLockContention(duration time.Duration) {
 	// Skip metrics collection if disabled or not sampled
-	if !m.config.ShouldCollectLockContention() {
+	if !m.config.Load().ShouldCollectLockContention() {
 		return
 	}
 
@@ -342,7 +351,7 @@ type LockContentionStats struct {
 
 // GetOperationStats returns statistics for a specific operation type
 func (m *MetricsCollector) GetOperationStats(op OperationType) OperationStats {
-	if m == nil || !m.config.Enabled {
+	if m == nil || !m.config.Load().Enabled {
 		return OperationStats{}
 	}
 
@@ -404,7 +413,7 @@ func (m *MetricsCollector) GetLockContentionStats() LockContentionStats {
 
 // GetAllOperationStats returns statistics for all operation types
 func (m *MetricsCollector) GetAllOperationStats() map[OperationType]OperationStats {
-	if m == nil || !m.config.Enabled {
+	if m == nil || !m.config.Load().Enabled {
 		return nil
 	}
 
@@ -455,6 +464,12 @@ func GetGlobalConfig() *MetricsConfig {
 // TrackOperation tracks an operation using the default collector
 func TrackOperation(op OperationType, f func()) {
 	defaultCollector.TrackOperation(op, f)
+}
+
+// RecordOperationTimingDirect records operation timing on the default collector
+// without making an independent sampling decision (caller already decided to sample).
+func RecordOperationTimingDirect(op OperationType, duration time.Duration) {
+	defaultCollector.RecordOperationTiming(op, duration)
 }
 
 // RecordLockContention records lock contention using the default collector
