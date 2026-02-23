@@ -4,7 +4,6 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/ppcavalcante/flow-orchestrator.svg)](https://pkg.go.dev/github.com/ppcavalcante/flow-orchestrator)
 [![GitHub tag](https://img.shields.io/github/v/tag/ppcavalcante/flow-orchestrator?include_prereleases&label=release)](https://github.com/ppcavalcante/flow-orchestrator/tags)
 [![Build Status](https://github.com/ppcavalcante/flow-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/ppcavalcante/flow-orchestrator/actions)
-[![Coverage Status](https://codecov.io/gh/ppcavalcante/flow-orchestrator/branch/main/graph/badge.svg?token=CRL74YL94M)](https://codecov.io/gh/ppcavalcante/flow-orchestrator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes.
@@ -213,11 +212,11 @@ Key properties tested include:
 - Workflow data operations (data store correctly handles values)
 - Node status transitions (nodes transition through correct states)
 
-For more information on our testing approach, see our [Test Coverage Strategy](docs/test_coverage_strategy.md) documentation.
+For more information on our testing approach, see our [Test Coverage Strategy](docs/development/test_coverage_strategy.md) documentation.
 
 ## Architecture
 
-Flow Orchestrator is designed with a modular architecture that separates concerns and enables extensibility. For a comprehensive overview of the system architecture, see our [Architecture Overview](docs/architecture_overview.md) documentation.
+Flow Orchestrator is designed with a modular architecture that separates concerns and enables extensibility. For a comprehensive overview of the system architecture, see our [Architecture Overview](docs/architecture/overview.md) documentation.
 
 Key architectural components include:
 
@@ -322,7 +321,7 @@ Key performance characteristics:
 - Minimal memory allocation for core operations
 - Optimized for both small and large workflows
 
-For detailed benchmark results and performance recommendations, see our [Benchmark Analysis](docs/benchmark_analysis.md) documentation.
+For detailed benchmark results and performance recommendations, see our [Benchmark Analysis](docs/guides/benchmarks.md) documentation.
 
 ## Examples
 
@@ -370,7 +369,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Current Version**: v0.1.0 (Alpha)
+- **Current Version**: v0.1.1 (Alpha)
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.
 

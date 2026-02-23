@@ -20,7 +20,7 @@ If you're new to Flow Orchestrator, we recommend following this learning path:
 
 ## System Requirements
 
-- Go 1.18 or higher
+- Go 1.24 or higher
 - No external dependencies required (self-contained library)
 - Works on all platforms supported by Go
 
@@ -28,7 +28,7 @@ If you're new to Flow Orchestrator, we recommend following this learning path:
 
 | Flow Orchestrator Version | Go Version |
 |---------------------------|------------|
-| 0.1.x (Alpha)             | 1.18+      |
+| 0.1.x (Alpha)             | 1.24+      |
 
 ## Support
 

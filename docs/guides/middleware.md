@@ -30,7 +30,7 @@ func LoggingMiddleware() Middleware {
     return func(next Action) Action {
         return ActionFunc(func(ctx context.Context, data *WorkflowData) error {
             // Before action execution
-            fmt.Printf("Starting action for node %s\n", data.CurrentNode)
+            fmt.Println("Starting action")
             
             // Execute the wrapped action
             err := next.Execute(ctx, data)
@@ -108,12 +108,8 @@ Flow Orchestrator provides several built-in middleware for common cross-cutting 
 Logs the execution of actions, including start time, end time, and errors:
 
 ```go
-// Basic usage
+// Basic usage — logs start/end time and any errors
 action := workflow.LoggingMiddleware()(myAction)
-
-// With custom logger
-logger := log.New(os.Stdout, "WORKFLOW: ", log.LstdFlags)
-action := workflow.LoggingMiddleware(workflow.WithLogger(logger))(myAction)
 ```
 
 ### Retry Middleware
@@ -121,23 +117,22 @@ action := workflow.LoggingMiddleware(workflow.WithLogger(logger))(myAction)
 Automatically retries failed actions with configurable backoff:
 
 ```go
-// Basic usage with 3 retries and 1 second delay
+// Basic usage with 3 retries and 1 second backoff (includes jitter)
 action := workflow.RetryMiddleware(3, time.Second)(myAction)
 
-// With exponential backoff
-action := workflow.RetryMiddleware(
-    3,
-    500*time.Millisecond,
-    workflow.WithExponentialBackoff(2.0),
-    workflow.WithMaxDelay(10*time.Second),
-)(myAction)
-
-// With selective retry based on error types
-action := workflow.RetryMiddleware(
+// For selective retry based on error types, use ConditionalRetryMiddleware
+action := workflow.ConditionalRetryMiddleware(
     3,
     time.Second,
-    workflow.WithRetryableErrors([]string{"connection_error", "timeout_error"}),
+    func(err error) bool {
+        // Only retry on transient errors
+        return strings.Contains(err.Error(), "connection") ||
+               strings.Contains(err.Error(), "timeout")
+    },
 )(myAction)
+
+// For testing/benchmarks where you don't want backoff delays
+action := workflow.NoDelayRetryMiddleware(3)(myAction)
 ```
 
 ### Timeout Middleware
@@ -154,58 +149,22 @@ action := workflow.TimeoutMiddleware(5 * time.Second)(myAction)
 Collects metrics about action execution, including counts and timing:
 
 ```go
-// Basic usage
+// Basic usage — records execution time
 action := workflow.MetricsMiddleware()(myAction)
-
-// With custom metrics registry
-registry := metrics.NewRegistry()
-action := workflow.MetricsMiddleware(
-    workflow.WithMetricsRegistry(registry),
-    workflow.WithMetricsPrefix("my_workflow"),
-)(myAction)
 ```
 
-### Circuit Breaker Middleware
+### Validation Middleware
 
-Implements the circuit breaker pattern to prevent cascading failures:
-
-```go
-// Create a circuit breaker that trips after 5 failures
-// and resets after 30 seconds
-cb := workflow.NewCircuitBreaker(5, 30*time.Second)
-
-// Create middleware using the circuit breaker
-cbMiddleware := func(next workflow.Action) workflow.Action {
-    return workflow.ActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
-        if !cb.AllowRequest() {
-            return fmt.Errorf("circuit open, too many failures")
-        }
-        
-        err := next.Execute(ctx, data)
-        if err != nil {
-            cb.RecordFailure()
-            return err
-        }
-        
-        cb.RecordSuccess()
-        return nil
-    })
-}
-
-// Apply to an action
-action := cbMiddleware(myAction)
-```
-
-### Tracing Middleware
-
-Adds distributed tracing to workflow actions:
+Validates workflow data before executing the action:
 
 ```go
-// With OpenTelemetry
-action := workflow.TracingMiddleware(
-    workflow.WithTracerProvider(tracerProvider),
-    workflow.WithSpanName("my-workflow-action"),
-)(myAction)
+// Validate required fields before processing
+action := workflow.ValidationMiddleware(func(data *workflow.WorkflowData) error {
+    if _, ok := data.GetString("user_id"); !ok {
+        return fmt.Errorf("user_id is required")
+    }
+    return nil
+})(myAction)
 ```
 
 ## Using Middleware in Workflows
@@ -244,44 +203,27 @@ builder.AddNode("api-call").
     WithAction(action)
 ```
 
-### 3. Global Middleware
+### 3. Applying Middleware to Multiple Nodes
 
-Apply middleware to all actions in a workflow:
+Use a helper function to wrap actions consistently:
 
 ```go
-// Create middleware
-loggingMiddleware := workflow.LoggingMiddleware()
-retryMiddleware := workflow.RetryMiddleware(3, time.Second)
+// Create a shared middleware stack
+stack := workflow.NewMiddlewareStack()
+stack.Use(workflow.LoggingMiddleware())
+stack.Use(workflow.RetryMiddleware(3, time.Second))
 
-// Apply to all nodes using a builder wrapper
-func withMiddleware(builder *workflow.Builder) *workflow.Builder {
-    originalAddNode := builder.AddNode
-    
-    builder.AddNode = func(name string) *workflow.NodeBuilder {
-        nodeBuilder := originalAddNode(name)
-        originalWithAction := nodeBuilder.WithAction
-        
-        nodeBuilder.WithAction = func(action workflow.Action) *workflow.NodeBuilder {
-            // Apply middleware to the action
-            wrappedAction := loggingMiddleware(retryMiddleware(action))
-            return originalWithAction(wrappedAction)
-        }
-        
-        return nodeBuilder
-    }
-    
-    return builder
+// Helper to apply the stack to any action
+wrap := func(fn func(context.Context, *workflow.WorkflowData) error) workflow.Action {
+    return stack.Apply(workflow.ActionFunc(fn))
 }
 
-// Usage
-builder := withMiddleware(workflow.NewWorkflowBuilder())
-
-// Now all nodes will automatically get the middleware
+// Apply to multiple nodes
 builder.AddNode("step1").
-    WithAction(step1Action)
+    WithAction(wrap(step1Func))
 
 builder.AddNode("step2").
-    WithAction(step2Action)
+    WithAction(wrap(step2Func))
 ```
 
 ## Creating Custom Middleware
@@ -396,7 +338,7 @@ func ValidationMiddleware(rules ...ValidationRule) Middleware {
 // Example validation rules
 func RequiredField(field string) ValidationRule {
     return func(data *WorkflowData) error {
-        if !data.Has(field) {
+        if !data.HasKey(field) {
             return fmt.Errorf("required field missing: %s", field)
         }
         return nil
@@ -405,7 +347,7 @@ func RequiredField(field string) ValidationRule {
 
 func NumberRange(field string, min, max float64) ValidationRule {
     return func(data *WorkflowData) error {
-        val, ok := data.GetFloat(field)
+        val, ok := data.GetFloat64(field)
         if !ok {
             return fmt.Errorf("field not found or not a number: %s", field)
         }
@@ -466,25 +408,19 @@ The execution flow would be:
 
 A general recommended ordering for common middleware:
 
-1. **Logging/Tracing** (outermost) - To log everything including other middleware
+1. **Logging** (outermost) - To log everything including other middleware
 2. **Metrics** - To measure performance including retries
-3. **Circuit Breaker** - To prevent calls if the circuit is open
-4. **Rate Limiting** - To limit request rates
-5. **Timeout** - To set overall timeout
-6. **Validation** - To validate before expensive operations
-7. **Retry** (innermost) - To retry the core action
+3. **Timeout** - To set overall timeout
+4. **Validation** - To validate before expensive operations
+5. **Retry** (innermost) - To retry the core action
 
 ```go
 action := LoggingMiddleware()(
     MetricsMiddleware()(
-        CircuitBreakerMiddleware()(
-            RateLimitMiddleware(10)(
-                TimeoutMiddleware(5 * time.Second)(
-                    ValidationMiddleware(/* rules */)(
-                        RetryMiddleware(3, time.Second)(
-                            myAction
-                        )
-                    )
+        TimeoutMiddleware(5 * time.Second)(
+            ValidationMiddleware(validator)(
+                RetryMiddleware(3, time.Second)(
+                    myAction
                 )
             )
         )
@@ -494,32 +430,19 @@ action := LoggingMiddleware()(
 
 ## Advanced Middleware Techniques
 
-### Conditional Middleware
+### Conditional Retry
 
-Apply middleware only under certain conditions:
+Use `ConditionalRetryMiddleware` to retry only for specific error types:
 
 ```go
-// Apply retry middleware only to certain actions
-func ConditionalRetryMiddleware(condition func(*WorkflowData) bool, retries int) Middleware {
-    return func(next Action) Action {
-        return ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-            if condition(data) {
-                // Apply retry middleware
-                return RetryMiddleware(retries, time.Second)(next).Execute(ctx, data)
-            }
-            // Skip middleware
-            return next.Execute(ctx, data)
-        })
-    }
-}
-
-// Usage
-action := ConditionalRetryMiddleware(
-    func(data *WorkflowData) bool {
-        // Only apply retries to external API calls
-        return data.CurrentNode == "external-api-call"
+// Only retry transient errors, not validation errors
+action := workflow.ConditionalRetryMiddleware(
+    3,                    // maxRetries
+    500*time.Millisecond, // backoff (with exponential increase per attempt)
+    func(err error) bool {
+        // Only retry transient errors
+        return !errors.Is(err, workflow.ErrInvalidInput)
     },
-    3,
 )(myAction)
 ```
 
@@ -528,44 +451,22 @@ action := ConditionalRetryMiddleware(
 Create middleware that maintains state across executions:
 
 ```go
-// Middleware factory that creates middleware with shared state
-func NewCachingMiddleware() Middleware {
-    // Shared cache across all wrapped actions
-    cache := make(map[string]interface{})
-    var mutex sync.RWMutex
-    
-    return func(next Action) Action {
+// Middleware factory that tracks execution counts
+func NewExecutionCounterMiddleware() (Middleware, func() int64) {
+    var count int64
+
+    middleware := func(next Action) Action {
         return ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-            // Generate cache key from workflow data
-            key := fmt.Sprintf("%s:%s", data.ID, data.CurrentNode)
-            
-            // Check cache
-            mutex.RLock()
-            cachedResult, found := cache[key]
-            mutex.RUnlock()
-            
-            if found {
-                // Use cached result
-                data.SetOutput(data.CurrentNode, cachedResult)
-                return nil
-            }
-            
-            // Execute action
-            err := next.Execute(ctx, data)
-            if err != nil {
-                return err
-            }
-            
-            // Cache result
-            if output, ok := data.GetOutput(data.CurrentNode); ok {
-                mutex.Lock()
-                cache[key] = output
-                mutex.Unlock()
-            }
-            
-            return nil
+            atomic.AddInt64(&count, 1)
+            return next.Execute(ctx, data)
         })
     }
+
+    getCount := func() int64 {
+        return atomic.LoadInt64(&count)
+    }
+
+    return middleware, getCount
 }
 ```
 

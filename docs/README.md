@@ -36,8 +36,6 @@ Detailed reference documentation for APIs, configuration options, and more:
 ### [Development](./development/)
 Information for contributors and developers working on Flow Orchestrator:
 - [Contribution Guide](./development/contributing.md)
-- [Development Environment Setup](./development/dev-environment.md)
-- [Git Workflow](./gw.md)
 - [Release Process](./development/release-process.md)
 - [Test Coverage Strategy](./development/test_coverage_strategy.md)
 - [Supply Chain Security](./development/supply_chain_security.md)

@@ -79,16 +79,8 @@ This approach works well for transient errors that might resolve with a simple r
 For more sophisticated retry logic, use the retry middleware:
 
 ```go
-// Create retry middleware with exponential backoff
-retryMiddleware := workflow.RetryMiddleware(
-    3,                      // Max retries
-    500*time.Millisecond,   // Initial delay
-    workflow.WithExponentialBackoff(2.0), // Multiplier for backoff
-    workflow.WithMaxDelay(10*time.Second),
-    workflow.WithRetryableErrors(
-        []string{"connection_error", "timeout_error"},
-    ),
-)
+// Create retry middleware with 3 retries and 500ms backoff (includes jitter)
+retryMiddleware := workflow.RetryMiddleware(3, 500*time.Millisecond)
 
 // Apply middleware to an action
 retryableAction := retryMiddleware(myAction)
@@ -96,6 +88,17 @@ retryableAction := retryMiddleware(myAction)
 // Use in workflow
 builder.AddNode("api-call").
     WithAction(retryableAction)
+
+// For selective retry based on error types, use ConditionalRetryMiddleware
+selectiveRetry := workflow.ConditionalRetryMiddleware(
+    3,
+    500*time.Millisecond,
+    func(err error) bool {
+        // Only retry transient errors
+        return strings.Contains(err.Error(), "connection") ||
+               strings.Contains(err.Error(), "timeout")
+    },
+)
 ```
 
 This provides fine-grained control over retry behavior.
@@ -146,7 +149,7 @@ builder.AddNode("fulfill-order").
         // Check if either primary or alternative payment succeeded
         if paymentStatus != workflow.Completed && 
            (alternativeStatus != workflow.Completed || 
-            !data.Has("alternative_payment_id")) {
+            !data.HasKey("alternative_payment_id")) {
             // Skip fulfillment
             return nil
         }
@@ -191,36 +194,40 @@ builder.AddNode("long-operation").
 
 ### 5. Circuit Breaker Pattern
 
-Implement a circuit breaker to prevent cascading failures:
+You can implement a circuit breaker as custom middleware to prevent cascading failures:
 
 ```go
-// Create a circuit breaker
-cb := workflow.NewCircuitBreaker(
-    3,                  // Failure threshold
-    30*time.Second,     // Reset timeout
-    workflow.WithHalfOpenState(true),
-)
+// Simple circuit breaker as custom middleware
+func CircuitBreakerMiddleware(threshold int, resetTimeout time.Duration) workflow.Middleware {
+    var failures int64
+    var lastFailure time.Time
+    var mu sync.Mutex
 
-// Create a circuit breaker middleware
-cbMiddleware := func(next workflow.Action) workflow.Action {
-    return workflow.ActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
-        if !cb.AllowRequest() {
-            return fmt.Errorf("circuit open, too many failures")
-        }
-        
-        err := next.Execute(ctx, data)
-        if err != nil {
-            cb.RecordFailure()
-            return err
-        }
-        
-        cb.RecordSuccess()
-        return nil
-    })
+    return func(next workflow.Action) workflow.Action {
+        return workflow.ActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
+            mu.Lock()
+            if failures >= int64(threshold) && time.Since(lastFailure) < resetTimeout {
+                mu.Unlock()
+                return fmt.Errorf("circuit open, too many failures")
+            }
+            mu.Unlock()
+
+            err := next.Execute(ctx, data)
+            mu.Lock()
+            defer mu.Unlock()
+            if err != nil {
+                failures++
+                lastFailure = time.Now()
+                return err
+            }
+            failures = 0
+            return nil
+        })
+    }
 }
 
 // Apply to an action
-protectedAction := cbMiddleware(externalServiceAction)
+protectedAction := CircuitBreakerMiddleware(3, 30*time.Second)(externalServiceAction)
 ```
 
 The circuit breaker works by transitioning between three states:

@@ -111,8 +111,8 @@ func (d *WorkflowData) GetInt(key string) (int, bool)
 // GetBool retrieves a bool value
 func (d *WorkflowData) GetBool(key string) (bool, bool)
 
-// GetFloat retrieves a float64 value
-func (d *WorkflowData) GetFloat(key string) (float64, bool)
+// GetFloat64 retrieves a float64 value
+func (d *WorkflowData) GetFloat64(key string) (float64, bool)
 
 // GetOutput retrieves a node output
 func (d *WorkflowData) GetOutput(nodeName string) (interface{}, bool)
@@ -142,7 +142,10 @@ func NewWorkflowBuilder() *WorkflowBuilder
 // WithWorkflowID sets the workflow ID
 func (b *WorkflowBuilder) WithWorkflowID(id string) *WorkflowBuilder
 
-// WithStateStore sets the persistence store
+// WithStore sets the persistence store
+func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder
+
+// WithStateStore is an alias for WithStore (deprecated)
 func (b *WorkflowBuilder) WithStateStore(store WorkflowStore) *WorkflowBuilder
 
 // AddStartNode adds a start node (no dependencies)
@@ -189,16 +192,25 @@ type Middleware func(Action) Action
 
 ```go
 // LoggingMiddleware logs action execution
-func LoggingMiddleware(opts ...LoggingOption) Middleware
+func LoggingMiddleware() Middleware
 
 // RetryMiddleware retries failed actions
-func RetryMiddleware(retries int, delay time.Duration, opts ...RetryOption) Middleware
+func RetryMiddleware(maxRetries int, backoff time.Duration) Middleware
 
 // TimeoutMiddleware adds a timeout to actions
 func TimeoutMiddleware(timeout time.Duration) Middleware
 
 // MetricsMiddleware collects execution metrics
-func MetricsMiddleware(opts ...MetricsOption) Middleware
+func MetricsMiddleware() Middleware
+
+// ValidationMiddleware validates workflow data before executing
+func ValidationMiddleware(validator func(*WorkflowData) error) Middleware
+
+// ConditionalRetryMiddleware retries based on a predicate
+func ConditionalRetryMiddleware(maxRetries int, backoff time.Duration, predicate func(error) bool) Middleware
+
+// NoDelayRetryMiddleware retries immediately (useful for testing/benchmarks)
+func NoDelayRetryMiddleware(maxRetries int, verbose ...bool) Middleware
 ```
 
 ### MiddlewareStack
@@ -211,8 +223,8 @@ type MiddlewareStack struct {
 // NewMiddlewareStack creates a new stack
 func NewMiddlewareStack() *MiddlewareStack
 
-// Use adds middleware to the stack
-func (s *MiddlewareStack) Use(middleware Middleware)
+// Use adds middleware to the stack (returns stack for chaining)
+func (s *MiddlewareStack) Use(m Middleware) *MiddlewareStack
 
 // Apply applies all middleware to an action
 func (s *MiddlewareStack) Apply(action Action) Action
@@ -242,13 +254,13 @@ type WorkflowStore interface {
 
 ```go
 // NewInMemoryStore creates an in-memory store
-func NewInMemoryStore() WorkflowStore
+func NewInMemoryStore() *InMemoryStore
 
-// NewJSONFileStore creates a JSON file-based store
-func NewJSONFileStore(directory string) (WorkflowStore, error)
+// NewJSONFileStore creates a JSON file-based store (deprecated: use FlatBuffersStore)
+func NewJSONFileStore(baseDir string) (*JSONFileStore, error)
 
 // NewFlatBuffersStore creates a FlatBuffers-based store
-func NewFlatBuffersStore(directory string, opts ...FlatBuffersOption) (WorkflowStore, error)
+func NewFlatBuffersStore(baseDir string) (*FlatBuffersStore, error)
 ```
 
 ## Node Status
@@ -257,28 +269,26 @@ func NewFlatBuffersStore(directory string, opts ...FlatBuffersOption) (WorkflowS
 type NodeStatus string
 
 const (
-    Pending   NodeStatus = "pending"
-    Running   NodeStatus = "running"
-    Completed NodeStatus = "completed"
-    Failed    NodeStatus = "failed"
-    Skipped   NodeStatus = "skipped"
+    Pending    NodeStatus = "pending"
+    Running    NodeStatus = "running"
+    Completed  NodeStatus = "completed"
+    Failed     NodeStatus = "failed"
+    Skipped    NodeStatus = "skipped"
+    NotStarted NodeStatus = "not_started"
 )
 ```
 
-## Error Types
+## Error Sentinels
 
 ```go
-// ErrCyclicDependency indicates a cycle in the workflow
-var ErrCyclicDependency = errors.New("cyclic dependency detected")
+// ErrInputNotFound indicates a required input was not found
+var ErrInputNotFound = errors.New("input not found")
 
-// ErrDuplicateNode indicates a duplicate node name
-var ErrDuplicateNode = errors.New("duplicate node name")
+// ErrInvalidInput indicates an input value is invalid
+var ErrInvalidInput = errors.New("invalid input")
 
-// ErrNodeNotFound indicates a missing node
-var ErrNodeNotFound = errors.New("node not found")
-
-// ErrWorkflowNotFound indicates a missing workflow
-var ErrWorkflowNotFound = errors.New("workflow not found")
+// ErrExecutionFailed indicates an action execution failed
+var ErrExecutionFailed = errors.New("execution failed")
 ```
 
 ## Usage Examples

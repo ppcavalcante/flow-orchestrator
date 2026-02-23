@@ -6,7 +6,7 @@ This guide provides detailed instructions for installing Flow Orchestrator in va
 
 Flow Orchestrator requires:
 
-- Go 1.18 or higher
+- Go 1.24 or higher
 - A working Go development environment
 
 You can check your Go version with:
@@ -168,7 +168,7 @@ replace github.com/conflicting/package => github.com/conflicting/package v1.2.4
 If you encounter issues with installation, please:
 
 1. Check the [examples directory](../../examples/) for working code examples
-2. Review the [Troubleshooting Guide](../guides/troubleshooting.md) for common issues
+2. Review the [Troubleshooting Guide](../development/troubleshooting.md) for common issues
 3. Check for [known issues](https://github.com/ppcavalcante/flow-orchestrator/issues) on GitHub
 
 ## Next Steps

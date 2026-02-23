@@ -21,7 +21,7 @@ This workflow demonstrates key features including:
 
 ## Prerequisites
 
-- Go 1.18 or higher
+- Go 1.24 or higher
 - Basic understanding of Go
 - Flow Orchestrator installed (see [Installation Guide](./installation.md))
 
