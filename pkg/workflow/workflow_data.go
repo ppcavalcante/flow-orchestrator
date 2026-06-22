@@ -1,9 +1,9 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"sync"
 
@@ -344,9 +344,16 @@ func (w *WorkflowData) LoadSnapshot(data []byte) error {
 // loadSnapshotInternal loads a snapshot into the workflow data
 // Caller must hold the write lock
 func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
-	// Deserialize from JSON
+	// Deserialize from JSON. UseNumber so integer values round-trip exactly:
+	// decoding into interface{} otherwise turns every JSON number into a float64,
+	// which silently loses precision for int64 magnitudes above 2^53 (e.g. MaxInt64
+	// rounds to 2^63, and int64(2^63) then overflows — platform-defined, so it can
+	// pass on one arch and corrupt on another). json.Number keeps the original
+	// literal so it can be parsed losslessly below.
 	var snapshot map[string]interface{}
-	if err := json.Unmarshal(data, &snapshot); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&snapshot); err != nil {
 		return err
 	}
 
@@ -359,15 +366,19 @@ func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
 	if data, ok := snapshot["data"].(map[string]interface{}); ok {
 		w.data = make(map[string]interface{})
 		for k, v := range data {
-			// Convert numbers to appropriate types
+			// Convert numbers to appropriate types. With UseNumber, every JSON
+			// number arrives as json.Number (the original literal); prefer an
+			// exact int64 and fall back to float64 for real numbers. This keeps
+			// the full int64 range faithful, matching the FlatBuffers value_long
+			// path, instead of routing through a lossy float64.
 			switch val := v.(type) {
-			case float64:
-				// Check if it's actually an integer
-				if val == math.Trunc(val) && !math.IsInf(val, 0) && !math.IsNaN(val) &&
-					val >= math.MinInt64 && val <= math.MaxInt64 {
-					w.data[w.internKey(k)] = int64(val)
+			case json.Number:
+				if i, err := val.Int64(); err == nil {
+					w.data[w.internKey(k)] = i
+				} else if f, err := val.Float64(); err == nil {
+					w.data[w.internKey(k)] = f
 				} else {
-					w.data[w.internKey(k)] = val
+					w.data[w.internKey(k)] = val.String()
 				}
 			default:
 				w.data[w.internKey(k)] = v

@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create the GitHub Release + upload assets
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -43,6 +45,11 @@ jobs:
           format: spdx-json
           output-file: flow-orchestrator.spdx.json
 
+      # Digest of the released artifact, base64-encoded, for the SLSA generator.
+      - name: Compute artifact digest for provenance
+        id: hash
+        run: echo "hashes=$(sha256sum flow-orchestrator.spdx.json | base64 -w0)" >> "$GITHUB_OUTPUT"
+
       # Extract version from tag
       - name: Extract version from tag
         id: get_version
@@ -59,16 +66,19 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: true
 
-  # SLSA provenance generation. NOTE: the SLSA generator is referenced by its
-  # semantic tag @v2.1.0, NOT a commit SHA — SLSA's threat model requires the tag
-  # for provenance-generator identity verification; SHA-pinning it breaks the chain.
+  # SLSA provenance generation. This is a library (no built binary), so we use the
+  # GENERIC generator to attest the released artifact (the SBOM) by its digest —
+  # not the Go *builder*, which expects a binary to compile. NOTE: the generator is
+  # referenced by its semantic tag @v2.1.0, NOT a commit SHA — SLSA's threat model
+  # requires the tag for provenance-generator identity verification; SHA-pinning it
+  # breaks the chain.
   provenance:
     needs: [release]
     permissions:
       actions: read
       id-token: write   # OIDC token for keyless provenance signing
       contents: write   # attach the provenance attestation to the release
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_go_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      go-version: '1.25.11'
-      evaluated-envs: "GOFLAGS=-trimpath"
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      upload-assets: true   # attach the .intoto.jsonl provenance to the GitHub release

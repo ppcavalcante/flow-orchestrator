@@ -31,8 +31,8 @@ If you're new to Flow Orchestrator, we recommend following this learning path:
 
 | Flow Orchestrator Version | Go Version |
 |---------------------------|------------|
-| `0.7.0-alpha` (in development, on `main`) | 1.24+ |
-| `v0.1.1-alpha` (latest published tag)     | 1.24+ |
+| `v0.7.1-alpha` (current release tag) | 1.24+ |
+| `v0.1.1-alpha` (older pre-release tag) | 1.24+ |
 
 ## Support
 

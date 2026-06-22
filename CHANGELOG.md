@@ -8,12 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Records milestone state for M4, M5, M6, and M7. The in-code version constant is
-`0.7.0-alpha` (bumped at the M7 close from `0.5.0-alpha`; the 0.6 line was never
-cut as a const — M6 closed without a bump, so the combined M6+M7 release jumps to
-0.7.0-alpha — see `version.go`); no release tag is cut on this branch yet — these
-entries record milestone state pending the parked `anvil-m1`→`main` merge + tag
-(same disposition as the v0.2.0/v0.3.0 entries below). The latest *published* tag
-remains `v0.1.1-alpha`, which predates all M2–M7 work; see [STABILITY.md](STABILITY.md).
+`0.7.1-alpha` (the combined M6+M7 release; M5 set `0.5.0-alpha`, the 0.6 line was
+never cut as a const, M7 close set `0.7.0-alpha`, and `0.7.1-alpha` patches the
+first-CI-run findings below — see `version.go`). Published tags now include
+`v0.7.0-alpha` and `v0.7.1-alpha`; **use `v0.7.1-alpha`** (`v0.7.0-alpha`'s first
+CI run on `main` surfaced the int64 JSON-fidelity bug fixed in `0.7.1-alpha`).
+See [STABILITY.md](STABILITY.md).
+
+### Fixed
+- **int64 JSON-persistence fidelity (0.7.1-alpha).** `WorkflowData.LoadFromJSON`
+  (and `JSONFileStore` save/load) decoded JSON numbers through `interface{}` →
+  `float64`, silently losing precision for int64 magnitudes above 2^53 (e.g.
+  `MaxInt64` rounded to 2^63, then `int64(2^63)` overflowed — platform-defined, so
+  it passed on arm64 and corrupted on amd64). Now decoded with
+  `json.Decoder.UseNumber()` + `json.Number.Int64()`, preserving the full int64
+  range exactly and matching the FlatBuffers `value_long` path. Surfaced by the
+  first CI run of `TestCrossBackendParity` on amd64.
+- **release workflow.** `release.yml` referenced the SLSA Go *builder* workflow with
+  builder-style inputs (invalid → the workflow failed to parse). Switched to the
+  generic SLSA generator attesting the released artifact (SBOM) by digest, which is
+  the correct tool for a library (no built binary).
 
 ### Added
 - **Typed-key data API (milestone M7)** — an additive, type-safe layer over the

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,9 +101,14 @@ func (s *JSONFileStore) Save(data *WorkflowData) error {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	// Unmarshal to map for adding timestamp
+	// Unmarshal to map for adding timestamp. UseNumber so integer values survive
+	// the decode/re-encode round-trip exactly — decoding into interface{} would
+	// turn numbers into float64 and silently corrupt int64 magnitudes above 2^53
+	// (json.Number re-marshals back to the original literal verbatim).
 	var snapshot map[string]interface{}
-	if err := json.Unmarshal(snapshotData, &snapshot); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(snapshotData))
+	dec.UseNumber()
+	if err := dec.Decode(&snapshot); err != nil {
 		return fmt.Errorf("failed to unmarshal snapshot: %w", err)
 	}
 
