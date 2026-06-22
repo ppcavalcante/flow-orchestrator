@@ -26,24 +26,23 @@ go run main.go
 
 **Location**: `examples/api_workflow`
 
-An example showing how to integrate the workflow system with a REST API. It creates a simple HTTP server that accepts workflow requests and executes them.
+A command-line example that models an **API-orchestration pipeline** as a
+workflow: fetch user data, process it, send it to an analytics endpoint, and save
+it to a database. The external services are **mock clients** (no real network
+calls, no HTTP server) so the example is self-contained and deterministic.
+Configuration flags let you simulate failures and slow responses to exercise the
+error-handling and retry paths.
 
 **Key Features Demonstrated**:
-- HTTP API integration
-- Asynchronous workflow execution
-- Status reporting via API
-- Error handling in API context
+- Modeling a multi-step service pipeline as a DAG
+- Passing data between nodes via `WorkflowData`
+- Error handling and failure-injection (the simulate-* flags)
 
 **How to Run**:
 ```bash
 cd examples/api_workflow
 go run main.go
 ```
-
-**API Endpoints**:
-- `POST /workflows` - Create and start a new workflow
-- `GET /workflows/{id}` - Get workflow status
-- `GET /workflows` - List all workflows
 
 ### Error Handling
 
@@ -100,6 +99,30 @@ A complete example showcasing all features of the workflow system. This is the m
 ```bash
 cd examples/comprehensive
 go run main.go
+```
+
+### Observability (OpenTelemetry)
+
+**Location**: `examples/observability`
+
+A runnable, self-contained example of wiring the engine's metrics to a real
+OpenTelemetry SDK via the API-only bridge. It is a **separate Go module** (its own
+`go.mod` with a `replace` directive back to the library) so the OTel SDK never
+enters the library's own dependency graph. It uses a deterministic, network-free
+pipeline (a `ManualReader` feeding a `stdoutmetric` exporter), so it is safe to
+run in CI. See the [Observability guide](../guides/observability.md) for the
+instrument inventory and the production (OTLP) wiring.
+
+**Key Features Demonstrated**:
+- Host-owned OTel SDK / `MeterProvider` (the library stays API-only)
+- Enabling the library's metrics via `WithMetricsConfig`
+- Bridging the collector with `metrics.NewOTelBridge`
+- Manual collection + export of the `flow_orchestrator.operation.*` instruments
+
+**How to Run**:
+```bash
+cd examples/observability
+go run .
 ```
 
 ## Adapting Examples for Your Use Case

@@ -74,6 +74,51 @@ if err != nil {
 
 **Best for**: Production use, high-performance needs
 
+## Trust & Safety
+
+The persistence layer has a defined, deliberately bounded trust model. Read it before
+loading state that any other process or user can influence.
+
+- **Persistence files and workflow IDs are caller-controlled.** The store reads and
+  writes files under the `baseDir` you supply, named by the workflow ID you supply.
+  You own that directory and those IDs.
+- **`FlatBuffersStore.Load` rejects malformed input *before* structural traversal —
+  it does not merely recover from a panic after the fact.** FlatBuffers accessors index
+  into the file's own offsets with no bounds checking, so a corrupt file would otherwise
+  crash the process. A layered bounds guard now runs ahead of the decode: a file-size cap
+  (enforced atomically by reading through an `io.LimitReader`, so the file cannot grow between
+  the size check and the read — no stat-then-read race), a root-offset and minimum-length sanity
+  check, and per-element count caps before each load loop. Anything that fails is rejected as
+  `ErrCorruptData` with `data == nil`, deterministically and without relying on a panic. The
+  M1 `recover()` remains as a residual backstop for deep-offset cases the cheap pre-walk
+  cannot reach. The result: `Load` will not panic and will not perform an unbounded
+  allocation on hostile input.
+- **The guard checks *structure*, not *meaning* — this is the honest residual.** Go's
+  FlatBuffers runtime ships no `flatbuffers.Verifier`, so this is a hand-rolled bounds
+  guard, not a full structural verifier. Even with the guard, a *well-formed* file can
+  still (a) allocate up to the size cap — bounded, but not free; (b) carry
+  semantically-hostile-but-structurally-valid content the guard cannot detect; and (c)
+  drive `WorkflowData` into any schema-permitted state. Concretely, a near-complete
+  truncation of a valid file can still decode its in-range scalar fields and load as
+  in-bounds data rather than being rejected, because FlatBuffers places the root and vtable
+  near the front of the buffer. The contract promises **"won't panic / won't
+  unbounded-alloc,"** *not* "won't load malicious-but-valid data." See ADR-0008 for the
+  decision and its residual.
+- **`workflowID` is validated as a single safe path segment; traversal IDs are
+  rejected.** Every store entry point (Save/Load/Delete on both the FlatBuffers and JSON
+  stores) rejects an ID that is empty, contains a path separator, is non-local
+  (`..`, absolute paths, volume names), or does not survive a `filepath.Base`
+  round-trip. An ID like `../../etc/passwd` is refused with an error, not joined onto
+  `baseDir`.
+- **The engine is NOT hardened against a determined attacker feeding crafted files.**
+  The guarantees above prevent crashes and path traversal; they do not make the
+  deserializer adversarial-proof. If persistence input can cross a trust boundary,
+  validate and sandbox it before loading — do not point a store at a directory an
+  untrusted party can write to and assume safety.
+
+See *Persistence fidelity* below for the type-faithfulness limits of a save/load
+round-trip.
+
 ## Using Persistence
 
 ### Basic Usage
@@ -151,6 +196,33 @@ Ensure data stored in WorkflowData can be serialized:
 - Functions
 - Complex pointers
 - Unexported struct fields (for JSON)
+
+### Persistence fidelity
+
+Integers round-trip faithfully. Both the FlatBuffers store and the JSON store persist
+and restore integer values as `int64` with no silent loss — a value of any magnitude
+that fits in `int64` is returned intact. (The FlatBuffers store widens its on-disk
+integer field via an additive `value_long` column; older `.fb` files written before this
+change are still read correctly through a fallback.) On load the FlatBuffers store reads
+`value_long` first and only falls back to the legacy field when `value_long` is unset; a
+foreign writer that set the legacy field while leaving `value_long` zero would have its
+legacy value ignored — every value written by this library sets `value_long`, so
+in-library save/load is unaffected.
+
+Read integers back through the typed getters:
+
+- `GetInt64(key) (int64, bool)` is the portable accessor — it returns the full `int64`
+  on every architecture, including 32-bit builds. Use it whenever a value may exceed
+  `math.MaxInt32`.
+- `GetInt(key) (int, bool)` returns the platform `int`. On 64-bit builds this carries any
+  stored integer faithfully. On 32-bit builds `int` is 32 bits, so a stored value outside
+  the int32 range cannot be represented through `GetInt` — use `GetInt64` for those.
+
+Some values are still **not** a lossless round-trip — read this before relying on stored data:
+
+- **Complex values (maps, slices, structs) are JSON-stringified and read back as a
+  `string`.** Their original Go type is not recovered; on load you get a JSON string,
+  which you deserialize yourself (see *Custom Type Handling* below).
 
 ### Custom Type Handling
 

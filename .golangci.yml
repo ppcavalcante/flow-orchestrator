@@ -85,17 +85,18 @@ linters:
 
   exclusions:
     rules:
-      # Exclude all enabled linters for test files
+      # Exclude linters for test files. NOTE: staticcheck + errcheck are
+      # intentionally NOT excluded (M5/Phase 14.1 A3 de-blinding) — the gate must
+      # be real on test files too for those two, closing the hole that let the
+      # SEC-01 SA4000 tautology slip. The remaining ~16 stay excluded this round.
       - path: _test\.go
         linters:
           - gocyclo
-          - errcheck
           - gosec
           - unused
           - govet
           - ineffassign
           - revive
-          - staticcheck
           - noctx
           - bodyclose
           - gocritic
@@ -106,11 +107,13 @@ linters:
           - copyloopvar
           - prealloc
           - predeclared
-      # Exclude linters for benchmark files
+      # Exclude linters for benchmark files. NOTE: errcheck is intentionally NOT
+      # excluded here (M5/Phase 14 de-suppression) — unchecked LoadSnapshot/
+      # AddNode/AddDependency returns silently invalidate a benchmark, so errcheck
+      # is a real gate in benchmark/ too; the meaningful returns are now checked.
       - path: benchmark
         linters:
           - prealloc
-          - errcheck
           - gosec
           - revive
           - unused

@@ -12,7 +12,7 @@ This document outlines our approach to test coverage for the Flow Orchestrator p
 | internal/workflow/metrics | 70% | Medium | Metrics collection |
 | internal/workflow/utils | 70% | Medium | Utility functions |
 | internal/workflow/concurrent | 80% | Medium | Concurrency utilities |
-| pkg/workflow/fb | 0% | Low | Generated code, no testing needed |
+| internal/workflow/fb | 0% | Low | Generated code, no testing needed |
 | internal/workflow/benchmark | 0% | Low | Benchmarks are tests themselves |
 | examples/ | 0% | Low | Examples are for demonstration |
 
@@ -54,7 +54,7 @@ These packages provide important functionality but are less critical:
 
 These packages don't require testing or have minimal testing needs:
 
-1. **pkg/workflow/fb**: Contains generated FlatBuffers code.
+1. **internal/workflow/fb**: Contains generated FlatBuffers code.
    - No testing required (generated code)
 
 2. **internal/workflow/benchmark**: Contains benchmarks.

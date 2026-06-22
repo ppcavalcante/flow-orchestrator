@@ -63,7 +63,7 @@ else
 fi
 
 # Check output directory for generated code
-FB_DIR="pkg/workflow/fb"
+FB_DIR="internal/workflow/fb"
 print_header "Checking Output Directory"
 if [ ! -d "$FB_DIR" ]; then
     echo -e "${YELLOW}Output directory does not exist. Creating ${FB_DIR}${NC}"

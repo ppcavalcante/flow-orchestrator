@@ -553,7 +553,9 @@ func TestNodeBuilderWithActionErrorCases(t *testing.T) {
 			}
 		}()
 
-		_ = nodeBuilder.action.Execute(context.Background(), NewWorkflowData("test"))
+		// This Execute is expected to PANIC (caught by the deferred recover above);
+		// its error return is intentionally irrelevant.
+		_ = nodeBuilder.action.Execute(context.Background(), NewWorkflowData("test")) //nolint:errcheck // panic is the asserted behavior
 	})
 
 	t.Run("Cancelled context", func(t *testing.T) {
@@ -640,7 +642,9 @@ func TestNodeBuilderWithActionComplexCases(t *testing.T) {
 		if err == nil {
 			t.Error("Expected error from missing validation input")
 		}
-		if errMsg, exists := data.Get("error"); !exists || !strings.Contains(errMsg.(string), "not found") {
+		errMsg, exists := data.Get("error")
+		errStr, isStr := errMsg.(string)
+		if !exists || !isStr || !strings.Contains(errStr, "not found") {
 			t.Error("Validation error for missing input not properly recorded")
 		}
 	})

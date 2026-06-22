@@ -265,7 +265,9 @@ func TestWorkflowProperties(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel()
 
-			_ = dag.Execute(ctx, NewWorkflowData("test-workflow"))
+			// Execute error intentionally ignored: this property tests that
+			// cancellation halts execution, not that Execute succeeds.
+			_ = dag.Execute(ctx, NewWorkflowData("test-workflow")) //nolint:errcheck // cancellation-behavior property
 
 			// In a concurrent environment, we can't guarantee exactly how many nodes will execute
 			// before cancellation propagates. The important property is that cancellation stops

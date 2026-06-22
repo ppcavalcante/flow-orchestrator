@@ -63,7 +63,9 @@ A node represents a single unit of work in a workflow. Each node:
 - Has execution options (retries, timeout)
 
 ```go
-node := workflow.NewNode("process-data", processDataAction)
+// NewNode takes an Action; wrap a plain func with ActionFunc.
+// (The builder's AddNode(...).WithAction(...) accepts a bare func directly.)
+node := workflow.NewNode("process-data", workflow.ActionFunc(processDataAction))
 node.WithRetries(3).WithTimeout(5 * time.Second)
 ```
 
@@ -107,6 +109,25 @@ data.SetOutput("fetch-data", fetchResult)
 
 // Get node output
 output, ok := data.GetOutput("fetch-data")
+```
+
+#### Typed keys (compile-time type safety)
+
+For data shared between nodes, you can declare a typed `Key[T]` once and use the
+package-level `Set`/`Get` helpers. Producer and consumer share the key, so storing
+or reading the wrong type is a compile error rather than a runtime assertion. This
+is additive over the string API — both reach the same underlying store.
+
+```go
+// Declare once, share between nodes.
+var UserID = workflow.NewKey[int]("user_id")
+
+// Producer
+workflow.Set(data, UserID, 123)
+
+// Consumer — id is typed int, no assertion needed
+id, ok := workflow.Get(data, UserID)
+n := workflow.GetOr(data, UserID, -1) // fallback when absent/wrong-type
 ```
 
 ### WorkflowStore
@@ -184,7 +205,10 @@ Nodes have several possible status values that track their execution state:
 - `Running`: Node is currently executing
 - `Completed`: Node has completed successfully
 - `Failed`: Node has failed execution
-- `Skipped`: Node was skipped due to dependency failures
+- `Skipped`: A defined status (and persisted) for a node bypassed due to a
+  dependency failure. Note: the current executor does not mark nodes `Skipped`
+  itself — by default a node failure halts the workflow fail-fast (see Error
+  Handling below); the status exists for callers that model skip explicitly.
 
 ```go
 // Get a node's status
@@ -222,9 +246,13 @@ builder.AddNode("calculate-tax").
 
 ### Error Handling
 
-Flow Orchestrator provides several mechanisms for error handling:
+By default execution is **fail-fast**: when a node's action returns an error, the
+node is marked `Failed`, in-flight siblings are cancelled, and the workflow stops
+without running later levels. Flow Orchestrator provides several mechanisms to
+handle errors short of that:
 
 - **Retries**: Automatically retry failed actions
+- **Continue-on-error**: Let a specific node fail without halting the workflow
 - **Error Types**: Distinguish between different error categories
 - **Node Status**: Track execution status of nodes
 
@@ -237,7 +265,16 @@ builder.AddNode("flaky-service").
 builder.AddNode("flaky-service").
     WithAction(serviceAction).
     WithRetries(3)
+
+// Continue-on-error: this node may fail without failing the workflow; its
+// dependents still run and can inspect its Failed status.
+builder.AddNode("optional-step").
+    WithAction(optionalAction).
+    WithContinueOnError()
 ```
+
+See the [Error Handling guide](../guides/error-handling.md) for the full
+continue-on-error semantics.
 
 ## Next Steps
 

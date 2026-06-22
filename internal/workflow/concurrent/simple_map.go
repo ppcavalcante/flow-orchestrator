@@ -1,5 +1,5 @@
-// Package concurrent provides concurrent data structures for the workflow package.
-// This is a simplified public API for the internal concurrent system.
+// Map is a simple mutex-guarded concurrent map used internally by the workflow
+// package's ConcurrentMap wrapper.
 package concurrent
 
 import (

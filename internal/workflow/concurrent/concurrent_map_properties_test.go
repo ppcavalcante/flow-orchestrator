@@ -405,11 +405,22 @@ func TestConcurrentMapProperties(t *testing.T) {
 				cm.Set(k, v)
 			}
 
-			// Use ForEach to collect items
+			// Use ForEach to collect items. A non-int value is a property
+			// violation (we only Set ints above), so flag and fail the property
+			// rather than t.Fatal from inside the iteration closure.
 			collected := make(map[string]int)
+			typeOK := true
 			cm.ForEach(func(k string, v interface{}) {
-				collected[k] = v.(int)
+				iv, ok := v.(int)
+				if !ok {
+					typeOK = false
+					return
+				}
+				collected[k] = iv
 			})
+			if !typeOK {
+				return false
+			}
 
 			// Verify all items were collected
 			if len(collected) != len(keyValues) {

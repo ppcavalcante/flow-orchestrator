@@ -7,8 +7,13 @@ This guide will help you get up and running with Flow Orchestrator in just a few
 Install Flow Orchestrator using Go modules:
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
+go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
+
+> **Versioning:** `@latest` resolves to the most recent tag, `v0.1.1-alpha`, which predates
+> substantial hardening (M2–M4). `main` is significantly ahead and currently **unreleased** — for
+> the latest code use `@main` (or pin a commit) until the next tag is cut. See
+> [CHANGELOG](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ## Creating a Simple Workflow
 
@@ -127,9 +132,10 @@ fetchAction := func(ctx context.Context, data *workflow.WorkflowData) error {
 	return nil
 }
 
-// Create node with middleware
+// Create node with middleware.
+// stack.Apply takes an Action, so wrap the bare func with workflow.ActionFunc.
 builder.AddStartNode("fetch").
-	WithAction(stack.Apply(fetchAction))
+	WithAction(stack.Apply(workflow.ActionFunc(fetchAction)))
 ```
 
 ## Persisting Workflow State
@@ -154,14 +160,15 @@ err = workflow.Execute(context.Background())
 For file-based persistence:
 
 ```go
-// Create a JSON file store
-store, err := workflow.NewJSONFileStore("./workflow_data.json")
+// Create a JSON file store. The argument is a DIRECTORY (baseDir) — the store
+// creates it if needed and writes one file per workflow ID inside it.
+store, err := workflow.NewJSONFileStore("./workflow_data")
 if err != nil {
 	fmt.Printf("Error creating store: %v\n", err)
 	return
 }
 
-// For better performance in production, use FlatBuffers store:
+// For better performance in production, use the FlatBuffers store (also a dir):
 // store, err := workflow.NewFlatBuffersStore("./workflow_data")
 ```
 

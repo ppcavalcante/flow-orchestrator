@@ -22,6 +22,8 @@ const (
 	OpGetFloat64 = internal.OperationType("get_float64")
 	// OpGetInt represents an int get operation
 	OpGetInt = internal.OperationType("get_int")
+	// OpGetInt64 represents an int64 get operation
+	OpGetInt64 = internal.OperationType("get_int64")
 )
 
 // Operation types for node status operations

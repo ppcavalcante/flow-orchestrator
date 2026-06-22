@@ -26,6 +26,11 @@ type DAG struct {
 	// CycleNodes stores nodes involved in cycles (if any)
 	CycleNodes []string
 
+	// config controls execution behavior (e.g. per-level concurrency).
+	// Defaults to DefaultConfig(); override via WorkflowBuilder.WithExecutionConfig
+	// or DAG.WithExecutionConfig.
+	config ExecutionConfig
+
 	// mu protects concurrent access to the DAG
 	mu sync.RWMutex
 }
@@ -37,6 +42,7 @@ func NewDAG(name string) *DAG {
 		StartNodes: make([]*Node, 0, 4), // Pre-allocate with small capacity
 		EndNodes:   make([]*Node, 0, 4), // Pre-allocate with small capacity
 		Name:       name,
+		config:     DefaultConfig(),
 	}
 }
 
@@ -48,7 +54,15 @@ func NewDAGWithCapacity(name string, nodeCapacity int) *DAG {
 		StartNodes: make([]*Node, 0, nodeCapacity/4+1), // Estimate start nodes
 		EndNodes:   make([]*Node, 0, nodeCapacity/4+1), // Estimate end nodes
 		Name:       name,
+		config:     DefaultConfig(),
 	}
+}
+
+// WithExecutionConfig sets the execution configuration (e.g. per-level
+// concurrency) and returns the DAG for chaining.
+func (d *DAG) WithExecutionConfig(config ExecutionConfig) *DAG {
+	d.config = config
+	return d
 }
 
 // AddNode adds a node to the DAG.
@@ -323,8 +337,9 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 		levelName := fmt.Sprintf("Level %d", levelIndex)
 		data.Set(fmt.Sprintf("current_level_%s", d.Name), levelName)
 
-		// Execute all nodes in this level in parallel
-		if err := ExecuteNodesInLevel(ctx, level, data); err != nil {
+		// Execute all nodes in this level in parallel, bounded by the
+		// configured per-level concurrency limit.
+		if err := executeNodesInLevel(ctx, level, data, d.config.MaxConcurrency); err != nil {
 			return fmt.Errorf("error executing level %d: %w", levelIndex, err)
 		}
 	}

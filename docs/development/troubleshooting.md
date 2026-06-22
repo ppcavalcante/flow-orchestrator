@@ -41,8 +41,8 @@ This guide covers common issues you might encounter when developing with Flow Or
 1. **Node Execution Error**: Check the error message and node status.
    ```go
    if err != nil {
-       // Check which node failed
-       for _, nodeName := range dag.GetNodeNames() {
+       // Check which node failed (dag.Nodes is keyed by node name)
+       for nodeName := range dag.Nodes {
            status, _ := data.GetNodeStatus(nodeName)
            log.Printf("Node %s: %s", nodeName, status)
        }
@@ -75,10 +75,12 @@ This guide covers common issues you might encounter when developing with Flow Or
 
 **Possible Causes and Solutions**:
 
-1. **Insufficient Concurrency**: Check your concurrency settings.
+1. **Insufficient Concurrency**: Check your per-level concurrency setting.
    ```go
-   // Set maximum concurrency
-   workflow.Options.MaxConcurrency = runtime.NumCPU()
+   // Set maximum concurrency per level on the builder (or DAG)
+   builder.WithExecutionConfig(workflow.ExecutionConfig{
+       MaxConcurrency: runtime.NumCPU(),
+   })
    ```
 
 2. **Inefficient Actions**: Actions may be inefficient.
@@ -110,44 +112,34 @@ This guide covers common issues you might encounter when developing with Flow Or
 
 ## Debugging Techniques
 
-### Enable Debug Logging
+### Enable execution logging
+
+The library has no global log-level option; action execution is observed by
+wrapping actions with `LoggingMiddleware`, which logs when each action starts and
+completes (including errors).
 
 ```go
-// Set log level to debug
-options := workflow.WorkflowOptions{
-    LogLevel: workflow.LogLevelDebug,
-}
-
-// Create a workflow with the options
-workflow := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "debug-workflow",
-    Options:    options,
-}
-```
-
-### Use Middleware for Debugging
-
-```go
-// Add logging middleware
+// Add logging middleware (no arguments — it uses the standard log package)
 stack := workflow.NewMiddlewareStack()
-stack.Use(workflow.LoggingMiddleware(
-    workflow.WithLogLevel(workflow.LogLevelDebug),
-))
+stack.Use(workflow.LoggingMiddleware())
 
 // Apply middleware to actions
 action = stack.Apply(action)
 ```
 
-### Visualize the DAG
+### Inspect the DAG structure
+
+The DAG does not ship a built-in printer; its structure is exposed via public
+fields and `GetLevels()`, which you can walk to inspect or render:
 
 ```go
-// Print the DAG structure
-dag.PrintGraph()
-
-// Or create a DOT representation for visualization
-dot := dag.ToDOT()
-fmt.Println(dot)
+// Inspect nodes and their dependency levels
+for name := range dag.Nodes {
+    fmt.Println("node:", name)
+}
+for i, level := range dag.GetLevels() {
+    fmt.Printf("level %d: %d node(s)\n", i, len(level))
+}
 ```
 
 ## When to Seek Help

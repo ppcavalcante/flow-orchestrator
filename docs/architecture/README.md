@@ -43,6 +43,8 @@ type Action interface {
 type WorkflowStore interface {
     Save(data *WorkflowData) error
     Load(workflowID string) (*WorkflowData, error)
+    ListWorkflows() ([]string, error)
+    Delete(workflowID string) error
 }
 ```
 
@@ -64,8 +66,8 @@ For detailed information on memory management and concurrent data structure desi
 ```mermaid
 graph TD
     A[Client Application] -->|Uses| B[Public API]
-    B -->|Manages| C[Workflow Engine]
-    C -->|Executes| D[DAG Executor]
+    B -->|Builds| C[Workflow / DAG]
+    C -->|DAG.Execute| D[Level-wise runner]
     D -->|Runs| E[Actions]
     D -->|Persists| F[Store]
     E -->|Updates| G[WorkflowData]
@@ -75,13 +77,13 @@ graph TD
         H[Custom Actions]
         I[Middleware]
         J[Custom Stores]
-        K[Observers]
+        K[Metrics / OTel bridge]
     end
     
     H -->|Extends| E
     I -->|Enhances| E
     J -->|Implements| F
-    K -->|Monitors| C
+    K -->|Observes| C
     
     style A fill:#f9f,stroke:#333,stroke-width:2px
     style B fill:#bbf,stroke:#333,stroke-width:2px

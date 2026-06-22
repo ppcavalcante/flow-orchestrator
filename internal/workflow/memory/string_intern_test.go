@@ -3,7 +3,7 @@ package memory
 import (
 	"testing"
 
-	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
+	workflow "github.com/ppcavalcante/flow-orchestrator/internal/workflow"
 )
 
 // TestStringInternBasic tests basic string interning functionality

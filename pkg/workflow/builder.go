@@ -9,22 +9,24 @@ import (
 // NodeBuilder provides a fluent API for configuring workflow nodes.
 // It is part of the builder pattern for creating workflows.
 type NodeBuilder struct {
-	name         string
-	action       Action
-	actionErr    error // stores error if WithAction received an unsupported type
-	dependencies []string
-	retryCount   int
-	timeout      time.Duration
-	workflow     *WorkflowBuilder
+	name            string
+	action          Action
+	actionErr       error // stores error if WithAction received an unsupported type
+	dependencies    []string
+	retryCount      int
+	timeout         time.Duration
+	continueOnError bool
+	workflow        *WorkflowBuilder
 }
 
 // WorkflowBuilder provides a fluent API for creating workflow definitions.
 // It simplifies the process of defining workflows with dependencies between nodes.
 type WorkflowBuilder struct {
-	nodes      []*NodeBuilder
-	startNodes []string
-	workflowID string
-	store      WorkflowStore
+	nodes           []*NodeBuilder
+	startNodes      []string
+	workflowID      string
+	store           WorkflowStore
+	executionConfig *ExecutionConfig // nil => DAG uses DefaultConfig()
 }
 
 // NewWorkflowBuilder creates a new workflow builder.
@@ -54,6 +56,14 @@ func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder {
 // Returns the builder for method chaining.
 func (b *WorkflowBuilder) WithStateStore(store WorkflowStore) *WorkflowBuilder {
 	b.store = store
+	return b
+}
+
+// WithExecutionConfig sets the execution configuration (e.g. per-level
+// concurrency) applied to the DAG produced by Build.
+// Returns the builder for method chaining.
+func (b *WorkflowBuilder) WithExecutionConfig(config ExecutionConfig) *WorkflowBuilder {
+	b.executionConfig = &config
 	return b
 }
 
@@ -135,12 +145,28 @@ func (n *NodeBuilder) WithTimeout(timeout time.Duration) *NodeBuilder {
 	return n
 }
 
+// WithContinueOnError marks the node so that a failure does not fail the
+// workflow. The node is recorded as Failed and the rest of the DAG continues;
+// dependents may inspect the node's Failed status (via WorkflowData.GetNodeStatus)
+// and branch on it. Default (unset) preserves the fail-fast behavior.
+// Returns the builder for method chaining.
+func (n *NodeBuilder) WithContinueOnError() *NodeBuilder {
+	n.continueOnError = true
+	return n
+}
+
 // Build creates a DAG from the workflow definition.
 // Returns an error if the workflow definition is invalid (e.g., has cycles).
 func (b *WorkflowBuilder) Build() (*DAG, error) {
 	// Create a new DAG with capacity hints based on the number of nodes
 	nodeCount := len(b.nodes)
 	dag := NewDAGWithCapacity(b.workflowID, nodeCount)
+
+	// Apply a custom execution config if one was provided; otherwise the DAG
+	// keeps its DefaultConfig().
+	if b.executionConfig != nil {
+		dag.WithExecutionConfig(*b.executionConfig)
+	}
 
 	// Map to track node dependency counts for capacity hints
 	nodeDependencyCounts := make(map[string]int, nodeCount)
@@ -170,6 +196,9 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 		}
 		if builder.timeout > 0 {
 			node.WithTimeout(builder.timeout)
+		}
+		if builder.continueOnError {
+			node.WithContinueOnError()
 		}
 
 		// Add node to DAG

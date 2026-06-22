@@ -4,7 +4,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/ppcavalcante/flow-orchestrator.svg)](https://pkg.go.dev/github.com/ppcavalcante/flow-orchestrator)
 [![GitHub tag](https://img.shields.io/github/v/tag/ppcavalcante/flow-orchestrator?include_prereleases&label=release)](https://github.com/ppcavalcante/flow-orchestrator/tags)
 [![Build Status](https://github.com/ppcavalcante/flow-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/ppcavalcante/flow-orchestrator/actions)
+[![codecov](https://codecov.io/gh/ppcavalcante/flow-orchestrator/branch/main/graph/badge.svg)](https://codecov.io/gh/ppcavalcante/flow-orchestrator)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status-alpha-release)
 
 A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes.
 
@@ -24,15 +26,25 @@ Flow Orchestrator is a flexible workflow engine designed for embedding within Go
 - **Observable**: Comprehensive metrics for monitoring and optimization
 - **Extensible**: Designed to support multiple orchestration patterns
 - **Embeddable**: Clean API for integration into any Go application
-- **Rigorously Tested**: Property-based testing ensures correctness across a wide range of inputs
+- **Type-Safe Data**: Optional generic typed keys (`Key[T]`) over the shared data store for compile-time-checked producer/consumer contracts
+- **Resilient**: Per-node continue-on-error lets selected steps fail without halting the workflow (default is fail-fast)
+- **Rigorously Tested & Formally Modeled**: Property-based tests (gopter) over random DAGs plus a TLC-checked TLA+ model of the executor verify the core invariants
 
 ## Quick Start
 
 ### Installation
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
+go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
+
+> **Versioning:** the only published tags are `v0.1.0` and `v0.1.1-alpha`, so `@latest` resolves to
+> `v0.1.1-alpha` — which **predates the M2–M7 hardening** (typed-int fidelity, untrusted-input bounds,
+> CI gates, OpenTelemetry export, typed-key data + continue-on-error + formal verification). The
+> current code lives on `main` and is **not yet tagged**; build against it with `@main`
+> (`go get github.com/ppcavalcante/flow-orchestrator@main`) until the next release tag is cut. The
+> in-code dev version (`pkg/workflow.Version`) reads `0.7.0-alpha` — a development marker, not a
+> published tag. See [CHANGELOG.md](CHANGELOG.md) and [STABILITY.md](STABILITY.md).
 
 ### Providing Feedback
 
@@ -212,6 +224,20 @@ Key properties tested include:
 - Workflow data operations (data store correctly handles values)
 - Node status transitions (nodes transition through correct states)
 
+The executor's core invariants — topological order, peak concurrency within
+`MaxConcurrency`, run-once completeness, dependencies-before-run, and the
+continue-on-error / fail-fast failure semantics — are covered by the gopter suite
+in [`pkg/workflow/invariants_property_test.go`](pkg/workflow/invariants_property_test.go),
+run as part of `go test ./...`.
+
+### Formal verification
+
+Beyond the property tests, the level executor is modeled in TLA+ under
+[`specs/`](specs/README.md) and machine-checked with TLC for safety (concurrency
+bound, dependencies-before-run, fail-fast halting) and liveness (termination /
+deadlock-freedom). `specs/README.md` documents the model, the scenarios, and the
+honest scope (design-exhaustive model vs implementation-sampled tests).
+
 For more information on our testing approach, see our [Test Coverage Strategy](docs/development/test_coverage_strategy.md) documentation.
 
 ## Architecture
@@ -311,7 +337,7 @@ Flow Orchestrator is designed for high performance, with careful attention to me
 
 - **Core component performance**: DAG construction, workflow data operations, node status management
 - **Memory optimization**: Arena allocation, string interning, memory pooling
-- **Concurrency and scalability**: Parallel execution, worker pool efficiency
+- **Concurrency and scalability**: level-wise parallel execution under a bounded concurrency limit
 - **Real-world scenarios**: E-commerce, ETL processing, API orchestration
 
 Key performance characteristics:
@@ -338,7 +364,7 @@ go run main.go
 
 ### API Workflow
 
-An example showing how to integrate the workflow system with a REST API:
+A command-line example that models an API-orchestration pipeline (fetch → process → send → save) as a workflow, using mock service clients (no HTTP server):
 
 ```bash
 cd examples/api_workflow
@@ -369,7 +395,8 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Current Version**: v0.1.1 (Alpha)
+- **In-development version**: `0.7.0-alpha` (the `pkg/workflow.Version` marker on `main`; **not yet a published tag**)
+- **Latest published tag**: `v0.1.1-alpha` (predates the M2–M7 hardening — see the Versioning note under [Installation](#installation))
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.
 

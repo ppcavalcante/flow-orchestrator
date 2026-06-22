@@ -39,6 +39,11 @@ check_package() {
   if [ $exit_code -ne 0 ]; then
     echo -e "${RED}Tests failed for package $package${NC}"
     echo "$test_output"
+    # A failing test suite is a coverage-gate FAILURE — count it and flag it so
+    # the script cannot exit 0 with red tests (the swallow-bug fix). Previously
+    # this bare `return` left FAILED=0 and TOTAL unincremented -> green on red.
+    ((TOTAL_PACKAGES++))
+    ((FAILED++))
     return
   fi
   

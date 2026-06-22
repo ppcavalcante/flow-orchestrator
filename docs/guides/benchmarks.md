@@ -8,7 +8,7 @@ Flow Orchestrator's benchmark suite evaluates several critical aspects of the sy
 
 1. **Core component performance**: DAG construction, workflow data operations, node status management
 2. **Memory optimization**: Arena allocation, string interning, memory pooling
-3. **Concurrency and scalability**: Parallel execution, worker pool efficiency
+3. **Concurrency and scalability**: level-wise parallel execution under a bounded concurrency limit
 4. **Real-world scenarios**: E-commerce, ETL processing, API orchestration
 
 The benchmarks are designed to measure both micro-level performance (individual operations) and macro-level performance (end-to-end workflows) under various conditions and scales.
@@ -39,7 +39,7 @@ The benchmark suite is organized into several categories:
 
 - **Node Scaling**: Tests how the system scales with increasing node counts
 - **Workflow Size Scaling**: Measures performance with increasing workflow complexity
-- **Concurrency Scaling**: Evaluates scaling with different worker pool configurations
+- **Concurrency Scaling**: Evaluates scaling with different `MaxConcurrency` settings
 
 ## Key Performance Metrics
 
@@ -184,7 +184,7 @@ Based on the benchmark results, the following optimization strategies are recomm
 
 - Use arena allocation for medium-sized objects (256-1024 bytes)
 - Employ string interning for workflows with many repeated strings
-- Use buffer pooling for serialization and I/O operations
+- Buffer pooling for serialization is applied internally by the engine (not a user-facing knob)
 - Reset arenas instead of creating new ones for repeated operations
 
 ### 3. Concurrency Optimization
@@ -199,26 +199,36 @@ Based on the benchmark results, the following optimization strategies are recomm
 - Keep workflow data compact and focused
 - Clean up temporary data when no longer needed
 - Use appropriate data types (avoid interface{} when possible)
-- Consider using ReadMap for read-heavy workflows
+- Consider `ReadOptimizedWorkflowDataConfig` for read-heavy workflows
 
 ## Running Your Own Benchmarks
 
-To benchmark your own workflows, use the built-in benchmarking tools:
+The library does not ship a public benchmarking API; benchmark your own
+workflows with Go's standard `testing.B` harness, executing the workflow inside
+the benchmark loop:
 
 ```go
-// Create a benchmark configuration
-config := workflow.BenchmarkConfig{
-    Iterations: 10,
-    WarmupRuns: 2,
-    TrackMemory: true,
+func BenchmarkYourWorkflow(b *testing.B) {
+    dag, err := buildYourDAG() // your builder code
+    if err != nil {
+        b.Fatal(err)
+    }
+
+    b.ReportAllocs()
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        data := workflow.NewWorkflowData("bench")
+        if err := dag.Execute(context.Background(), data); err != nil {
+            b.Fatal(err)
+        }
+    }
 }
+```
 
-// Create and run a benchmark
-results := workflow.Benchmark(dag, config)
+Run it (with memory stats) via:
 
-// Print results
-fmt.Printf("Execution Time: %v (±%v)\n", results.AvgTime, results.StdDev)
-fmt.Printf("Memory: %d bytes, %d allocations\n", results.AvgMemory, results.AvgAllocs)
+```bash
+go test -bench=BenchmarkYourWorkflow -benchmem
 ```
 
 For more detailed profiling, use Go's built-in profiling tools:

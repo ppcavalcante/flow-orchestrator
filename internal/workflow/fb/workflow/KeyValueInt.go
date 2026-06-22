@@ -61,14 +61,29 @@ func (rcv *KeyValueInt) MutateValue(n int32) bool {
 	return rcv._tab.MutateInt32Slot(6, n)
 }
 
+func (rcv *KeyValueInt) ValueLong() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *KeyValueInt) MutateValueLong(n int64) bool {
+	return rcv._tab.MutateInt64Slot(8, n)
+}
+
 func KeyValueIntStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func KeyValueIntAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
 }
 func KeyValueIntAddValue(builder *flatbuffers.Builder, value int32) {
 	builder.PrependInt32Slot(1, value, 0)
+}
+func KeyValueIntAddValueLong(builder *flatbuffers.Builder, valueLong int64) {
+	builder.PrependInt64Slot(2, valueLong, 0)
 }
 func KeyValueIntEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

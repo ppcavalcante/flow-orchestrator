@@ -105,13 +105,13 @@ func BenchmarkDAGConstructionPerformance(b *testing.B) {
 				dag := workflow.NewDAG(fmt.Sprintf("dag-construction-bench-%d", size))
 				for j := 0; j < size; j++ {
 					node := workflow.NewNode(nodeNames[j], action)
-					dag.AddNode(node)
+					mustAddNode(dag, node)
 				}
 
 				// Add some dependencies (linear chain for simplicity)
 				if size > 1 {
 					for j := 0; j < size-1; j++ {
-						dag.AddDependency(nodeNames[j], nodeNames[j+1])
+						mustAddDep(dag, nodeNames[j], nodeNames[j+1])
 					}
 				}
 			}

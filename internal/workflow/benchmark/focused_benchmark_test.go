@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	wfintern "github.com/ppcavalcante/flow-orchestrator/internal/workflow"
 	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena"
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
@@ -33,7 +34,7 @@ func BenchmarkFocusedStringInterning(b *testing.B) {
 
 	b.Run("IndividualIntern", func(b *testing.B) {
 		b.ReportAllocs()
-		interner := workflow.NewStringInterner()
+		interner := wfintern.NewStringInterner()
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -49,7 +50,7 @@ func BenchmarkFocusedStringInterning(b *testing.B) {
 
 	b.Run("BatchIntern", func(b *testing.B) {
 		b.ReportAllocs()
-		interner := workflow.NewStringInterner()
+		interner := wfintern.NewStringInterner()
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -64,12 +65,12 @@ func BenchmarkFocusedStringInterning(b *testing.B) {
 	b.Run("GlobalIntern", func(b *testing.B) {
 		b.ReportAllocs()
 		// Reset the global interner
-		workflow.ConfigureGlobalStringInterner(10000, 30*time.Second, 0.8)
+		wfintern.ConfigureGlobalStringInterner(10000, 30*time.Second, 0.8)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			for _, s := range testStrings {
-				interned := workflow.InternString(s)
+				interned := wfintern.InternString(s)
 				// Use the interned string to prevent compiler optimizations
 				if len(interned) == 0 && len(s) > 0 {
 					b.Fatal("Interned string should not be empty")
@@ -81,11 +82,11 @@ func BenchmarkFocusedStringInterning(b *testing.B) {
 	b.Run("GlobalBatchIntern", func(b *testing.B) {
 		b.ReportAllocs()
 		// Reset the global interner
-		workflow.ConfigureGlobalStringInterner(10000, 30*time.Second, 0.8)
+		wfintern.ConfigureGlobalStringInterner(10000, 30*time.Second, 0.8)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			internedStrings := workflow.InternStringBatch(testStrings)
+			internedStrings := wfintern.InternStringBatch(testStrings)
 			// Use the interned strings to prevent compiler optimizations
 			if len(internedStrings) != len(testStrings) {
 				b.Fatal("Interned strings count should match original")
@@ -129,7 +130,7 @@ func BenchmarkFocusedStringInterning(b *testing.B) {
 	// Test memory usage and GC impact
 	b.Run("MemoryUsage", func(b *testing.B) {
 		b.ReportAllocs()
-		interner := workflow.NewStringInterner()
+		interner := wfintern.NewStringInterner()
 
 		// Generate a large number of unique strings
 		uniqueStrings := make([]string, 10000)
@@ -517,11 +518,16 @@ func BenchmarkFocusedSerialization(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				// Create snapshot
-				snapshot, _ := data.Snapshot()
+				snapshot, err := data.Snapshot()
+				if err != nil {
+					b.Fatalf("Snapshot failed: %v", err)
+				}
 
 				// Create new data store and restore
 				newData := workflow.NewWorkflowData("test")
-				newData.LoadSnapshot(snapshot)
+				if err := newData.LoadSnapshot(snapshot); err != nil {
+					b.Fatalf("Failed to load snapshot: %v", err)
+				}
 			}
 		})
 	}
@@ -541,16 +547,22 @@ func BenchmarkFocusedWorkflowExecution(b *testing.B) {
 				nodeName := fmt.Sprintf("node%d", i)
 				action := createBenchmarkAction(nodeName)
 				node := workflow.NewNode(nodeName, action)
-				dag.AddNode(node)
+				if err := dag.AddNode(node); err != nil {
+					b.Fatalf("Failed to add node: %v", err)
+				}
 
 				// Add dependencies to create a realistic workflow
 				if i > 0 {
 					// Connect to previous node
-					dag.AddDependency(nodeName, fmt.Sprintf("node%d", i-1))
+					if err := dag.AddDependency(nodeName, fmt.Sprintf("node%d", i-1)); err != nil {
+						b.Fatalf("Failed to add dependency: %v", err)
+					}
 
 					// Add some cross-dependencies for more complex graphs
 					if i > 5 && i%5 == 0 {
-						dag.AddDependency(nodeName, fmt.Sprintf("node%d", i-5))
+						if err := dag.AddDependency(nodeName, fmt.Sprintf("node%d", i-5)); err != nil {
+							b.Fatalf("Failed to add dependency: %v", err)
+						}
 					}
 				}
 			}
@@ -958,7 +970,7 @@ func createComplexWorkflow(nodeCount, depth int) (*workflow.DAG, []*workflow.Nod
 		nodeName := fmt.Sprintf("node-%d", i)
 		action := createBenchmarkAction(nodeName)
 		node := workflow.NewNode(nodeName, action)
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 		nodes = append(nodes, node)
 	}
 
@@ -970,7 +982,7 @@ func createComplexWorkflow(nodeCount, depth int) (*workflow.DAG, []*workflow.Nod
 			// Pick a random node from the previous 'depth' nodes
 			depIndex := i - (rand.Intn(depth) + 1)
 			if depIndex >= 0 {
-				dag.AddDependency(nodes[i].Name, nodes[depIndex].Name)
+				mustAddDep(dag, nodes[i].Name, nodes[depIndex].Name)
 			}
 		}
 	}
@@ -979,6 +991,22 @@ func createComplexWorkflow(nodeCount, depth int) (*workflow.DAG, []*workflow.Nod
 }
 
 // Helper functions
+
+// mustAddNode / mustAddDep wrap DAG construction in the setup helpers below
+// (which have no *testing.B in scope). A graph that cannot be built is a broken
+// benchmark — panic loudly rather than silently drop the error (errcheck
+// check-blank also forbids a bare _ = here).
+func mustAddNode(dag *workflow.DAG, node *workflow.Node) {
+	if err := dag.AddNode(node); err != nil {
+		panic(fmt.Sprintf("benchmark setup: AddNode: %v", err))
+	}
+}
+
+func mustAddDep(dag *workflow.DAG, from, to string) {
+	if err := dag.AddDependency(from, to); err != nil {
+		panic(fmt.Sprintf("benchmark setup: AddDependency(%s,%s): %v", from, to, err))
+	}
+}
 
 // createBenchmarkAction creates a test action that simulates work
 func createBenchmarkAction(name string) workflow.Action {
@@ -1001,14 +1029,14 @@ func createLinearDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
 		nodeName := fmt.Sprintf("node%d", i)
 		node := workflow.NewNode(nodeName, createBenchmarkAction(nodeName))
 		nodes[i] = node
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 	}
 
 	// Add dependencies
 	for i := 1; i < count; i++ {
 		fromName := fmt.Sprintf("node%d", i-1)
 		toName := fmt.Sprintf("node%d", i)
-		dag.AddDependency(toName, fromName)
+		mustAddDep(dag, toName, fromName)
 	}
 
 	return dag, nodes
@@ -1024,21 +1052,21 @@ func createDiamondDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
 		nodeName := fmt.Sprintf("node%d", i)
 		node := workflow.NewNode(nodeName, createBenchmarkAction(nodeName))
 		nodes[i] = node
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 	}
 
 	// Add dependencies to create diamond pattern
 	for i := 1; i < count; i++ {
 		// First half depends on node0
 		if i <= count/2 {
-			dag.AddDependency(fmt.Sprintf("node%d", i), "node0")
+			mustAddDep(dag, fmt.Sprintf("node%d", i), "node0")
 		} else {
 			// Second half depends on middle nodes
 			dep1 := fmt.Sprintf("node%d", i/2)
 			dep2 := fmt.Sprintf("node%d", i/2+1)
-			dag.AddDependency(fmt.Sprintf("node%d", i), dep1)
+			mustAddDep(dag, fmt.Sprintf("node%d", i), dep1)
 			if dep1 != dep2 {
-				dag.AddDependency(fmt.Sprintf("node%d", i), dep2)
+				mustAddDep(dag, fmt.Sprintf("node%d", i), dep2)
 			}
 		}
 	}
@@ -1056,13 +1084,13 @@ func createComplexDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
 		nodeName := fmt.Sprintf("node%d", i)
 		node := workflow.NewNode(nodeName, createBenchmarkAction(nodeName))
 		nodes[i] = node
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 	}
 
 	// Add dependencies to create complex pattern
 	for i := 1; i < count; i++ {
 		// Always depend on at least one previous node
-		dag.AddDependency(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
+		mustAddDep(dag, fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
 
 		// Add some random dependencies
 		maxDeps := 3
@@ -1074,7 +1102,7 @@ func createComplexDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
 		for d := 0; d < numDeps; d++ {
 			depIdx := rand.Intn(i)
 			depName := fmt.Sprintf("node%d", depIdx)
-			dag.AddDependency(fmt.Sprintf("node%d", i), depName)
+			mustAddDep(dag, fmt.Sprintf("node%d", i), depName)
 		}
 	}
 

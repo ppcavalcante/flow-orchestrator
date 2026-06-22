@@ -749,9 +749,11 @@ func TestInstrumentedRWMutexRLockContention(t *testing.T) {
 	// Try to acquire read lock in a goroutine (will block)
 	done := make(chan struct{})
 	go func() {
-		// This will block until the write lock is released
+		// This will block until the write lock is released. SA2001 intentional:
+		// the RLock/RUnlock pair is the lock-contention probe under test (it must
+		// block until the writer releases), not a critical section.
 		mutex.RLock()
-		mutex.RUnlock()
+		mutex.RUnlock() //nolint:staticcheck // SA2001: empty CS is the contention probe
 		close(done)
 	}()
 

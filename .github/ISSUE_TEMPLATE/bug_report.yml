@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a defect in Flow Orchestrator
+title: "fix: <short description>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Flow Orchestrator is **pre-1.0 alpha** and the latest
+        tagged release (`v0.1.1-alpha`) predates substantial hardening — please confirm
+        whether you can reproduce against the current `main` before filing.
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Tag, `main`, or commit SHA you are running. (`main` is ahead of the latest tag and unreleased.)
+      placeholder: "main @ <sha>  or  v0.1.1-alpha"
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version`.
+      placeholder: "go1.24.x"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps or a runnable code sample / failing test.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error and, if a concurrency/state issue, the `go test -race` output.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Anything else — OS, environment, stack traces, related issues.
+    validations:
+      required: false

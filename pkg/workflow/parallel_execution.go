@@ -7,108 +7,29 @@ import (
 	"time"
 )
 
-// ExecutionConfig holds configuration options for DAG execution
+// DefaultMaxConcurrency is the default per-level concurrency limit used when
+// ExecutionConfig.MaxConcurrency is unset or non-positive. Concurrency is
+// always bounded — there is no "unbounded" mode — because an unbounded level
+// would spawn one goroutine per node, a goroutine-explosion / DoS hazard on
+// large levels.
+const DefaultMaxConcurrency = 16
+
+// ExecutionConfig holds configuration options for DAG execution.
 type ExecutionConfig struct {
-	MaxConcurrency int  // Maximum number of concurrent executions
-	PreserveOrder  bool // Whether to preserve execution order in results
+	MaxConcurrency int // Maximum number of nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency)
 }
 
-// DefaultConfig returns default execution configuration
+// DefaultConfig returns the default execution configuration.
 func DefaultConfig() ExecutionConfig {
 	return ExecutionConfig{
-		MaxConcurrency: 4,
-		PreserveOrder:  true,
+		MaxConcurrency: DefaultMaxConcurrency,
 	}
 }
 
-// ParallelNodeExecutor executes nodes in parallel
-type ParallelNodeExecutor struct {
-	config ExecutionConfig
-}
-
-// NewParallelNodeExecutor creates a new executor with the given config
-func NewParallelNodeExecutor(config ExecutionConfig) *ParallelNodeExecutor {
-	return &ParallelNodeExecutor{
-		config: config,
-	}
-}
-
-// ExecuteNodes executes multiple nodes in parallel.
+// executeNodesInLevel executes all nodes in a level in parallel, bounded by
+// maxConcurrency (a non-positive value coerces to DefaultMaxConcurrency).
 // If any node fails, the context is cancelled to stop sibling goroutines.
-func (e *ParallelNodeExecutor) ExecuteNodes(ctx context.Context, nodes []*Node, data *WorkflowData) error {
-	// Create a cancellable context so we can stop siblings on first failure
-	execCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Create error channel and wait group
-	errChan := make(chan error, len(nodes))
-	var wg sync.WaitGroup
-
-	// Create semaphore to limit concurrency
-	maxConcurrency := e.config.MaxConcurrency
-	if maxConcurrency <= 0 {
-		maxConcurrency = 4 // Default to 4 concurrent executions
-	}
-	semaphore := make(chan struct{}, maxConcurrency)
-
-	// Execute each node in parallel
-	for _, node := range nodes {
-		// Skip nodes that are already completed
-		if status, _ := data.GetNodeStatus(node.Name); status == Completed {
-			continue
-		}
-
-		// Check dependencies
-		dependenciesComplete := true
-		for _, dep := range node.DependsOn {
-			if status, _ := data.GetNodeStatus(dep.Name); status != Completed {
-				dependenciesComplete = false
-				errChan <- fmt.Errorf("dependency %s of node %s is not completed", dep.Name, node.Name)
-				break
-			}
-		}
-
-		if !dependenciesComplete {
-			continue
-		}
-
-		// Launch goroutine for node execution
-		wg.Add(1)
-		go func(n *Node) {
-			defer wg.Done()
-
-			// Acquire semaphore to limit concurrency
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			// Execute the node with the cancellable context
-			startTime := time.Now()
-			err := n.Execute(execCtx, data)
-
-			if err != nil {
-				cancel()
-				errChan <- fmt.Errorf("node %s failed after %v: %w", n.Name, time.Since(startTime), err)
-			}
-		}(node)
-	}
-
-	// Wait for all nodes to complete
-	wg.Wait()
-	close(errChan)
-
-	// Check for errors
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// ExecuteNodesInLevel executes all nodes in a level in parallel.
-// If any node fails, the context is cancelled to stop sibling goroutines.
-func ExecuteNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData) error {
+func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData, maxConcurrency int) error {
 	// Create a cancellable context so we can stop siblings on first failure
 	levelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -117,8 +38,12 @@ func ExecuteNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData)
 	errChan := make(chan error, len(level))
 	var wg sync.WaitGroup
 
-	// Semaphore to limit concurrency (default 16)
-	semaphore := make(chan struct{}, 16)
+	// Semaphore to limit concurrency. A non-positive limit coerces to the
+	// bounded default; concurrency is never unbounded.
+	if maxConcurrency <= 0 {
+		maxConcurrency = DefaultMaxConcurrency
+	}
+	semaphore := make(chan struct{}, maxConcurrency)
 
 	// Execute each node in this level in parallel
 	for _, node := range level {
@@ -127,14 +52,24 @@ func ExecuteNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData)
 			continue
 		}
 
-		// Check dependencies
+		// Check dependencies. A dependency is "resolved" (does not block this
+		// node) when it Completed, OR (DEC-P21-depguard) when it is a
+		// continue-on-error node that Failed: such a failure is observable to
+		// this node via status but must not halt the workflow. A Failed dep
+		// that is NOT continue-on-error still blocks (fail-fast), and
+		// Skipped/Running/Pending deps still block as before.
 		dependenciesComplete := true
 		for _, dep := range node.DependsOn {
-			if status, _ := data.GetNodeStatus(dep.Name); status != Completed {
-				dependenciesComplete = false
-				errChan <- fmt.Errorf("dependency %s of node %s is not completed", dep.Name, node.Name)
-				break
+			status, _ := data.GetNodeStatus(dep.Name)
+			if status == Completed {
+				continue
 			}
+			if dep.ContinueOnError && status == Failed {
+				continue
+			}
+			dependenciesComplete = false
+			errChan <- fmt.Errorf("dependency %s of node %s is not completed", dep.Name, node.Name)
+			break
 		}
 
 		if !dependenciesComplete {
@@ -155,7 +90,14 @@ func ExecuteNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData)
 			err := n.Execute(levelCtx, data)
 
 			if err != nil {
-				// Cancel sibling goroutines on failure
+				if n.ContinueOnError {
+					// Continue-on-error: the node is already marked Failed by
+					// n.Execute. Do NOT cancel siblings and do NOT push to the
+					// fail-fast error channel — the workflow proceeds and
+					// dependents observe the Failed status. (DEC-M7-failure)
+					return
+				}
+				// Fail-fast (default): cancel sibling goroutines and report.
 				cancel()
 				errChan <- fmt.Errorf("node %s failed after %v: %w", n.Name, time.Since(startTime), err)
 			}

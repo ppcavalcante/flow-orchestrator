@@ -6,9 +6,9 @@ import (
 )
 
 func TestNewStringInterner(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 	if interner == nil {
-		t.Fatal("NewStringInterner returned nil")
+		t.Fatal("newStringInterner returned nil")
 	}
 	if interner.intern == nil {
 		t.Fatal("Internal interner is nil")
@@ -18,7 +18,7 @@ func TestNewStringInterner(t *testing.T) {
 func TestNewStringInternerWithCapacity(t *testing.T) {
 	capacity := 100
 	commonStringsCount := 10
-	interner := NewStringInternerWithCapacity(capacity, commonStringsCount)
+	interner := newStringInternerWithCapacity(capacity, commonStringsCount)
 
 	if interner == nil {
 		t.Fatal("NewStringInternerWithCapacity returned nil")
@@ -29,7 +29,7 @@ func TestNewStringInternerWithCapacity(t *testing.T) {
 }
 
 func TestStringInternerIntern(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 
 	// Test interning a string
 	original := "test string"
@@ -48,7 +48,7 @@ func TestStringInternerIntern(t *testing.T) {
 }
 
 func TestStringInternerInternBatch(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 
 	// Test interning a batch of strings
 	originals := []string{"string1", "string2", "string3"}
@@ -68,7 +68,7 @@ func TestStringInternerInternBatch(t *testing.T) {
 }
 
 func TestStringInternerClear(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 
 	// Intern some strings
 	interner.Intern("string1")
@@ -88,7 +88,7 @@ func TestStringInternerClear(t *testing.T) {
 }
 
 func TestStringInternerGetStats(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 
 	// Intern some strings
 	interner.Intern("string1")
@@ -111,7 +111,7 @@ func TestStringInternerGetStats(t *testing.T) {
 }
 
 func TestStringInternerGetDetailedStats(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 
 	// Intern some strings
 	interner.Intern("string1")
@@ -133,7 +133,7 @@ func TestStringInternerGetDetailedStats(t *testing.T) {
 }
 
 func TestStringInternerCacheSize(t *testing.T) {
-	interner := NewStringInterner()
+	interner := newStringInterner()
 
 	// Empty interner should have cache size 0 or some small number for pre-allocated common strings
 	initialSize := interner.CacheSize()
@@ -152,7 +152,7 @@ func TestStringInternerCacheSize(t *testing.T) {
 func TestInternString(t *testing.T) {
 	// Test the global intern function
 	original := "global test string"
-	interned := InternString(original)
+	interned := internString(original)
 
 	// The interned string should be equal to the original
 	if interned != original {
@@ -163,7 +163,7 @@ func TestInternString(t *testing.T) {
 func TestInternStringBatch(t *testing.T) {
 	// Test the global intern batch function
 	originals := []string{"global1", "global2", "global3"}
-	interned := InternStringBatch(originals)
+	interned := internStringBatch(originals)
 
 	// The interned strings should be equal to the originals
 	if len(interned) != len(originals) {
@@ -180,10 +180,10 @@ func TestInternStringBatch(t *testing.T) {
 
 func TestGlobalStringInterner(t *testing.T) {
 	// Get the global interner
-	interner := GlobalStringInterner()
+	interner := globalStringInterner()
 
 	if interner == nil {
-		t.Fatal("GlobalStringInterner returned nil")
+		t.Fatal("globalStringInterner returned nil")
 	}
 	if interner.intern == nil {
 		t.Fatal("Internal interner is nil")
@@ -205,10 +205,10 @@ func TestConfigureGlobalStringInterner(t *testing.T) {
 	loadFactor := 0.75
 
 	// This should not panic
-	ConfigureGlobalStringInterner(capacity, refreshInterval, loadFactor)
+	configureGlobalStringInterner(capacity, refreshInterval, loadFactor)
 
 	// Get the global interner and test it
-	interner := GlobalStringInterner()
+	interner := globalStringInterner()
 
 	// Test basic functionality after configuration
 	original := "configured global test"

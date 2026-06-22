@@ -4,32 +4,44 @@ This document provides a reference for the configuration options available in Fl
 
 ## Execution Configuration
 
-The `ExecutionConfig` structure controls parallel execution behavior:
+`ExecutionConfig` controls the per-level concurrency of `DAG.Execute`. As of v0.3.0 it is
+**wired end-to-end**: the value you set is the limit the live execution path applies.
 
 ```go
 type ExecutionConfig struct {
-    MaxConcurrency int  // Maximum number of concurrent node executions
-    PreserveOrder  bool // Whether to preserve execution order in results
+    MaxConcurrency int // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency)
 }
+
+// DefaultMaxConcurrency is the bounded default used when MaxConcurrency is unset/non-positive.
+const DefaultMaxConcurrency = 16
 
 // Default configuration
 func DefaultConfig() ExecutionConfig {
     return ExecutionConfig{
-        MaxConcurrency: 4,
-        PreserveOrder:  true,
+        MaxConcurrency: DefaultMaxConcurrency, // 16
     }
 }
 ```
 
-### Usage
+A non-positive `MaxConcurrency` coerces to `DefaultMaxConcurrency` (16) — concurrency is
+**never unbounded** (that would spawn one goroutine per node, a goroutine-explosion hazard
+on large levels). Set the config via the builder or directly on a DAG:
 
 ```go
-config := workflow.ExecutionConfig{
-    MaxConcurrency: 8,
-    PreserveOrder:  true,
-}
-executor := workflow.NewParallelNodeExecutor(config)
+// On the builder:
+dag, _ := workflow.NewWorkflowBuilder().
+    WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 8}).
+    Build()
+
+// Or on an existing DAG:
+dag.WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 8})
 ```
+
+> **Changed in v0.3.0:** `DefaultConfig().MaxConcurrency` was bumped 4→16 so the wired
+> default preserves the previous *effective* behavior (the live path was already running 16).
+> The `PreserveOrder` field and the standalone `ParallelNodeExecutor` / `NewParallelNodeExecutor`
+> (an unused parallel-executor that pre-dated the wired path) were **removed** — use
+> `ExecutionConfig.MaxConcurrency` through the builder/DAG hooks above.
 
 ## WorkflowData Configuration
 
@@ -37,13 +49,15 @@ The `WorkflowDataConfig` structure controls capacity hints and optimization sett
 
 ```go
 type WorkflowDataConfig struct {
-    ExpectedNodes        int // Capacity hint for node count
-    ExpectedData         int // Capacity hint for data entries
-    MaxInternStringLength int // Max string length for interning
-    InternStringCapacity  int // Initial capacity for interned strings
-    MetricsConfig        *metrics.Config // Metrics configuration
+    ExpectedNodes int             // Capacity hint for node count
+    ExpectedData  int             // Capacity hint for data entries
+    MetricsConfig *metrics.Config // Metrics configuration
 }
 ```
+
+> **Changed in v0.3.0:** the `MaxInternStringLength` and `InternStringCapacity` fields were
+> **removed**. They were inert (written by the presets but never read by the interner), so
+> their removal is not a behavior change.
 
 ### Presets
 
@@ -110,6 +124,14 @@ config := metrics.NewConfig().
 // Apply to default collector
 config.Apply()
 ```
+
+### Exporting to OpenTelemetry
+
+Once collection is enabled, the recorded metrics can be exported to any
+OpenTelemetry backend via `metrics.NewOTelBridge(collector, meterProvider)`. The
+library is **API-only** — the host owns the SDK, exporter, and OTLP endpoint. See
+the [Observability guide](../guides/observability.md) for the instrument
+inventory, cardinality contract, and host-wiring how-to.
 
 ## Middleware Configuration
 

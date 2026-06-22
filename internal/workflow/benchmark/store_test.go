@@ -2,7 +2,6 @@ package benchmark
 
 import (
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
@@ -35,11 +34,9 @@ func BenchmarkJSONSave(b *testing.B) {
 	for _, size := range sizes {
 		data := createBenchmarkDataForStore(size)
 
-		// Create temporary directory
-		tempDir, err := os.MkdirTemp("", "json-bench-*")
-		if err != nil {
-			b.Fatalf("Failed to create temp dir: %v", err)
-		}
+		// Create temporary directory (b.TempDir auto-removes at benchmark end —
+		// no manual os.RemoveAll, which errcheck check-blank would flag).
+		tempDir := b.TempDir()
 
 		// Create store
 		store, err := workflow.NewJSONFileStore(tempDir)
@@ -57,8 +54,6 @@ func BenchmarkJSONSave(b *testing.B) {
 			}
 		})
 
-		// Clean up
-		os.RemoveAll(tempDir)
 	}
 }
 
@@ -68,11 +63,9 @@ func BenchmarkJSONLoad(b *testing.B) {
 	for _, size := range sizes {
 		data := createBenchmarkDataForStore(size)
 
-		// Create temporary directory
-		tempDir, err := os.MkdirTemp("", "json-bench-*")
-		if err != nil {
-			b.Fatalf("Failed to create temp dir: %v", err)
-		}
+		// Create temporary directory (b.TempDir auto-removes at benchmark end —
+		// no manual os.RemoveAll, which errcheck check-blank would flag).
+		tempDir := b.TempDir()
 
 		// Create store
 		store, err := workflow.NewJSONFileStore(tempDir)
@@ -96,8 +89,6 @@ func BenchmarkJSONLoad(b *testing.B) {
 			}
 		})
 
-		// Clean up
-		os.RemoveAll(tempDir)
 	}
 }
 

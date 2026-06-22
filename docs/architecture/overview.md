@@ -23,11 +23,11 @@ The system is composed of several modular components that work together to execu
 +----------+----------+
            |
 +----------v----------+
-|  Workflow Engine    |  <- Orchestrates workflow execution
+|  Workflow / DAG     |  <- Holds structure + execution context
 +----------+----------+
            |
 +----------v----------+
-|   DAG Executor      |  <- Executes nodes based on dependencies
+|  DAG.Execute        |  <- Runs nodes level-wise by dependencies
 +----------+----------+
            |
 +-----+----+----+-----+
@@ -44,8 +44,8 @@ The following diagram shows how the components interact in more detail:
 ```mermaid
 graph TD
     A[Client Application] -->|Uses| B[Public API]
-    B -->|Manages| C[Workflow Engine]
-    C -->|Executes| D[DAG Executor]
+    B -->|Builds| C[Workflow / DAG]
+    C -->|DAG.Execute| D[Level-wise runner]
     D -->|Runs| E[Actions]
     D -->|Persists| F[Store]
     E -->|Updates| G[WorkflowData]
@@ -55,13 +55,13 @@ graph TD
         H[Custom Actions]
         I[Middleware]
         J[Custom Stores]
-        K[Observers]
+        K[Metrics / OTel bridge]
     end
     
     H -->|Extends| E
     I -->|Enhances| E
     J -->|Implements| F
-    K -->|Monitors| C
+    K -->|Observes| C
     
     style A fill:#f9f,stroke:#333,stroke-width:2px
     style B fill:#bbf,stroke:#333,stroke-width:2px
@@ -74,12 +74,12 @@ graph TD
 
 ### Workflow Engine
 
-The Workflow Engine is the central component that:
+Workflow execution (`DAG.Execute` / `Workflow.Execute`) is the central flow that:
 
-- Manages the workflow lifecycle
-- Coordinates the execution of the DAG
-- Provides persistence capabilities
-- Exposes metrics and observability hooks
+- Coordinates execution of the DAG, level by level
+- Tracks node status on the `WorkflowData`
+- Provides persistence via the wired `WorkflowStore`
+- Records per-operation metrics (exportable to OpenTelemetry)
 
 ### DAG (Directed Acyclic Graph)
 
@@ -115,25 +115,29 @@ Flow Orchestrator employs several memory optimization techniques:
 1. **Arena Allocation**: Reduces GC pressure by allocating related objects together
 2. **String Interning**: Deduplicates strings to reduce memory usage
 3. **Object Pooling**: Reuses objects to minimize allocations
-4. **Lock-Free Algorithms**: Where possible, uses atomic operations instead of mutexes
+4. **Lock-free config reads**: the metrics config is swapped via `atomic.Pointer`, so reads avoid a mutex (the executor itself uses a channel-semaphore + goroutines, not lock-free scheduling)
 
 ## Package Organization
 
-The codebase is organized into several packages:
+The codebase is organized into a public package and an internal tree:
 
-- `pkg/workflow`: Public API and interfaces
-  - `workflow/builder`: Fluent builder API for workflows
-  - `workflow/dag`: DAG implementation and topological sorting
-  - `workflow/action`: Action interfaces and implementations
-  - `workflow/store`: Persistence implementations
-  - `workflow/middleware`: Middleware for cross-cutting concerns
+- `pkg/workflow`: the public API — a single Go package made up of flat `.go`
+  files (the builder, DAG, nodes, actions, middleware, stores, `WorkflowData`,
+  execution config, error sentinels, version). It is **not** split into
+  `builder`/`dag`/`action`/`store` subpackages; those concerns are all files
+  within `pkg/workflow`. Its only subpackages are:
+  - `pkg/workflow/metrics`: public metrics facade (incl. the OTel bridge)
+  - `pkg/workflow/arena`: thin public wrapper over the internal arena allocator
+  - `pkg/workflow/schema`: the FlatBuffers schema (`.fbs`)
 
-- `internal`: Implementation details
-  - `internal/engine`: Core workflow engine implementation
-  - `internal/arena`: Memory arena implementations
-  - `internal/executor`: DAG execution logic
-  - `internal/metrics`: Metrics collection
-  - `internal/observer`: Observer hooks for monitoring
+- `internal/workflow`: implementation details, not importable by consumers:
+  - `internal/workflow/arena`: memory arena allocator + string pool
+  - `internal/workflow/concurrent`: concurrent map implementations
+  - `internal/workflow/fb`: generated FlatBuffers code
+  - `internal/workflow/memory`: object/buffer pools
+  - `internal/workflow/metrics`: metrics collector (the facade aliases this)
+  - `internal/workflow/utils`: internal utilities (e.g. secure random)
+  - `internal/workflow/benchmark`: internal benchmarks
 
 ## Execution Flow
 
@@ -168,21 +172,18 @@ action := LoggingMiddleware(RetryMiddleware(3, time.Second)(myAction))
 
 The persistence layer allows workflows to be saved and resumed:
 
-- In-memory store for ephemeral workflows
-- File-based stores (JSON, FlatBuffers) for simple persistence
-- Database adapters for production use
-- Custom store implementations for specialized needs
+- `InMemoryStore` for ephemeral workflows (e.g. testing)
+- File-based stores: `JSONFileStore` and `FlatBuffersStore`
+- Custom store implementations via the `WorkflowStore` interface
 
 ## Extensibility Points
 
 The system provides several extension points:
 
-- Custom Action implementations
+- Custom Action implementations (the `Action` interface)
 - Middleware for cross-cutting concerns
-- Custom Store implementations
-- Observer hooks for monitoring
-- Metrics collectors
-- Custom executor strategies
+- Custom Store implementations (the `WorkflowStore` interface)
+- Metrics collection, exportable to OpenTelemetry via the metrics bridge
 
 ## Performance Characteristics
 

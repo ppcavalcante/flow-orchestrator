@@ -114,12 +114,13 @@ func (b *TestDAGBuilder) AddDependency(from, to string) *TestDAGBuilder {
 }
 
 // Build creates the final DAG
-func (b *TestDAGBuilder) Build() *DAG {
+func (b *TestDAGBuilder) Build(t *testing.T) *DAG {
+	t.Helper()
 	dag := NewDAG("test-dag")
 
 	// Add all nodes
 	for _, node := range b.nodes {
-		_ = dag.AddNode(node)
+		mustAddNode(t, dag, node)
 	}
 
 	return dag
@@ -254,14 +255,12 @@ func TestDAGBasicOperations(t *testing.T) {
 		nodeB := NewNode("B", SuccessAction("output_B"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
 		// Add dependencies: A -> B -> C
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		// Verify dependencies
 		if len(nodeB.DependsOn) != 1 || nodeB.DependsOn[0] != nodeA {
 			t.Errorf("Node B should depend on node A")
@@ -276,7 +275,7 @@ func TestDAGBasicOperations(t *testing.T) {
 		builder := NewTestDAGBuilder()
 		action := SuccessAction("test_output")
 		builder.AddNode("test", action)
-		dag := builder.Build()
+		dag := builder.Build(t)
 
 		// Get node
 		retrieved, exists := dag.GetNode("test")
@@ -303,13 +302,11 @@ func TestDAGDependencies(t *testing.T) {
 		nodeB := NewNode("B", SuccessAction("output_B"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		// Check dependency relationships
 		if len(nodeA.DependsOn) != 0 {
 			t.Error("Node A should not have dependencies")
@@ -331,13 +328,11 @@ func TestDAGDependencies(t *testing.T) {
 		nodeB := NewNode("B", SuccessAction("output_B"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "C")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "C")
+		mustAddDep(t, dag, "B", "C")
 		// Check dependency relationships
 		dependsOnA := false
 		dependsOnB := false
@@ -365,13 +360,11 @@ func TestDAGTopologicalSort(t *testing.T) {
 		nodeB := NewNode("B", SuccessAction("output_B"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		// Get sorted levels
 		levels := dag.GetLevels()
 
@@ -403,13 +396,11 @@ func TestDAGCycleDetection(t *testing.T) {
 		nodeB := NewNode("B", SuccessAction("output_B"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		// Validate the DAG
 		err := dag.Validate()
 		if err != nil {
@@ -424,14 +415,12 @@ func TestDAGCycleDetection(t *testing.T) {
 		nodeB := NewNode("B", SuccessAction("output_B"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-		_ = dag.AddDependency("C", "A")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
+		mustAddDep(t, dag, "C", "A")
 		// Validate the DAG
 		err := dag.Validate()
 		if err == nil {
@@ -454,13 +443,11 @@ func TestDAGExecution(t *testing.T) {
 		nodeB := NewNode("B", actionB)
 		nodeC := NewNode("C", actionC)
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		// Create workflow data for testing
 		data := NewWorkflowData("test-workflow")
 
@@ -489,13 +476,11 @@ func TestDAGExecution(t *testing.T) {
 		nodeB := NewNode("B", FailingAction("node B failed"))
 		nodeC := NewNode("C", SuccessAction("output_C"))
 
-		_ = dag.AddNode(nodeA)
-		_ = dag.AddNode(nodeB)
-		_ = dag.AddNode(nodeC)
-
-		_ = dag.AddDependency("A", "B")
-		_ = dag.AddDependency("B", "C")
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		// Create workflow data for testing
 		data := NewWorkflowData("test-workflow")
 
@@ -529,7 +514,7 @@ func TestTopologicalSort(t *testing.T) {
 	t.Run("Single Node", func(t *testing.T) {
 		dag := NewDAG("single")
 		node := NewNode("A", nil)
-		dag.AddNode(node)
+		mustAddNode(t, dag, node)
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"A"}, getNodeNames(sorted[0]))
@@ -541,14 +526,12 @@ func TestTopologicalSort(t *testing.T) {
 		nodeB := NewNode("B", nil)
 		nodeC := NewNode("C", nil)
 
-		dag.AddNode(nodeA)
-		dag.AddNode(nodeB)
-		dag.AddNode(nodeC)
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
 		// B depends on A, C depends on B
-		dag.AddDependency("A", "B")
-		dag.AddDependency("B", "C")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"A", "B", "C"}, getNodeNames(sorted[0]))
@@ -561,17 +544,15 @@ func TestTopologicalSort(t *testing.T) {
 		nodeC := NewNode("C", nil)
 		nodeD := NewNode("D", nil)
 
-		dag.AddNode(nodeA)
-		dag.AddNode(nodeB)
-		dag.AddNode(nodeC)
-		dag.AddNode(nodeD)
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddNode(t, dag, nodeD)
 		// B and C depend on A, D depends on B and C
-		dag.AddDependency("A", "B")
-		dag.AddDependency("A", "C")
-		dag.AddDependency("B", "D")
-		dag.AddDependency("C", "D")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "A", "C")
+		mustAddDep(t, dag, "B", "D")
+		mustAddDep(t, dag, "C", "D")
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
 
@@ -595,21 +576,20 @@ func TestTopologicalSort(t *testing.T) {
 
 		for _, name := range nodeNames {
 			nodes[name] = NewNode(name, nil)
-			dag.AddNode(nodes[name])
+			mustAddNode(t, dag, nodes[name])
 		}
 
 		// B and C depend on A
 		// D depends on B and C
 		// E depends on C
 		// F depends on D and E
-		dag.AddDependency("A", "B")
-		dag.AddDependency("A", "C")
-		dag.AddDependency("B", "D")
-		dag.AddDependency("C", "D")
-		dag.AddDependency("C", "E")
-		dag.AddDependency("D", "F")
-		dag.AddDependency("E", "F")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "A", "C")
+		mustAddDep(t, dag, "B", "D")
+		mustAddDep(t, dag, "C", "D")
+		mustAddDep(t, dag, "C", "E")
+		mustAddDep(t, dag, "D", "F")
+		mustAddDep(t, dag, "E", "F")
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
 
@@ -636,15 +616,13 @@ func TestTopologicalSort(t *testing.T) {
 		nodeB := NewNode("B", nil)
 		nodeC := NewNode("C", nil)
 
-		dag.AddNode(nodeA)
-		dag.AddNode(nodeB)
-		dag.AddNode(nodeC)
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
 		// B depends on A, C depends on B, A depends on C (cycle)
-		dag.AddDependency("A", "B")
-		dag.AddDependency("B", "C")
-		dag.AddDependency("C", "A")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
+		mustAddDep(t, dag, "C", "A")
 		_, err := dag.TopologicalSort()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cycle detected")
@@ -673,8 +651,7 @@ func indexOf(slice []string, item string) int {
 func TestGetNode(t *testing.T) {
 	dag := NewDAG("test")
 	nodeA := NewNode("A", nil)
-	dag.AddNode(nodeA)
-
+	mustAddNode(t, dag, nodeA)
 	t.Run("Existing Node", func(t *testing.T) {
 		node, exists := dag.GetNode("A")
 		assert.True(t, exists)
@@ -691,8 +668,7 @@ func TestGetNode(t *testing.T) {
 func TestGetNodeByName(t *testing.T) {
 	dag := NewDAG("test")
 	nodeA := NewNode("A", nil)
-	dag.AddNode(nodeA)
-
+	mustAddNode(t, dag, nodeA)
 	t.Run("Existing Node", func(t *testing.T) {
 		node, exists := dag.GetNodeByName("A")
 		assert.True(t, exists)
@@ -716,8 +692,7 @@ func TestGetLevels(t *testing.T) {
 	t.Run("Single Node", func(t *testing.T) {
 		dag := NewDAG("single")
 		nodeA := NewNode("A", nil)
-		dag.AddNode(nodeA)
-
+		mustAddNode(t, dag, nodeA)
 		levels := dag.GetLevels()
 		require.Len(t, levels, 1)
 		assert.Equal(t, []string{"A"}, getNodeNames(levels[0]))
@@ -729,14 +704,12 @@ func TestGetLevels(t *testing.T) {
 		nodeB := NewNode("B", nil)
 		nodeC := NewNode("C", nil)
 
-		dag.AddNode(nodeA)
-		dag.AddNode(nodeB)
-		dag.AddNode(nodeC)
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
 		// B depends on A, C depends on B
-		dag.AddDependency("A", "B")
-		dag.AddDependency("B", "C")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
 		levels := dag.GetLevels()
 		require.Len(t, levels, 3)
 		assert.Equal(t, []string{"A"}, getNodeNames(levels[0]))
@@ -751,17 +724,15 @@ func TestGetLevels(t *testing.T) {
 		nodeC := NewNode("C", nil)
 		nodeD := NewNode("D", nil)
 
-		dag.AddNode(nodeA)
-		dag.AddNode(nodeB)
-		dag.AddNode(nodeC)
-		dag.AddNode(nodeD)
-
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddNode(t, dag, nodeD)
 		// B and C depend on A, D depends on B and C
-		dag.AddDependency("A", "B")
-		dag.AddDependency("A", "C")
-		dag.AddDependency("B", "D")
-		dag.AddDependency("C", "D")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "A", "C")
+		mustAddDep(t, dag, "B", "D")
+		mustAddDep(t, dag, "C", "D")
 		levels := dag.GetLevels()
 		require.Len(t, levels, 3)
 		assert.Equal(t, []string{"A"}, getNodeNames(levels[0]))
@@ -776,21 +747,20 @@ func TestGetLevels(t *testing.T) {
 
 		for _, name := range nodeNames {
 			nodes[name] = NewNode(name, nil)
-			dag.AddNode(nodes[name])
+			mustAddNode(t, dag, nodes[name])
 		}
 
 		// B and C depend on A
 		// D depends on B and C
 		// E depends on C
 		// F depends on D and E
-		dag.AddDependency("A", "B")
-		dag.AddDependency("A", "C")
-		dag.AddDependency("B", "D")
-		dag.AddDependency("C", "D")
-		dag.AddDependency("C", "E")
-		dag.AddDependency("D", "F")
-		dag.AddDependency("E", "F")
-
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "A", "C")
+		mustAddDep(t, dag, "B", "D")
+		mustAddDep(t, dag, "C", "D")
+		mustAddDep(t, dag, "C", "E")
+		mustAddDep(t, dag, "D", "F")
+		mustAddDep(t, dag, "E", "F")
 		levels := dag.GetLevels()
 		require.Len(t, levels, 4)
 		assert.Equal(t, []string{"A"}, getNodeNames(levels[0]))

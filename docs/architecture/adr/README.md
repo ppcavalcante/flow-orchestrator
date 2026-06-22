@@ -44,7 +44,16 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 
 ## Current ADRs
 
-*No ADRs have been created yet.*
+| ADR | Title | Status | Milestone |
+|---|---|---|---|
+| [0001](0001-flatbuffers-load-trust-contract.md) | FlatBuffers Load trust contract | Accepted (superseded in part by 0008) | M1 |
+| [0002](0002-integer-fidelity-contract.md) | Integer fidelity contract (int64-widen-additive) | Accepted | M2 |
+| [0003](0003-m3-api-truth-surface-cleanup.md) | M3 scope — API Truth & Surface Cleanup | Accepted | M3 |
+| [0004](0004-wire-maxconcurrency-default-16.md) | Wire MaxConcurrency end-to-end; default 16, bounded | Accepted | M3 |
+| [0005](0005-delete-parallelnodeexecutor.md) | Delete the standalone ParallelNodeExecutor | Accepted | M3 |
+| [0006](0006-remove-inert-intern-knobs.md) | Remove inert string-interning config knobs | Accepted | M3 |
+| [0007](0007-error-taxonomy.md) | Error taxonomy — store sentinels + `%w` | Accepted | M3 |
+| [0008](0008-layered-bounds-guard-trust-reratify.md) | Layered bounds guard for FlatBuffers Load; trust re-ratification | Accepted | M4 |
 
 ## How to Create a New ADR
 

@@ -7,9 +7,9 @@ import (
 	"os"
 	"sync"
 
+	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
-	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/utils"
 )
 
 // WorkflowData is the central data store for workflow execution.
@@ -28,7 +28,7 @@ type WorkflowData struct {
 	metrics *metrics.MetricsCollector
 
 	// String interning for efficiency
-	stringInterner *StringInterner
+	stringInterner *stringInterner
 
 	// Add arena field to the WorkflowData struct
 	arena      *arena.Arena      // Arena for memory management
@@ -52,7 +52,7 @@ func NewWorkflowDataWithConfig(id string, config WorkflowDataConfig) *WorkflowDa
 	}
 
 	// Create a string interner
-	stringInterner := NewStringInterner()
+	stringInterner := newStringInterner()
 
 	// Create the workflow data with simple maps
 	return &WorkflowData{
@@ -474,7 +474,7 @@ func (w *WorkflowData) Clone() *WorkflowData {
 		data:           make(map[string]interface{}, len(w.data)),
 		nodeStatus:     make(map[string]NodeStatus, len(w.nodeStatus)),
 		outputs:        make(map[string]interface{}, len(w.outputs)),
-		stringInterner: NewStringInterner(),
+		stringInterner: newStringInterner(),
 	}
 
 	// Copy data
@@ -566,7 +566,13 @@ func (w *WorkflowData) GetFloat64(key string) (float64, bool) {
 	return result, found
 }
 
-// GetInt gets an int value from the workflow data
+// GetInt gets an int value from the workflow data.
+//
+// The result is the platform int. On 64-bit builds this carries any stored
+// integer faithfully. On 32-bit builds, int is 32 bits, so a stored value
+// outside the int32 range cannot be represented and the int64/int32 cases
+// narrow it. Callers that must read values larger than MaxInt32 portably
+// should use GetInt64, which returns the full int64 on every architecture.
 func (w *WorkflowData) GetInt(key string) (int, bool) {
 	var result int
 	var found bool
@@ -585,6 +591,36 @@ func (w *WorkflowData) GetInt(key string) (int, bool) {
 			result, found = int(v), true
 		case int32:
 			result, found = int(v), true
+		default:
+			found = false
+		}
+	})
+	return result, found
+}
+
+// GetInt64 gets an integer value from the workflow data as an int64.
+//
+// Unlike GetInt, the result is an int64 on every architecture, so values
+// larger than MaxInt32 are returned faithfully on 32-bit builds as well as
+// 64-bit. It accepts values that were stored as int, int32, or int64.
+func (w *WorkflowData) GetInt64(key string) (int64, bool) {
+	var result int64
+	var found bool
+	w.metrics.TrackOperation(metrics.OpGetInt64, func() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		val, ok := w.data[w.internKey(key)]
+		if !ok {
+			found = false
+			return
+		}
+		switch v := val.(type) {
+		case int:
+			result, found = int64(v), true
+		case int64:
+			result, found = v, true
+		case int32:
+			result, found = int64(v), true
 		default:
 			found = false
 		}

@@ -50,6 +50,8 @@ Each Node contains:
 - **DependsOn**: List of nodes this node depends on
 - **RetryCount**: Number of retry attempts on failure
 - **Timeout**: Maximum execution time
+- **ContinueOnError**: If true, a failure of this node does not fail the workflow
+  (added v0.7.0; see Failure Handling below)
 
 ## Node State Transitions
 
@@ -58,17 +60,14 @@ During execution, a node transitions through several states:
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
-    Pending --> Running: When dependencies complete
+    Pending --> Running: When dependencies resolved
     Running --> Completed: Successful execution
-    Running --> Failed: Error occurs
+    Running --> Failed: Error occurs (after retries)
     Failed --> Running: Retry available
-    Running --> Skipped: Dependency failed
-    Pending --> Skipped: Dependency failed
-    
+
     Completed --> [*]
     Failed --> [*]
-    Skipped --> [*]
-    
+
     state Running {
         [*] --> Executing
         Executing --> Executed: Action completes
@@ -78,6 +77,12 @@ stateDiagram-v2
         Executed --> [*]
     }
 ```
+
+> Note: the executor itself only writes `Pending` → `Running` → `Completed`/`Failed`.
+> A normal `Failed` node halts the run fail-fast (dependents in later levels never
+> start); a continue-on-error `Failed` node lets dependents run. `Skipped` is a
+> defined, persistable status but the executor does not assign it — it is available
+> for callers that model skip explicitly.
 
 ## Building a DAG
 
@@ -123,13 +128,18 @@ If validation fails, the `Build()` method returns an error with details about th
 
 To determine the execution order, the DAG uses a topological sort algorithm. This sorts nodes such that for every directed edge `u -> v`, node `u` comes before node `v` in the ordering.
 
-The sorting algorithm uses a depth-first search (DFS) approach:
+The sorting algorithm uses Kahn's algorithm (in-degree + queue, `DAG.TopologicalSort`
+in `dag.go`):
 
-1. Start with nodes that have no dependencies
-2. For each node, recursively process its dependents
-3. Add a node to the result list after all its dependents are processed
+1. Compute each node's in-degree (number of dependencies); seed a queue with the
+   zero-in-degree nodes
+2. Repeatedly remove a node from the queue (lowest name first, for deterministic
+   ordering), append it to the result, and decrement the in-degree of its
+   dependents, enqueueing any that reach zero
+3. If not all nodes are emitted, the graph contains a cycle (returned as an error)
 
-The topological sort produces a sequence of nodes that respects all dependencies.
+`TopologicalSort()` returns `([][]*Node, error)` — the nodes grouped into
+dependency levels.
 
 ## Level-Based Execution
 
@@ -184,23 +194,38 @@ The DAG execution algorithm proceeds as follows:
      - Wait for all nodes in the level to complete before proceeding to the next level
 
 3. **Node Execution**:
-   - Check if dependencies are satisfied (all dependencies "Completed")
-   - If dependencies failed, mark node as "Skipped"
-   - Otherwise, set node status to "Running"
-   - Execute the node's action with the provided context and data
+   - Check if dependencies are *resolved*: a dependency resolves when it
+     "Completed", or when it is a continue-on-error node that "Failed"
+     (`DEC-P21-depguard`). A normal "Failed" dependency, or any
+     "Skipped"/"Running"/"Pending" dependency, still blocks.
+   - If a dependency is unresolved, the level reports an error (fail-fast) — the
+     executor does not itself mark dependents "Skipped".
+   - Otherwise, execute the node's action with the provided context and data
    - On success, set status to "Completed"
    - On failure, set status to "Failed" (after retries if configured)
 
-4. **Retry Handling**:
+4. **Failure Handling**:
+   - By default execution is **fail-fast**: a node failure cancels in-flight
+     siblings in the level and `DAG.Execute` returns an error without running any
+     later level.
+   - A node marked `WithContinueOnError()` is exempt: its failure is recorded as
+     "Failed" but does not cancel siblings or halt the workflow; dependents run
+     and observe its status. `DAG.Execute` returns `nil` iff every
+     non-continue-on-error node succeeded. These semantics are machine-checked —
+     see [`specs/`](../../specs/README.md) and the gopter property suite.
+
+5. **Retry Handling**:
    - If a node fails and has retry count > 0, retry the action
    - Decrement retry count after each attempt
    - Apply exponential backoff between retry attempts if configured
 
-5. **Persistence**:
-   - If a store is provided, save workflow state:
-     - Before and after each node execution
-     - After workflow completion
-     - On errors
+6. **Persistence**:
+   - Persistence is driven by `Workflow.Execute` (the wrapper around
+     `DAG.Execute`), not by the level executor per node. If a store is configured,
+     `Workflow.Execute` loads existing state at the start and saves the workflow
+     state once at the end — after successful completion, or after a failed run
+     (so failed state is captured). There is no per-node save inside the DAG
+     executor.
 
 ## Execution Context
 
@@ -226,12 +251,16 @@ This shared data model allows nodes to pass information to downstream nodes and 
 
 ## Concurrency Model
 
-The DAG executor supports concurrent execution with configurable parallelism:
+`DAG.Execute` runs the workflow level by level with configurable parallelism:
 
 - Nodes within the same level execute concurrently
-- The maximum number of concurrent node executions is configurable
-- A worker pool manages the execution of node actions
-- Lock-free data structures minimize contention
+- The maximum number of concurrent node executions per level is configurable via
+  `ExecutionConfig.MaxConcurrency` (default 16)
+- Concurrency is bounded by a buffered-channel semaphore: each runnable node in a
+  level is launched in its own goroutine which acquires a semaphore slot before
+  executing (see `executeNodesInLevel` in `parallel_execution.go`). There is no
+  worker pool, work-stealing, or adaptive/backpressure scheduling — the bound is
+  a fixed configured value.
 
 ## Error Handling
 
@@ -240,24 +269,34 @@ The DAG execution model handles errors in several ways:
 1. **Node-Level Errors**:
    - Mark the node as "Failed"
    - Try retries if configured
-   - Skip dependent nodes
+   - By default (fail-fast), the failure halts the run: in-flight siblings are
+     cancelled and no later level executes, so dependents do not run. If the node
+     is marked `WithContinueOnError()`, the workflow continues and dependents run
+     and observe the `Failed` status. The executor does not write a `Skipped`
+     status to dependents in either case.
 
 2. **DAG-Level Errors**:
    - Structural errors (cycles, missing nodes)
    - Execution engine errors
 
 3. **Context Cancellation**:
-   - Gracefully stops execution of running nodes
-   - Marks remaining nodes as "Skipped"
+   - Gracefully stops execution of running nodes (the per-level context is
+     cancelled; `Execute` returns the wrapping error). The executor does not
+     re-label remaining nodes — they simply never transition out of `Pending`.
 
 ## Observability
 
 The DAG execution can be observed through:
 
-- Node status changes
-- Execution metrics (duration, success rate)
-- Custom observers that hook into the execution lifecycle
-- Structured logs from middleware
+- Node status changes (tracked on the `WorkflowData`)
+- Per-operation metrics (counts, durations) from the metrics collector
+- Structured logs from `LoggingMiddleware`
+
+(There is no built-in observer/hook subsystem — observation is via the metrics
+collector, node status, and logging middleware.)
+
+The engine's per-operation metrics can be exported to an OpenTelemetry backend
+via the API-only bridge — see the [Observability guide](../guides/observability.md).
 
 ## Conclusion
 

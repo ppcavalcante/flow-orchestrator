@@ -11,3 +11,26 @@ dag_patterns
 error_handling
 integration_check
 new_simple
+# observability example: ignore the compiled binary only, not the dir (anchored
+# path so the pattern can't swallow the examples/observability/ source tree).
+/examples/observability/observability
+
+# Generated runtime state written by the api_workflow example when run (not source).
+/examples/api_workflow/api_workflow_state/
+
+# Anvil agent-team harness (M5/Phase 15 REL-02): never commit harness state into
+# the library tree. These are tracked-or-untracked working artifacts of the
+# multi-agent workflow, not part of the published module. Excluding them here
+# stops a future `git add -A` from sweeping the harness into a release commit.
+.planning/
+.smtc/
+.smtc-cache/
+anvil
+anvil-up
+spawn/
+ANVIL-TEAM.md
+.mcp.json
+
+# Local experiment sandbox (not part of the library)
+playground/
+.claude/

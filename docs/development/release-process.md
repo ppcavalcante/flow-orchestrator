@@ -22,67 +22,49 @@ Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 - [ ] Update relevant documentation to reflect any changes
 - [ ] Ensure examples are working with the new version
 
-### 2. Release Branch Creation
+### 2. Prepare the release on `main`
 
-For minor and major releases:
-
-```bash
-# For a new minor/major release (e.g., v1.2.0)
-git checkout develop
-git pull
-git checkout -b release/v1.2.0
-```
-
-For patch releases:
+The default branch is **`main`**; there is no `develop` branch (see
+[CONTRIBUTING.md](../../CONTRIBUTING.md)). Releases are cut by tagging a commit on
+`main`. Prepare the release as a normal topic-branch PR into `main`:
 
 ```bash
-# For a patch release (e.g., v1.1.1)
+# Branch off main, update the version + CHANGELOG, open a PR
 git checkout main
 git pull
-git checkout -b hotfix/v1.1.1
+git checkout -b release-prep-v1.2.0
+# ...bump pkg/workflow.Version, finalize CHANGELOG.md...
 ```
 
 ### 3. Final Checks
 
-- [ ] Run the full test suite on the release branch
+- [ ] Run the full test suite (`go test ./... -race`)
 - [ ] Verify that all documentation is up-to-date
-- [ ] Ensure all examples work correctly
+- [ ] Ensure all examples build and run
 - [ ] Verify that the CHANGELOG.md is complete and accurate
 
-### 4. Merge to Main
+### 4. Tag on `main` (triggers the release workflow)
 
-Once all checks pass, merge the release branch into main:
+Once the release-prep PR is merged, tag the merge commit on `main`. **The tag push
+triggers `.github/workflows/release.yml`** (the workflow is `on: push: tags`),
+which builds the release and generates SLSA provenance:
 
 ```bash
 git checkout main
 git pull
-git merge --no-ff release/v1.2.0 -m "chore: release v1.2.0"
 git tag -a v1.2.0 -m "v1.2.0"
-git push origin main --tags
+git push origin v1.2.0
 ```
 
-### 5. Merge Back to Develop
+### 5. GitHub Release
 
-For minor and major releases, merge the changes back to develop:
+The release workflow handles building and attaching provenance on the tag push.
+Confirm the resulting release on the
+[GitHub Releases page](https://github.com/ppcavalcante/flow-orchestrator/releases),
+add/curate release notes from CHANGELOG.md, and mark it as a pre-release if the
+version carries an `-alpha`/`-beta`/`-rc` suffix.
 
-```bash
-git checkout develop
-git pull
-git merge --no-ff main -m "chore: merge release v1.2.0 back to develop"
-git push origin develop
-```
-
-### 6. Create GitHub Release
-
-1. Go to the [GitHub Releases page](https://github.com/ppcavalcante/flow-orchestrator/releases)
-2. Click on "Draft a new release"
-3. Select the tag version
-4. Set the title to the version number (e.g., "v1.2.0")
-5. Copy the release notes from CHANGELOG.md
-6. Check "This is a pre-release" if applicable
-7. Click "Publish release"
-
-### 7. Publish the Package
+### 6. Verify the published module
 
 ```bash
 GOPROXY=proxy.golang.org go list -m github.com/ppcavalcante/flow-orchestrator@v1.2.0
@@ -90,13 +72,11 @@ GOPROXY=proxy.golang.org go list -m github.com/ppcavalcante/flow-orchestrator@v1
 
 ## Handling Pre-releases
 
-For pre-releases (alpha, beta, rc), follow the same process but use appropriate version suffixes:
+For pre-releases (alpha, beta, rc), follow the same process but use an appropriate
+version suffix on the tag:
 
 ```bash
 # For a beta release
 git tag -a v1.2.0-beta.1 -m "v1.2.0-beta.1"
+git push origin v1.2.0-beta.1
 ```
-
-## Detailed Git Workflow
-
-For a more detailed explanation of the git workflow and branching strategy, see the [Git Workflow](../gw.md) documentation. 

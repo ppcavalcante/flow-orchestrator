@@ -5,50 +5,52 @@ on:
     tags:
       - 'v*'
 
+# Least-privilege: read-only at the top level; each job widens only what it needs.
 permissions:
-  contents: write
-  id-token: write  # Needed for SLSA provenance
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the GitHub Release + upload assets
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version: '1.25.11'
           cache: true
-      
+
       - name: Install FlatBuffers compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y flatbuffers-compiler
-      
+
       - name: Generate FlatBuffers code
         run: make generate-fb
-      
+
       - name: Run Tests
         run: go test -v ./...
-      
+
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           format: spdx-json
           output-file: flow-orchestrator.spdx.json
-      
+
       # Extract version from tag
       - name: Extract version from tag
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-      
+
       # Create GitHub Release
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: Release ${{ steps.get_version.outputs.VERSION }}
           draft: false
@@ -57,14 +59,16 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: true
 
-  # Add SLSA provenance generation
+  # SLSA provenance generation. NOTE: the SLSA generator is referenced by its
+  # semantic tag @v2.1.0, NOT a commit SHA — SLSA's threat model requires the tag
+  # for provenance-generator identity verification; SHA-pinning it breaks the chain.
   provenance:
     needs: [release]
     permissions:
       actions: read
-      id-token: write
-      contents: write
+      id-token: write   # OIDC token for keyless provenance signing
+      contents: write   # attach the provenance attestation to the release
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_go_slsa3.yml@v2.1.0
     with:
-      go-version: '1.24'
-      evaluated-envs: "GOFLAGS=-trimpath" 
+      go-version: '1.25.11'
+      evaluated-envs: "GOFLAGS=-trimpath"

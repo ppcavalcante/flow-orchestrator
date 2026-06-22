@@ -103,14 +103,63 @@ selectiveRetry := workflow.ConditionalRetryMiddleware(
 
 This provides fine-grained control over retry behavior.
 
-### 3. Error Handling Nodes
+### 3. Continue-on-Error
 
-For complex error handling, add dedicated nodes that handle specific error cases:
+By default, execution is **fail-fast**: when a node's action returns an error, the
+node is recorded as `Failed`, the executor cancels its in-flight siblings in that
+level, and `DAG.Execute` returns an error **without running any later level**. A
+normal `Failed` node therefore blocks its dependents simply by halting the run.
+
+Mark a node with `WithContinueOnError()` to opt that node out of fail-fast: its
+failure is still recorded as `Failed`, but it does **not** cancel siblings and
+does **not** fail the workflow. Execution continues, the node's dependents run,
+and they observe its `Failed` status via `GetNodeStatus` and branch on it.
 
 ```go
-// Main operation node
+// This node may fail without halting the workflow.
+builder.AddNode("optional-enrichment").
+    WithAction(enrichAction).
+    WithContinueOnError().
+    DependsOn("load")
+
+// Dependent runs even when optional-enrichment failed, and branches on its status.
+builder.AddNode("finalize").
+    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+        if status, _ := data.GetNodeStatus("optional-enrichment"); status == workflow.Failed {
+            // proceed without the optional enrichment
+        }
+        return finalizeAction.Execute(ctx, data)
+    }).
+    DependsOn("optional-enrichment")
+```
+
+Dependency resolution rule (DEC-P21-depguard): a dependency resolves (stops
+blocking its dependents) when it `Completed`, **or** when it is a
+continue-on-error node that `Failed`. A *normal* `Failed` dependency still blocks
+(fail-fast), as do `Skipped`/`Running`/`Pending` dependencies. `DAG.Execute`
+returns `nil` if and only if every node that is **not** continue-on-error
+succeeded; there is no partial-error aggregate — inspect per-node status instead.
+These semantics are machine-checked (gopter property suite + a TLA+ model); see
+[Verification](../reference/api-reference.md#verification) and
+[`specs/README.md`](../../specs/README.md).
+
+> **Important:** the "Error Handling Nodes" pattern below relies on a recovery node
+> running *after* its upstream node fails. That only works if the upstream node is
+> marked `WithContinueOnError()` — otherwise the upstream failure halts the
+> workflow fail-fast before the recovery node's level runs.
+
+### 4. Error Handling Nodes
+
+For complex error handling, add dedicated nodes that handle specific error cases.
+The node whose failure you want to recover from is marked continue-on-error so the
+recovery node downstream actually runs:
+
+```go
+// Main operation node — continue-on-error so a failure does not halt the workflow
+// and the recovery node below can run and inspect its status.
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
+    WithContinueOnError().
     DependsOn("validate-order")
 
 // Error handling node
@@ -162,7 +211,7 @@ builder.AddNode("fulfill-order").
 
 This approach allows complex recovery logic and different strategies depending on the error.
 
-### 4. Timeout Handling
+### 5. Timeout Handling
 
 Handle timeouts using the timeout middleware or context timeouts:
 
@@ -192,7 +241,7 @@ builder.AddNode("long-operation").
     })
 ```
 
-### 5. Circuit Breaker Pattern
+### 6. Circuit Breaker Pattern
 
 You can implement a circuit breaker as custom middleware to prevent cascading failures:
 
@@ -266,59 +315,84 @@ This pattern prevents repeated calls to failing services.
 
 ## Structured Error Handling
 
-Define structured error types for better error handling:
+Flow Orchestrator exposes **sentinel errors** so callers branch with `errors.Is` /
+`errors.As` — **never** by string-matching the message. There are two **intentionally
+distinct** families (they are *not* aliased), mirroring
+[api-reference.md → Error Sentinels](../reference/api-reference.md#error-sentinels):
+
+- **Store / persistence domain** (returned by `WorkflowStore` and its validation guards):
+  `ErrNotFound`, `ErrValidation`, `ErrCorruptData`, `ErrIO`.
+- **Action-execution domain** (an `Action`'s runtime behavior):
+  `ErrInputNotFound`, `ErrInvalidInput`, `ErrExecutionFailed`.
+
+`ErrNotFound` (no workflow on disk) is a different concept from `ErrInputNotFound` (a data
+key absent inside an action) — branch on the sentinel from the domain you are handling.
+
+### Branching on store errors with `errors.Is`
 
 ```go
-// Define error types
-const (
-    ErrValidation   = "validation_error"
-    ErrProcessing   = "processing_error"
-    ErrExternal     = "external_service_error"
-    ErrPermission   = "permission_error"
-    ErrNotFound     = "not_found_error"
-)
-
-// Create a structured error
-func newError(errType string, message string, cause error) error {
-    return fmt.Errorf("%s: %s: %w", errType, message, cause)
+_, err := store.Load(workflowID)
+switch {
+case errors.Is(err, workflow.ErrNotFound):
+    // no such workflow — first run, or it was deleted
+case errors.Is(err, workflow.ErrCorruptData):
+    // file present but undecodable (malformed/truncated/version-skewed).
+    // For FlatBuffers this now fires on a clean *guard reject* — the layered
+    // bounds guard (size cap, root-offset sanity, element caps) rejects the
+    // input before the decode — not only via the recover() backstop. In every
+    // case data == nil and no panic escapes.
+case errors.Is(err, workflow.ErrIO):
+    // transient/environmental I/O (permissions, full disk) — safe to retry
+case err != nil:
+    // unexpected
+case err == nil:
+    // loaded
 }
+```
 
-// In your action
+Each store error wraps its underlying cause with `%w`, so the category stays stable while the
+detail remains reachable. **`ErrCorruptData` and `ErrIO` keep a path-free headline** — they
+do not render the absolute file path in `Error()` (it would leak the host's layout). For
+`ErrIO`, the underlying OS error is still reachable for debugging via `errors.As` (it is
+exposed through a multi-error `Unwrap`, not the message string):
+
+```go
+_, err := store.Load(workflowID)
+if errors.Is(err, workflow.ErrIO) {
+    var pathErr *os.PathError // reachable via errors.As even though Error() is path-free
+    if errors.As(err, &pathErr) {
+        log.Printf("I/O failure on %s: %v", pathErr.Op, pathErr.Err) // your log, your call to include the path
+    }
+}
+```
+
+### Returning sentinels from your own actions
+
+For action-level failures, wrap an action-domain sentinel with `%w` so downstream handlers
+can branch on it:
+
+```go
 func myAction(ctx context.Context, data *workflow.WorkflowData) error {
-    // ...
-    if !isValid {
-        return newError(ErrValidation, "Invalid input data", nil)
+    name, ok := data.GetString("user_name")
+    if !ok {
+        return fmt.Errorf("%w: user_name", workflow.ErrInputNotFound)
     }
-    
-    resp, err := callExternalService()
-    if err != nil {
-        return newError(ErrExternal, "Failed to call external service", err)
+    if name == "" {
+        return fmt.Errorf("%w: user_name must not be empty", workflow.ErrInvalidInput)
     }
-    // ...
+    if err := callExternalService(name); err != nil {
+        return fmt.Errorf("%w: external service: %w", workflow.ErrExecutionFailed, err)
+    }
+    return nil
 }
 
-// In error handling
-func handleError(ctx context.Context, data *workflow.WorkflowData) error {
-    errorOutput, ok := data.GetOutput("previous-step")
-    if !ok {
-        return nil
+// A downstream handler branches with errors.Is — not strings.Contains:
+func handleError(err error) {
+    switch {
+    case errors.Is(err, workflow.ErrInvalidInput):   // bad input
+    case errors.Is(err, workflow.ErrInputNotFound):  // missing input
+    case errors.Is(err, workflow.ErrExecutionFailed): // downstream failure
     }
-    
-    err := errorOutput.(error)
-    if err == nil {
-        return nil
-    }
-    
-    // Check error type
-    if strings.Contains(err.Error(), ErrValidation) {
-        // Handle validation error
-        data.Set("validation_failed", true)
-    } else if strings.Contains(err.Error(), ErrExternal) {
-        // Handle external service error
-        data.Set("external_service_failed", true)
-    }
-    
-    return nil
 }
 ```
 
@@ -333,13 +407,14 @@ func deadLetterAction(ctx context.Context, data *workflow.WorkflowData) error {
     // Get operation details
     operationName, _ := data.GetString("operation_name")
     operationData, _ := data.Get("operation_data")
-    
+    errMessage, _ := data.GetString("error_message")
+
     // Create dead letter record
     deadLetter := map[string]interface{}{
         "workflow_id":    data.ID,
         "node":           operationName,
         "data":           operationData,
-        "error_message":  data.Get("error_message"),
+        "error_message":  errMessage,
         "timestamp":      time.Now().Format(time.RFC3339),
     }
     

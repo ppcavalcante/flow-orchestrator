@@ -18,14 +18,6 @@ func TestDefaultWorkflowDataConfig(t *testing.T) {
 		t.Errorf("Expected ExpectedData to be 32, got %d", config.ExpectedData)
 	}
 
-	if config.MaxInternStringLength != 128 {
-		t.Errorf("Expected MaxInternStringLength to be 128, got %d", config.MaxInternStringLength)
-	}
-
-	if config.InternStringCapacity != 128 {
-		t.Errorf("Expected InternStringCapacity to be 128, got %d", config.InternStringCapacity)
-	}
-
 	if config.MetricsConfig == nil {
 		t.Error("Expected MetricsConfig to be non-nil")
 	}
@@ -42,15 +34,6 @@ func TestReadOptimizedWorkflowDataConfig(t *testing.T) {
 
 	if config.ExpectedData != expectedNodes*2 {
 		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes*2, config.ExpectedData)
-	}
-
-	// Other values should be the same as default
-	if config.MaxInternStringLength != 128 {
-		t.Errorf("Expected MaxInternStringLength to be 128, got %d", config.MaxInternStringLength)
-	}
-
-	if config.InternStringCapacity != 128 {
-		t.Errorf("Expected InternStringCapacity to be 128, got %d", config.InternStringCapacity)
 	}
 
 	if config.MetricsConfig == nil {
@@ -71,15 +54,6 @@ func TestHighConcurrencyWorkflowDataConfig(t *testing.T) {
 		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes*2, config.ExpectedData)
 	}
 
-	// Other values should be the same as default
-	if config.MaxInternStringLength != 128 {
-		t.Errorf("Expected MaxInternStringLength to be 128, got %d", config.MaxInternStringLength)
-	}
-
-	if config.InternStringCapacity != 128 {
-		t.Errorf("Expected InternStringCapacity to be 128, got %d", config.InternStringCapacity)
-	}
-
 	if config.MetricsConfig == nil {
 		t.Error("Expected MetricsConfig to be non-nil")
 	}
@@ -98,15 +72,6 @@ func TestLowMemoryWorkflowDataConfig(t *testing.T) {
 		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes, config.ExpectedData)
 	}
 
-	// Low memory config has different string interning settings
-	if config.MaxInternStringLength != 64 {
-		t.Errorf("Expected MaxInternStringLength to be 64, got %d", config.MaxInternStringLength)
-	}
-
-	if config.InternStringCapacity != expectedNodes*2 {
-		t.Errorf("Expected InternStringCapacity to be %d, got %d", expectedNodes*2, config.InternStringCapacity)
-	}
-
 	if config.MetricsConfig == nil {
 		t.Error("Expected MetricsConfig to be non-nil")
 	}
@@ -123,15 +88,6 @@ func TestProductionWorkflowDataConfig(t *testing.T) {
 
 	if config.ExpectedData != expectedNodes*2 {
 		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes*2, config.ExpectedData)
-	}
-
-	// Other values should be the same as default
-	if config.MaxInternStringLength != 128 {
-		t.Errorf("Expected MaxInternStringLength to be 128, got %d", config.MaxInternStringLength)
-	}
-
-	if config.InternStringCapacity != 128 {
-		t.Errorf("Expected InternStringCapacity to be 128, got %d", config.InternStringCapacity)
 	}
 
 	if config.MetricsConfig == nil {
@@ -161,13 +117,5 @@ func TestWithMetricsConfig(t *testing.T) {
 
 	if updatedConfig.ExpectedData != config.ExpectedData {
 		t.Errorf("Expected ExpectedData to be %d, got %d", config.ExpectedData, updatedConfig.ExpectedData)
-	}
-
-	if updatedConfig.MaxInternStringLength != config.MaxInternStringLength {
-		t.Errorf("Expected MaxInternStringLength to be %d, got %d", config.MaxInternStringLength, updatedConfig.MaxInternStringLength)
-	}
-
-	if updatedConfig.InternStringCapacity != config.InternStringCapacity {
-		t.Errorf("Expected InternStringCapacity to be %d, got %d", config.InternStringCapacity, updatedConfig.InternStringCapacity)
 	}
 }

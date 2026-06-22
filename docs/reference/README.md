@@ -21,12 +21,12 @@ The [API Reference](./api-reference.md) provides comprehensive documentation for
 
 The [Configuration Options](./configuration.md) document details all configuration options available in Flow Orchestrator, including:
 
-- Workflow Options
-- Middleware Options
-- Persistence Options
-- Memory Optimization Options
-- Concurrency Options
-- Observer Options
+- Workflow Data configuration
+- Middleware
+- Persistence (stores)
+- Memory optimization (arena, interning)
+- Concurrency (`ExecutionConfig`)
+- Metrics &amp; observability
 
 ## Examples
 
@@ -74,11 +74,12 @@ A single unit of work in a workflow:
 
 ```go
 type Node struct {
-    Name       string
-    Action     Action
-    DependsOn  []*Node
-    RetryCount int
-    Timeout    time.Duration
+    Name            string
+    Action          Action
+    DependsOn       []*Node
+    RetryCount      int
+    Timeout         time.Duration
+    ContinueOnError bool // if true, this node's failure does not fail the workflow (v0.7.0)
 }
 ```
 
@@ -134,11 +135,12 @@ Possible status values for a workflow node:
 type NodeStatus string
 
 const (
-    Pending   NodeStatus = "pending"
-    Running   NodeStatus = "running"
-    Completed NodeStatus = "completed"
-    Failed    NodeStatus = "failed"
-    Skipped   NodeStatus = "skipped"
+    Pending    NodeStatus = "pending"
+    Running    NodeStatus = "running"
+    Completed  NodeStatus = "completed"
+    Failed     NodeStatus = "failed"
+    Skipped    NodeStatus = "skipped"
+    NotStarted NodeStatus = "not_started"
 )
 ```
 
@@ -209,20 +211,18 @@ fmt.Printf("Version: %d.%d.%d",
 Flow Orchestrator defines several constants that are available to users:
 
 ```go
-// Node status constants
+// Node status constants (pkg/workflow/node.go)
 const (
-    Pending   NodeStatus = "pending"
-    Running   NodeStatus = "running"
-    Completed NodeStatus = "completed"
-    Failed    NodeStatus = "failed"
-    Skipped   NodeStatus = "skipped"
+    Pending    NodeStatus = "pending"
+    Running    NodeStatus = "running"
+    Completed  NodeStatus = "completed"
+    Failed     NodeStatus = "failed"
+    Skipped    NodeStatus = "skipped"
+    NotStarted NodeStatus = "not_started"
 )
 
-// Default configuration values
-const (
-    DefaultArenaBlockSize = 64 * 1024 // 64KB
-    DefaultParallelism    = 4         // Default parallel workers
-)
+// Default per-level execution concurrency (pkg/workflow/parallel_execution.go)
+const DefaultMaxConcurrency = 16
 ```
 
 ## Further Reading

@@ -43,8 +43,11 @@ go mod init order-workflow
 Add Flow Orchestrator as a dependency:
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
+go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
+
+> `@latest` resolves to `v0.1.1-alpha` (pre-hardening); use `@main` for the current unreleased code.
+> See the [Installation Guide](./installation.md#using-go-modules-recommended) for details.
 
 ## Step 1: Create the Main Application File
 
@@ -271,24 +274,25 @@ func buildOrderWorkflow() (*workflow.DAG, error) {
 	stack.Use(workflow.LoggingMiddleware())
 	stack.Use(workflow.RetryMiddleware(2, 500*time.Millisecond))
 	
-	// Add workflow steps
+	// Add workflow steps.
+	// stack.Apply takes an Action, so wrap each bare func with workflow.ActionFunc.
 	builder.AddStartNode("validate-order").
-		WithAction(stack.Apply(validateOrderAction))
+		WithAction(stack.Apply(workflow.ActionFunc(validateOrderAction)))
 	
 	builder.AddNode("check-inventory").
-		WithAction(stack.Apply(checkInventoryAction)).
+		WithAction(stack.Apply(workflow.ActionFunc(checkInventoryAction))).
 		DependsOn("validate-order")
 	
 	builder.AddNode("process-payment").
-		WithAction(stack.Apply(processPaymentAction)).
+		WithAction(stack.Apply(workflow.ActionFunc(processPaymentAction))).
 		DependsOn("check-inventory")
 	
 	builder.AddNode("fulfill-order").
-		WithAction(stack.Apply(fulfillOrderAction)).
+		WithAction(stack.Apply(workflow.ActionFunc(fulfillOrderAction))).
 		DependsOn("process-payment")
 	
 	builder.AddNode("send-notification").
-		WithAction(stack.Apply(sendNotificationAction)).
+		WithAction(stack.Apply(workflow.ActionFunc(sendNotificationAction))).
 		DependsOn("fulfill-order")
 	
 	// Build the workflow
@@ -420,8 +424,9 @@ Let's modify our workflow to use persistence:
 func main() {
 	fmt.Println("=== Order Processing Workflow ===")
 
-	// Create a persistence store
-	store, err := workflow.NewJSONFileStore("./workflow_data.json")
+	// Create a persistence store. The argument is a DIRECTORY (baseDir); the
+	// store writes one file per workflow ID inside it.
+	store, err := workflow.NewJSONFileStore("./workflow_data")
 	if err != nil {
 		log.Fatalf("Failed to create store: %v", err)
 	}
@@ -476,13 +481,19 @@ func main() {
 			fmt.Printf("Resuming workflow for order: %s\n", existingOrder.ID)
 		}
 	} else {
-		// No existing state - initialize the workflow data
+		// No existing state - initialize the workflow data and SAVE it first.
+		// Workflow.Execute loads its data from the Store by WorkflowID, so the
+		// seed order must be persisted before Execute, otherwise Execute would
+		// run against empty data and never see the order.
 		fmt.Println("Starting new workflow execution...")
-		existingData = workflow.NewWorkflowData("order-processing")
-		existingData.Set("order", string(orderJSON))
+		seed := workflow.NewWorkflowData("order-processing")
+		seed.Set("order", string(orderJSON))
+		if err := store.Save(seed); err != nil {
+			log.Fatalf("Failed to seed workflow data: %v", err)
+		}
 	}
 
-	// Execute the workflow with existing data
+	// Execute the workflow (it loads the seeded/persisted data from the store)
 	startTime := time.Now()
 
 	// Create a context with timeout

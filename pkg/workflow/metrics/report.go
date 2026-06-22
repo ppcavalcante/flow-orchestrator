@@ -113,11 +113,11 @@ func (r *Reporter) generateOperationTimingReport() string {
 
 	// Format operation stats
 	for _, op := range operations {
-		sb.WriteString(fmt.Sprintf("%s:\n", op.Type))
-		sb.WriteString(fmt.Sprintf("  Count: %d\n", op.Stats.Count))
-		sb.WriteString(fmt.Sprintf("  Min Time: %s\n", FormatDuration(op.Stats.MinTimeNs)))
-		sb.WriteString(fmt.Sprintf("  Max Time: %s\n", FormatDuration(op.Stats.MaxTimeNs)))
-		sb.WriteString(fmt.Sprintf("  Avg Time: %s\n", FormatDuration(op.Stats.AvgTimeNs)))
+		fmt.Fprintf(&sb, "%s:\n", op.Type)
+		fmt.Fprintf(&sb, "  Count: %d\n", op.Stats.Count)
+		fmt.Fprintf(&sb, "  Min Time: %s\n", FormatDuration(op.Stats.MinTimeNs))
+		fmt.Fprintf(&sb, "  Max Time: %s\n", FormatDuration(op.Stats.MaxTimeNs))
+		fmt.Fprintf(&sb, "  Avg Time: %s\n", FormatDuration(op.Stats.AvgTimeNs))
 		sb.WriteString("\n")
 	}
 
@@ -128,7 +128,7 @@ func (r *Reporter) generateOperationTimingReport() string {
 func (r *Reporter) generateSlowOperationsReport(threshold time.Duration) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("=== Slow Operations Report (>%s) ===\n\n", threshold))
+	fmt.Fprintf(&sb, "=== Slow Operations Report (>%s) ===\n\n", threshold)
 
 	// Get all operation stats
 	allStats := r.collector.GetAllOperationStats()
@@ -161,10 +161,10 @@ func (r *Reporter) generateSlowOperationsReport(threshold time.Duration) string 
 
 	// Format slow operations
 	for _, op := range slowOps {
-		sb.WriteString(fmt.Sprintf("%s:\n", op.Type))
-		sb.WriteString(fmt.Sprintf("  Count: %d\n", op.Stats.Count))
-		sb.WriteString(fmt.Sprintf("  Max Time: %s\n", FormatDuration(op.Stats.MaxTimeNs)))
-		sb.WriteString(fmt.Sprintf("  Avg Time: %s\n", FormatDuration(op.Stats.AvgTimeNs)))
+		fmt.Fprintf(&sb, "%s:\n", op.Type)
+		fmt.Fprintf(&sb, "  Count: %d\n", op.Stats.Count)
+		fmt.Fprintf(&sb, "  Max Time: %s\n", FormatDuration(op.Stats.MaxTimeNs))
+		fmt.Fprintf(&sb, "  Avg Time: %s\n", FormatDuration(op.Stats.AvgTimeNs))
 		sb.WriteString("\n")
 	}
 

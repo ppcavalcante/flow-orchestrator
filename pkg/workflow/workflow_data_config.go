@@ -10,10 +10,6 @@ type WorkflowDataConfig struct {
 	ExpectedNodes int
 	ExpectedData  int
 
-	// String interning configuration
-	MaxInternStringLength int
-	InternStringCapacity  int
-
 	// Metrics configuration
 	MetricsConfig *metrics.Config
 }
@@ -22,10 +18,8 @@ type WorkflowDataConfig struct {
 func DefaultWorkflowDataConfig() WorkflowDataConfig {
 	return WorkflowDataConfig{
 		// Reasonable defaults
-		ExpectedNodes:         16,
-		ExpectedData:          32,
-		MaxInternStringLength: 128,
-		InternStringCapacity:  128,
+		ExpectedNodes: 16,
+		ExpectedData:  32,
 
 		// Default metrics configuration
 		MetricsConfig: metrics.NewConfig(),
@@ -61,10 +55,6 @@ func LowMemoryWorkflowDataConfig(expectedNodes int) WorkflowDataConfig {
 	// Set expected capacity
 	config.ExpectedNodes = expectedNodes
 	config.ExpectedData = expectedNodes
-
-	// Use aggressive string interning
-	config.MaxInternStringLength = 64 // Only intern short strings
-	config.InternStringCapacity = expectedNodes * 2
 
 	// Disable metrics to save memory
 	config.MetricsConfig = metrics.DisabledMetricsConfig()

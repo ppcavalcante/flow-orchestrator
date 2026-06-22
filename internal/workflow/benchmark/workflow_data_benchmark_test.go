@@ -202,11 +202,16 @@ func BenchmarkSnapshotAndRestore(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				// Create snapshot
-				snapshot, _ := data.Snapshot()
+				snapshot, err := data.Snapshot()
+				if err != nil {
+					b.Fatalf("Snapshot failed: %v", err)
+				}
 
 				// Create new data store and restore
 				newData := workflow.NewWorkflowData("test")
-				newData.LoadSnapshot(snapshot)
+				if err := newData.LoadSnapshot(snapshot); err != nil {
+					b.Fatalf("Failed to load snapshot: %v", err)
+				}
 			}
 		})
 	}
@@ -258,7 +263,9 @@ func BenchmarkWorkflowDataTypePerformance(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					key := fmt.Sprintf("float_%d", i%size)
 					val, _ := data.Get(key)
-					_ = val.(float64)
+					if _, ok := val.(float64); !ok {
+						b.Fatalf("expected float64 at %s", key)
+					}
 				}
 			})
 
@@ -266,7 +273,9 @@ func BenchmarkWorkflowDataTypePerformance(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					key := fmt.Sprintf("slice_%d", i%size)
 					val, _ := data.Get(key)
-					_ = val.([]string)
+					if _, ok := val.([]string); !ok {
+						b.Fatalf("expected []string at %s", key)
+					}
 				}
 			})
 
@@ -274,7 +283,9 @@ func BenchmarkWorkflowDataTypePerformance(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					key := fmt.Sprintf("map_%d", i%size)
 					val, _ := data.Get(key)
-					_ = val.(map[string]int)
+					if _, ok := val.(map[string]int); !ok {
+						b.Fatalf("expected map[string]int at %s", key)
+					}
 				}
 			})
 		}
@@ -417,7 +428,10 @@ func BenchmarkLargeWorkflowOperations(b *testing.B) {
 				b.ReportAllocs()
 
 				for i := 0; i < b.N; i++ {
-					snapshot, _ := data.Snapshot()
+					snapshot, err := data.Snapshot()
+					if err != nil {
+						b.Fatalf("Snapshot failed: %v", err)
+					}
 					_ = snapshot
 				}
 			})

@@ -9,6 +9,7 @@ Welcome to the Flow Orchestrator Guides section. These guides provide in-depth i
 - [**Middleware System**](./middleware.md) - Using and creating middleware for cross-cutting concerns
 - [**Persistence Layer**](./persistence.md) - Saving and resuming workflow state
 - [**Performance Optimization**](./performance-optimization.md) - Optimizing memory and processing performance
+- [**Observability (OpenTelemetry Metrics)**](./observability.md) - Exporting the engine's metrics to an OTel backend, API-only
 
 ### Usage Patterns
 
@@ -75,12 +76,12 @@ action := loggingMiddleware(myAction)
 ### Creating a Composite Action
 
 ```go
-// Create a composite action from multiple actions
-compositeAction := workflow.CompositeAction([]workflow.Action{
+// Create a composite action from multiple actions (variadic — not a slice)
+compositeAction := workflow.NewCompositeAction(
     validateAction,
     processAction,
     saveAction,
-})
+)
 ```
 
 ### Conditional Execution

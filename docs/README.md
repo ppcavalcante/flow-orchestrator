@@ -25,6 +25,7 @@ Dive deeper into specific topics with our comprehensive guides:
 - [Middleware System](./guides/middleware.md)
 - [Persistence Layer](./guides/persistence.md)
 - [Performance Optimization](./guides/performance-optimization.md)
+- [Observability (OpenTelemetry Metrics)](./guides/observability.md)
 - [Benchmarks](./guides/benchmarks.md)
 
 ### [Reference](./reference/)
@@ -63,10 +64,12 @@ Flow Orchestrator is a lightweight, high-performance workflow orchestration engi
 - **High Performance**: Optimized for minimal allocations and maximum throughput
 - **Thread-Safe**: Built for concurrent access with minimal lock contention
 - **Persistent**: Save and resume workflows across application restarts
-- **Observable**: Comprehensive metrics for monitoring and optimization
+- **Observable**: Comprehensive metrics for monitoring and optimization, exportable to OpenTelemetry (API-only) — see the [Observability guide](./guides/observability.md)
 - **Extensible**: Designed to support multiple orchestration patterns
 - **Embeddable**: Clean API for integration into any Go application
-- **Rigorously Tested**: Property-based testing ensures correctness across a wide range of inputs
+- **Type-Safe Data**: Optional generic typed keys (`Key[T]`) over the shared data store — see [api-reference.md → Typed-Key Data API](./reference/api-reference.md#typed-key-data-api-added-v070)
+- **Resilient**: Per-node continue-on-error lets selected steps fail without halting the workflow — see the [Error Handling guide](./guides/error-handling.md#3-continue-on-error)
+- **Rigorously Tested & Formally Modeled**: Property-based tests over random DAGs plus a TLC-checked TLA+ model of the executor — see [`specs/README.md`](../specs/README.md)
 
 ## Status
 

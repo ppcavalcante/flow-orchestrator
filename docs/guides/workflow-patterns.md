@@ -273,6 +273,11 @@ graph TD
 
 This pattern demonstrates how to implement error handling within a workflow.
 
+> **Note:** for a recovery node to run after the node it recovers from fails, that
+> upstream node must be marked `WithContinueOnError()`. Without it, the default
+> fail-fast behavior halts the workflow on the failure and the recovery node never
+> runs. See [Continue-on-Error](./error-handling.md#3-continue-on-error).
+
 ```go
 builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("error-handling-workflow")
@@ -281,10 +286,11 @@ builder := workflow.NewWorkflowBuilder().
 builder.AddStartNode("start").
     WithAction(startAction)
 
-// Node that might fail
+// Node that might fail — continue-on-error so handle-error can run after it fails.
 builder.AddNode("risky-operation").
     WithAction(riskyAction).
-    WithRetries(3).  // Built-in retry
+    WithRetries(3).            // Built-in retry
+    WithContinueOnError().     // exhaust retries, then fail without halting the workflow
     DependsOn("start")
 
 // Error handling node
@@ -327,6 +333,12 @@ start → risky-operation → handle-error → complete
 
 This pattern implements rollback behavior similar to the distributed Saga pattern, but within a single process. It allows you to define compensating actions that undo previous steps when a later step fails.
 
+> **Note:** the steps whose failure triggers a compensation (`process-payment`,
+> `create-shipment`) are marked `WithContinueOnError()` so their compensation nodes
+> run after they fail. Under the default fail-fast behavior, the first failure
+> halts the workflow before any compensation node runs. See
+> [Continue-on-Error](./error-handling.md#3-continue-on-error).
+
 ```go
 builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("compensation-workflow")
@@ -335,9 +347,10 @@ builder := workflow.NewWorkflowBuilder().
 builder.AddStartNode("reserve-inventory").
     WithAction(reserveInventoryAction)
 
-// Step 2: Process payment
+// Step 2: Process payment — continue-on-error so rollback-inventory runs on failure.
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
+    WithContinueOnError().
     DependsOn("reserve-inventory")
 
 // Compensation step for inventory if payment fails
@@ -359,7 +372,8 @@ builder.AddNode("rollback-inventory").
     }).
     DependsOn("process-payment")
 
-// Step 3: Create shipment (only if previous steps succeeded)
+// Step 3: Create shipment (only if previous steps succeeded) — continue-on-error
+// so refund-payment runs if this step fails.
 builder.AddNode("create-shipment").
     WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Check previous steps status
@@ -373,6 +387,7 @@ builder.AddNode("create-shipment").
         // Create shipment
         return createShipmentAction.Execute(ctx, data)
     }).
+    WithContinueOnError().
     DependsOn("rollback-inventory")
 
 // Compensation step for payment if shipment fails
@@ -414,14 +429,15 @@ reserve-inventory → process-payment → rollback-inventory → create-shipment
 A pattern for transforming data within a workflow:
 
 ```go
-// Define a map action that transforms data
-mapAction := workflow.MapAction(func(input interface{}) (interface{}, error) {
+// NewMapAction(inputKey, outputKey, mapFn) reads inputKey, transforms it, and
+// stores the result under outputKey.
+mapAction := workflow.NewMapAction("raw_user", "user", func(input interface{}) (interface{}, error) {
     // Convert input to specific type
     inputData, ok := input.(map[string]interface{})
     if !ok {
         return nil, fmt.Errorf("expected map but got %T", input)
     }
-    
+
     // Transform the data
     outputData := map[string]interface{}{
         "id":      inputData["user_id"],
@@ -429,7 +445,7 @@ mapAction := workflow.MapAction(func(input interface{}) (interface{}, error) {
         "active":  true,
         "created": time.Now().Format(time.RFC3339),
     }
-    
+
     return outputData, nil
 })
 
@@ -443,47 +459,45 @@ builder.AddNode("transform-user-data").
 A pattern for validating input data:
 
 ```go
-// Create a validation action
-validationAction := workflow.ValidationAction(func(data *workflow.WorkflowData) error {
-    // Get values to validate
-    email, ok := data.GetString("email")
-    if !ok {
-        return fmt.Errorf("email is required")
-    }
-    
-    // Validate email format
-    if !strings.Contains(email, "@") {
-        return fmt.Errorf("invalid email format")
-    }
-    
-    age, ok := data.GetInt("age")
-    if !ok {
-        return fmt.Errorf("age is required")
-    }
-    
-    if age < 18 {
-        return fmt.Errorf("must be 18 or older")
-    }
-    
-    return nil
-})
+// NewValidationAction(inputKey, validationFn, outputKey, errorOutputKey) validates
+// the value stored at inputKey; validationFn receives that value as interface{}.
+validationAction := workflow.NewValidationAction(
+    "email",
+    func(v interface{}) error {
+        email, ok := v.(string)
+        if !ok {
+            return fmt.Errorf("email must be a string")
+        }
+        if !strings.Contains(email, "@") {
+            return fmt.Errorf("invalid email format")
+        }
+        return nil
+    },
+    "email_valid",  // where the success result is stored
+    "email_error",  // where error information is stored on failure
+)
 
 // Use in a workflow
 builder.AddNode("validate-user").
     WithAction(validationAction)
 ```
 
+For multi-field validation, prefer `ValidationMiddleware(func(*WorkflowData) error)`,
+which receives the whole `WorkflowData`.
+
 ## Limitations of Flow Orchestrator's DAG Execution Model
 
 It's important to understand the following limitations of the DAG execution model:
 
-1. **No True Conditional Branching**: As a strict DAG engine, Flow Orchestrator executes all nodes whose dependencies are satisfied. There is no native way to conditionally skip executing a node at the engine level - all decisions about whether to perform work must be made within the node actions themselves.
+1. **No True Conditional Branching**: As a strict DAG engine, Flow Orchestrator executes every node whose dependencies are satisfied (absent a failure — see below). There is no native way to conditionally skip executing a node at the engine level - all decisions about whether to perform work must be made within the node actions themselves.
 
-2. **Limited Dynamic Workflow Structure**: The DAG structure is fixed once built. While you can use dynamic node creation during the building phase, you cannot add or remove nodes during execution.
+2. **Fail-fast by default**: A node failure halts the run by default — in-flight siblings are cancelled and later levels do not execute, so not every node necessarily runs. Mark a node `WithContinueOnError()` to let it fail without halting the workflow (see [Error Handling → Continue-on-Error](./error-handling.md#3-continue-on-error)).
 
-3. **No Native Support for Loops**: DAGs by definition cannot contain cycles, which means the engine doesn't support native looping constructs. Looping must be implemented within node actions or by dynamically creating multiple nodes during the build phase.
+3. **Limited Dynamic Workflow Structure**: The DAG structure is fixed once built. While you can use dynamic node creation during the building phase, you cannot add or remove nodes during execution.
 
-4. **Same-Process Execution**: All workflow actions execute within the same process, which limits the engine's ability to implement true distributed patterns like Sagas. While you can make external calls from actions, the engine itself operates in a single process.
+4. **No Native Support for Loops**: DAGs by definition cannot contain cycles, which means the engine doesn't support native looping constructs. Looping must be implemented within node actions or by dynamically creating multiple nodes during the build phase.
+
+5. **Same-Process Execution**: All workflow actions execute within the same process, which limits the engine's ability to implement true distributed patterns like Sagas. While you can make external calls from actions, the engine itself operates in a single process.
 
 ## Conclusion
 

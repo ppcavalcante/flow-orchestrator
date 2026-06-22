@@ -36,8 +36,12 @@ Flow Orchestrator implements several security measures:
 - Comprehensive test suite with high coverage requirements
 - Automated dependency updates via Dependabot
 - Software Bill of Materials (SBOM) generation for releases
-- Security-focused linters in our CI pipeline
+- Linting via golangci-lint v2 (pinned), currently reporting zero findings on the configured linter set
 - Code reviews for all changes
+
+For the persistence layer's trust model and known limitations (caller-controlled
+input, traversal and corruption guards, and the explicit not-adversarial-proof
+boundary), see [docs/guides/persistence.md](docs/guides/persistence.md) (Trust & Safety).
 
 ## Security Roadmap
 

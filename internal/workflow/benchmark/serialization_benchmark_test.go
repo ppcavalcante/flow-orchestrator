@@ -2,7 +2,6 @@ package benchmark
 
 import (
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
@@ -10,12 +9,9 @@ import (
 
 // BenchmarkSerialization compares the performance of different serialization formats
 func BenchmarkSerialization(b *testing.B) {
-	// Setup: Create temporary directory for test files
-	tempDir, err := os.MkdirTemp("", "workflow-serialization-benchmark")
-	if err != nil {
-		b.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+	// Setup: temp dir for test files (b.TempDir auto-removes at benchmark end —
+	// no manual os.RemoveAll, which errcheck check-blank would flag).
+	tempDir := b.TempDir()
 
 	// Create benchmarks for different workflow sizes
 	for _, nodeCount := range []int{10, 100, 1000} {
@@ -38,7 +34,7 @@ func BenchmarkSerialization(b *testing.B) {
 
 			// JSON Deserialization
 			jsonPath := fmt.Sprintf("%s/workflow_%d.json", tempDir, nodeCount)
-			err = workflowData.SaveToJSON(jsonPath)
+			err := workflowData.SaveToJSON(jsonPath)
 			if err != nil {
 				b.Fatalf("Failed to create JSON file for load test: %v", err)
 			}

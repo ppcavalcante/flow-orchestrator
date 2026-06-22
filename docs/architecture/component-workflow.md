@@ -1,6 +1,6 @@
 # Component: Workflow Engine
 
-The Workflow Engine is the central component of Flow Orchestrator responsible for orchestrating the execution of workflows. This document provides a detailed overview of its architecture, components, and behaviors.
+The workflow execution subsystem — the `Workflow`/`DAG` types and `DAG.Execute` — orchestrates the execution of workflows. ("Workflow Engine" here is a conceptual name for that subsystem, not a Go type.) This document provides a detailed overview of its architecture, components, and behaviors.
 
 ## Overview
 
@@ -40,44 +40,27 @@ The `Workflow` struct is the top-level container:
 
 ```go
 type Workflow struct {
-    DAG        *DAG           // Workflow structure
-    WorkflowID string         // Unique identifier
-    Store      WorkflowStore  // Persistence layer
-    Options    WorkflowOptions // Configuration options
+    DAG        *DAG          // Workflow structure
+    WorkflowID string        // Unique identifier
+    Store      WorkflowStore // Persistence layer
 }
 ```
 
-#### WorkflowEngine
+It is built either directly or via `FromBuilder(builder)`, and run with
+`(*Workflow).Execute(ctx)`.
 
-The engine handles the execution lifecycle:
+#### Execution path
 
-```go
-type WorkflowEngine struct {
-    // Internal fields
-    executor    *DAGExecutor
-    actionRunner *ActionRunner
-    observer    WorkflowObserver
-    metrics     MetricsCollector
-}
-```
+There is no separate `WorkflowEngine` type — execution lives on the `DAG`:
 
-#### DAGExecutor
-
-The `DAGExecutor` is responsible for:
-
-- Topological sorting of the DAG
-- Level-based parallel execution
-- Dependency tracking
-- Node status management
-
-#### ActionRunner
-
-The `ActionRunner` handles:
-
-- Action execution
-- Retry logic
-- Timeout management
-- Worker pool management for parallel execution
+- `(*DAG).Validate()` checks structure and detects cycles, and computes the
+  start/end nodes and execution levels.
+- `(*DAG).Execute(ctx, data)` runs the workflow level by level. Within each
+  level, nodes are run in parallel bounded by `ExecutionConfig.MaxConcurrency`
+  (the internal `executeNodesInLevel` helper, default 16).
+- Per-node retry/timeout behavior is supplied by the node's action and any
+  middleware wrapping it (`RetryMiddleware`, `TimeoutMiddleware`), not a
+  dedicated runner type.
 
 #### WorkflowStore
 
@@ -99,7 +82,7 @@ The workflow execution process follows these steps:
 1. **Initialization**:
    - Load previous state if available
    - Initialize node statuses
-   - Set up observers and metrics
+   - Initialize the metrics collector (if enabled)
 
 2. **Validation**:
    - Verify DAG structure
@@ -120,8 +103,7 @@ The workflow execution process follows these steps:
 5. **Completion**:
    - Finalize workflow state
    - Persist final state
-   - Collect and report metrics
-   - Notify observers
+   - Record per-operation metrics
 
 ## Persistence
 
@@ -156,20 +138,20 @@ The engine implements several error handling strategies:
 
 The engine manages concurrent execution through:
 
-1. **Worker Pool**:
-   - Configurable number of workers
-   - Work stealing for load balancing
-   - Prioritization of critical path nodes
+1. **Bounded per-level parallelism**:
+   - Each runnable node in a level runs in its own goroutine
+   - A buffered-channel semaphore caps in-flight goroutines at
+     `ExecutionConfig.MaxConcurrency` (default 16) — a fixed configured bound, not
+     a worker pool, work-stealing, or adaptive/backpressure scheduler
+   - `executeNodesInLevel` (`parallel_execution.go`) implements this
 
-2. **Lock-Free Data Structures**:
-   - Atomic operations where possible
-   - Fine-grained locking for shared state
-   - Read-write locks for read-heavy data
+2. **Shared-state safety**:
+   - `WorkflowData` uses a `sync.RWMutex` (read-heavy reads take the read lock)
+   - The metrics config is read lock-free via `atomic.Pointer`
 
-3. **Controlled Parallelism**:
-   - Level-based execution for dependency satisfaction
-   - Adaptive concurrency based on resource availability
-   - Backpressure mechanisms
+3. **Level-based ordering**:
+   - Nodes execute level by level so every dependency completes before its
+     dependents start
 
 ## Observability
 
@@ -180,16 +162,19 @@ The Workflow Engine provides observability through:
    - Node execution times
    - Success/failure rates
    - Retry statistics
+   - Exportable to OpenTelemetry via the API-only bridge (host owns the SDK/exporter) —
+     see the [Observability guide](../guides/observability.md)
 
-2. **Observers**:
-   - Node status change hooks
-   - Workflow lifecycle events
-   - Error reporting
+2. **Node status**:
+   - Per-node status (Pending/Running/Completed/Failed/Skipped/NotStarted) tracked
+     on the `WorkflowData`
 
 3. **Logging**:
-   - Structured logs
-   - Configurable verbosity
-   - Context correlation
+   - `LoggingMiddleware` logs action start/completion and errors via the standard
+     log package
+
+(There is no observer/hook subsystem — observation is via metrics, node status,
+and logging middleware.)
 
 ## Memory Management
 
@@ -212,38 +197,54 @@ The engine employs several memory optimization techniques:
 
 ## Configuration Options
 
-The Workflow Engine is configurable through `WorkflowOptions`:
+Configuration is split across a few focused types rather than a single options
+struct:
 
 ```go
-type WorkflowOptions struct {
-    MaxConcurrency      int           // Maximum concurrent node executions
-    DefaultRetryCount   int           // Default retry attempts for nodes
-    DefaultRetryDelay   time.Duration // Default delay between retries
-    PersistenceInterval time.Duration // How often to save state
-    EnableObservability bool          // Enable metrics and observers
-    ArenaSize           int           // Size of memory arenas
-    LogLevel            LogLevel      // Logging verbosity
+// Per-level execution concurrency (pkg/workflow/parallel_execution.go).
+type ExecutionConfig struct {
+    MaxConcurrency int // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency, 16)
+}
+
+// WorkflowData capacity hints + metrics (pkg/workflow/workflow_data_config.go).
+type WorkflowDataConfig struct {
+    ExpectedNodes int
+    ExpectedData  int
+    MetricsConfig *metrics.Config
 }
 ```
 
+- **Concurrency** is set with `WorkflowBuilder.WithExecutionConfig(cfg)` or
+  `DAG.WithExecutionConfig(cfg)`; `DefaultConfig()` uses `MaxConcurrency = 16`.
+- **Retries / timeouts** are configured **per node** on the builder
+  (`WithRetries`, `WithTimeout`) or via middleware (`RetryMiddleware`,
+  `TimeoutMiddleware`), not via a global option.
+- **Continue-on-error** is set **per node** with `WithContinueOnError()`: that
+  node's failure is recorded as `Failed` but does not fail the workflow (the
+  default is fail-fast). See [DAG Execution → failure handling](dag-execution.md).
+- **Metrics** are configured with `metrics.Config` (see the
+  [Configuration reference](../reference/configuration.md)) and attached via
+  `WorkflowDataConfig.WithMetricsConfig`; export to OpenTelemetry is covered in
+  the [Observability guide](../guides/observability.md).
+- **Persistence** is chosen by which `WorkflowStore` you wire in
+  (`WithStore`), not a persistence-interval option.
+
 ## Integration Points
 
-The Workflow Engine provides several integration points:
+The engine provides several integration points:
 
 1. **Public API**:
-   - `Execute` method for starting workflow execution
-   - `Cancel` method for graceful cancellation
-   - `GetStatus` method for workflow status
+   - `(*DAG).Execute(ctx, data)` / `(*Workflow).Execute(ctx)` to run a workflow
+   - cancellation is via the standard `context.Context` passed to `Execute`
+   - node status is tracked on the `WorkflowData` (e.g. `GetNodeStatus`)
 
-2. **Extension Interfaces**:
-   - `WorkflowObserver` for custom monitoring
-   - `MetricsCollector` for custom metrics
-   - `ErrorHandler` for custom error handling
-
-3. **Customization Options**:
-   - Custom `WorkflowStore` implementations
-   - Custom `Action` implementations
-   - Middleware for cross-cutting concerns
+2. **Customization points**:
+   - custom `WorkflowStore` implementations (persistence backend)
+   - custom `Action` implementations (the `Action` interface / `ActionFunc`)
+   - `Middleware` for cross-cutting concerns (logging, retry, timeout,
+     validation, metrics)
+   - `metrics.Config` for metrics collection, exportable to OpenTelemetry via
+     the metrics bridge
 
 ## Performance Considerations
 
@@ -255,8 +256,8 @@ The engine is optimized for:
    - Memory locality
 
 2. **High Throughput**:
-   - Parallel execution where possible
-   - Batched persistence operations
+   - Level-wise parallel execution under a bounded concurrency limit
+   - Binary (FlatBuffers) serialization for persistence
    - Optimized state tracking
 
 3. **Resource Efficiency**:
@@ -280,49 +281,39 @@ workflow := &workflow.Workflow{
 err := workflow.Execute(context.Background())
 ```
 
-### With Custom Options
+### With custom concurrency
+
+Concurrency is configured with an `ExecutionConfig` on the builder (or directly
+on the DAG):
 
 ```go
-// Create options
-options := workflow.WorkflowOptions{
-    MaxConcurrency:    10,
-    DefaultRetryCount: 3,
-    LogLevel:          workflow.LogLevelDebug,
+dag, err := workflow.NewWorkflowBuilder().
+    WithWorkflowID("order-processing").
+    WithStore(store).
+    WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 10}).
+    Build()
+if err != nil {
+    log.Fatal(err)
 }
 
-// Create a workflow with options
-workflow := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "order-processing",
-    Store:      store,
-    Options:    options,
-}
-
-// Execute the workflow
-err := workflow.Execute(context.Background())
+data := workflow.NewWorkflowData("order-processing")
+err = dag.Execute(context.Background(), data)
 ```
 
-### With Observer
+### With metrics enabled
+
+Metrics are configured on the `WorkflowData` via `WorkflowDataConfig`:
 
 ```go
-// Create an observer
-observer := &workflow.DefaultObserver{
-    OnNodeStatusChange: func(nodeID string, status workflow.NodeStatus) {
-        fmt.Printf("Node %s changed status to %s\n", nodeID, status)
-    },
-    OnWorkflowComplete: func(data *workflow.WorkflowData) {
-        fmt.Printf("Workflow %s completed\n", data.ID)
-    },
-}
+cfg := workflow.DefaultWorkflowDataConfig().
+    WithMetricsConfig(metrics.NewConfig())
+data := workflow.NewWorkflowDataWithConfig("order-processing", cfg)
 
-// Create the workflow engine with the observer
-engine := workflow.NewWorkflowEngine(
-    workflow.WithObserver(observer),
-)
-
-// Execute using the engine
-err := engine.Execute(dag, workflowID, store)
+err := dag.Execute(context.Background(), data)
 ```
+
+To export those metrics to OpenTelemetry, see the
+[Observability guide](../guides/observability.md).
 
 ## Conclusion
 

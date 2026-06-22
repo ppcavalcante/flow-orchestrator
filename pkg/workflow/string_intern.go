@@ -6,75 +6,75 @@ import (
 	internal "github.com/ppcavalcante/flow-orchestrator/internal/workflow"
 )
 
-// StringInterner provides string interning functionality to reduce memory usage
-// by reusing identical strings.
-type StringInterner struct {
+// stringInterner provides string interning functionality to reduce memory usage
+// by reusing identical strings. It is internal infrastructure for WorkflowData.
+type stringInterner struct {
 	intern *internal.StringInterner
 }
 
-// NewStringInterner creates a new string interner
-func NewStringInterner() *StringInterner {
-	return &StringInterner{
+// newStringInterner creates a new string interner.
+func newStringInterner() *stringInterner {
+	return &stringInterner{
 		intern: internal.NewStringInterner(),
 	}
 }
 
-// NewStringInternerWithCapacity creates a new string interner with the specified capacity
-func NewStringInternerWithCapacity(capacity int, commonStringsCount int) *StringInterner {
-	return &StringInterner{
+// newStringInternerWithCapacity creates a new string interner with the specified capacity.
+func newStringInternerWithCapacity(capacity int, commonStringsCount int) *stringInterner {
+	return &stringInterner{
 		intern: internal.NewStringInternerWithCapacity(capacity, commonStringsCount),
 	}
 }
 
-// Intern returns an interned version of the input string
-func (s *StringInterner) Intern(str string) string {
+// Intern returns an interned version of the input string.
+func (s *stringInterner) Intern(str string) string {
 	return s.intern.Intern(str)
 }
 
-// InternBatch interns a batch of strings
-func (s *StringInterner) InternBatch(strs []string) []string {
+// InternBatch interns a batch of strings.
+func (s *stringInterner) InternBatch(strs []string) []string {
 	return s.intern.InternBatch(strs)
 }
 
-// Clear clears the intern cache
-func (s *StringInterner) Clear() {
+// Clear clears the intern cache.
+func (s *stringInterner) Clear() {
 	s.intern.Clear()
 }
 
-// GetStats returns statistics about the interner
-func (s *StringInterner) GetStats() (hits, misses, total int) {
+// GetStats returns statistics about the interner.
+func (s *stringInterner) GetStats() (hits, misses, total int) {
 	return s.intern.GetStats()
 }
 
-// GetDetailedStats returns detailed statistics about the interner
-func (s *StringInterner) GetDetailedStats() map[string]int64 {
+// GetDetailedStats returns detailed statistics about the interner.
+func (s *stringInterner) GetDetailedStats() map[string]int64 {
 	return s.intern.GetDetailedStats()
 }
 
-// CacheSize returns the current size of the intern cache
-func (s *StringInterner) CacheSize() int {
+// CacheSize returns the current size of the intern cache.
+func (s *stringInterner) CacheSize() int {
 	return s.intern.CacheSize()
 }
 
-// InternString interns a string using the global interner
-func InternString(s string) string {
+// internString interns a string using the global interner.
+func internString(s string) string {
 	return internal.InternString(s)
 }
 
-// InternStringBatch interns a batch of strings using the global interner
-func InternStringBatch(strs []string) []string {
+// internStringBatch interns a batch of strings using the global interner.
+func internStringBatch(strs []string) []string {
 	return internal.InternStringBatch(strs)
 }
 
-// GlobalStringInterner returns the global string interner
-func GlobalStringInterner() *StringInterner {
+// globalStringInterner returns the global string interner.
+func globalStringInterner() *stringInterner {
 	internalInterner := internal.GlobalStringInterner()
-	return &StringInterner{
+	return &stringInterner{
 		intern: internalInterner,
 	}
 }
 
-// ConfigureGlobalStringInterner configures the global string interner
-func ConfigureGlobalStringInterner(capacity int, refreshInterval time.Duration, loadFactor float64) {
+// configureGlobalStringInterner configures the global string interner.
+func configureGlobalStringInterner(capacity int, refreshInterval time.Duration, loadFactor float64) {
 	internal.ConfigureGlobalStringInterner(capacity, refreshInterval, loadFactor)
 }

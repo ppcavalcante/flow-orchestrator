@@ -38,7 +38,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 								return nil
 							})
 							node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-							dag.AddNode(node)
+							mustAddNode(dag, node)
 						}
 
 						data := workflow.NewWorkflowData("parallel-bench")
@@ -48,7 +48,9 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						b.StartTimer()
 
 						// Execute with default settings (the main DAG Execute method doesn't accept options)
-						_ = dag.Execute(ctx, data)
+						if err := dag.Execute(ctx, data); err != nil {
+							b.Fatalf("Execute failed: %v", err)
+						}
 					}
 				})
 
@@ -78,7 +80,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 								return nil
 							})
 							node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-							dag.AddNode(node)
+							mustAddNode(dag, node)
 						}
 
 						data := workflow.NewWorkflowData("parallel-bench")
@@ -88,7 +90,9 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						b.StartTimer()
 
 						// Execute with optimized executor
-						_, _ = executor.Execute(ctx, dag, data)
+						if _, err := executor.Execute(ctx, dag, data); err != nil {
+							b.Fatalf("Execute failed: %v", err)
+						}
 					}
 				})
 
@@ -118,7 +122,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 								return nil
 							})
 							node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-							dag.AddNode(node)
+							mustAddNode(dag, node)
 						}
 
 						data := workflow.NewWorkflowData("parallel-bench")
@@ -136,7 +140,9 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						}
 
 						// Wait for completion
-						_, _ = future.Get()
+						if _, err := future.Get(); err != nil {
+							b.Fatalf("future.Get failed: %v", err)
+						}
 					}
 				})
 			}
@@ -159,7 +165,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						return nil
 					})
 					node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-					dag.AddNode(node)
+					mustAddNode(dag, node)
 				}
 
 				data := workflow.NewWorkflowData("mixed-duration-bench")
@@ -169,7 +175,9 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 				b.StartTimer()
 
 				// Execute with default settings
-				_ = dag.Execute(ctx, data)
+				if err := dag.Execute(ctx, data); err != nil {
+					b.Fatalf("Execute failed: %v", err)
+				}
 			}
 		})
 
@@ -199,7 +207,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						return nil
 					})
 					node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-					dag.AddNode(node)
+					mustAddNode(dag, node)
 				}
 
 				data := workflow.NewWorkflowData("mixed-duration-bench")
@@ -209,7 +217,9 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 				b.StartTimer()
 
 				// Execute with optimized executor
-				_, _ = executor.Execute(ctx, dag, data)
+				if _, err := executor.Execute(ctx, dag, data); err != nil {
+					b.Fatalf("Execute failed: %v", err)
+				}
 			}
 		})
 	}
@@ -291,7 +301,9 @@ func benchmarkWorkflowDataConfig(b *testing.B, size int, config workflow.Workflo
 		}
 
 		// Snapshot operations
-		_, _ = data.Snapshot()
+		if _, err := data.Snapshot(); err != nil {
+			b.Fatalf("Snapshot failed: %v", err)
+		}
 	}
 }
 
@@ -377,7 +389,9 @@ func benchmarkConcurrentWorkflowDataConfig(b *testing.B, size, workers int, conf
 		wg.Wait()
 
 		// Snapshot at the end
-		_, _ = data.Snapshot()
+		if _, err := data.Snapshot(); err != nil {
+			b.Fatalf("Snapshot failed: %v", err)
+		}
 	}
 }
 
@@ -393,14 +407,14 @@ func createRandomDAG(size int, connectionProb float64) *workflow.DAG {
 			return nil
 		})
 		node := workflow.NewNode(fmt.Sprintf("node%d", i), action)
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 	}
 
 	// Add random dependencies
 	for i := 0; i < size; i++ {
 		for j := 0; j < i; j++ {
 			if rand.Float64() < connectionProb {
-				dag.AddDependency(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", j))
+				mustAddDep(dag, fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", j))
 			}
 		}
 	}

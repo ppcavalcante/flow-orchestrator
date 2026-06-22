@@ -91,9 +91,11 @@ func TestInstrumentedRWMutexLockUnlock(t *testing.T) {
 	config.EnableLockContention = true
 	mutex := NewInstrumentedRWMutexWithConfig("test", config)
 
-	// Test Lock/Unlock
+	// Test Lock/Unlock. SA2001 intentional throughout this file: the lock/unlock
+	// pair IS the instrumented unit under test (verifying metrics recording), not
+	// a critical section guarding shared state.
 	mutex.Lock()
-	mutex.Unlock()
+	mutex.Unlock() //nolint:staticcheck // SA2001: empty CS is the instrumentation probe
 
 	// Check that metrics were recorded
 	lockStats := GetOperationStats(OpLockAcquire)
@@ -114,7 +116,7 @@ func TestInstrumentedRWMutexLockUnlock(t *testing.T) {
 	Reset()
 
 	mutex.Lock()
-	mutex.Unlock()
+	mutex.Unlock() //nolint:staticcheck // SA2001: empty CS is the instrumentation probe
 
 	// Check that no metrics were recorded
 	lockStats = GetOperationStats(OpLockAcquire)
@@ -136,7 +138,7 @@ func TestInstrumentedRWMutexRLockRUnlock(t *testing.T) {
 
 	// Test RLock/RUnlock
 	mutex.RLock()
-	mutex.RUnlock()
+	mutex.RUnlock() //nolint:staticcheck // SA2001: empty CS is the instrumentation probe
 
 	// Check that metrics were recorded
 	rlockStats := GetOperationStats(OpRLockAcquire)
@@ -156,8 +158,11 @@ func TestInstrumentedRWMutexRLockRUnlock(t *testing.T) {
 	// Reset counters
 	Reset()
 
+	// SA2001 intentional: the (R)Lock/(R)Unlock pair IS the unit under test
+	// (verifying the instrumented mutex records — here, does NOT record when
+	// disabled), not a critical section guarding shared state.
 	mutex.RLock()
-	mutex.RUnlock()
+	mutex.RUnlock() //nolint:staticcheck // SA2001: empty CS is intentional, see above
 
 	// Check that no metrics were recorded
 	rlockStats = GetOperationStats(OpRLockAcquire)
@@ -194,10 +199,12 @@ func TestInstrumentedRWMutexContention(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	// Second goroutine tries to acquire the lock (will experience contention)
+	// SA2001 intentional: the Lock/Unlock pair is the contention probe under
+	// test, not a critical section guarding shared state.
 	go func() {
 		defer wg.Done()
 		mutex.Lock()
-		mutex.Unlock()
+		mutex.Unlock() //nolint:staticcheck // SA2001: empty CS is intentional, see above
 	}()
 
 	// Wait for both goroutines to complete

@@ -42,6 +42,13 @@ type Node struct {
 
 	// Timeout specifies the maximum execution time for the node
 	Timeout time.Duration
+
+	// ContinueOnError, when true, changes how a failure of this node is
+	// handled by the executor: instead of failing the workflow (the default
+	// fail-fast behavior), the node is marked Failed, its siblings and the
+	// rest of the DAG continue, and dependents may inspect this node's Failed
+	// status and branch on it. Default false preserves fail-fast.
+	ContinueOnError bool
 }
 
 // NewNode creates a new node with the given name and action
@@ -153,6 +160,14 @@ func (n *Node) WithTimeout(timeout time.Duration) *Node {
 // WithDependencies sets the dependencies of this node
 func (n *Node) WithDependencies(deps ...*Node) *Node {
 	n.DependsOn = deps
+	return n
+}
+
+// WithContinueOnError marks the node so that a failure does not fail the
+// workflow: the node is recorded as Failed and the rest of the DAG continues.
+// Returns the node for method chaining.
+func (n *Node) WithContinueOnError() *Node {
+	n.ContinueOnError = true
 	return n
 }
 

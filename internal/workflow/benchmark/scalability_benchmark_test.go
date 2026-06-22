@@ -47,20 +47,18 @@ func benchmarkNodeScaling(b *testing.B, nodeCount int) {
 			return nil
 		})
 		node := workflow.NewNode(nodeName, action)
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 	}
 
 	// Create dependencies (simple linear chain)
 	for i := 1; i < nodeCount; i++ {
-		dag.AddDependency(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
+		mustAddDep(dag, fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
 	}
 
-	// Create executor with custom config
-	config := workflow.ExecutionConfig{
+	// Apply a custom execution config and run the real wired execution path.
+	dag.WithExecutionConfig(workflow.ExecutionConfig{
 		MaxConcurrency: 4,
-		PreserveOrder:  true,
-	}
-	executor := workflow.NewParallelNodeExecutor(config)
+	})
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -69,16 +67,10 @@ func benchmarkNodeScaling(b *testing.B, nodeCount int) {
 		// Create workflow data
 		data := workflow.NewWorkflowData(fmt.Sprintf("scaling-test-%d", i))
 
-		// Instead of executing the DAG, we'll manually set all node statuses to completed
-		// This avoids the dependency resolution issue while still measuring the performance
-		for j := 0; j < nodeCount; j++ {
-			nodeName := fmt.Sprintf("node%d", j)
-			data.SetNodeStatus(nodeName, workflow.Completed)
-		}
-
-		// Execute the DAG
+		// Execute the DAG through the real path (DAG.Execute -> level scheduling
+		// bounded by the configured concurrency).
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := executor.ExecuteNodes(ctx, getNodesFromDAG(dag), data)
+		err := dag.Execute(ctx, data)
 		cancel()
 
 		if err != nil {
@@ -102,20 +94,18 @@ func benchmarkConcurrencyScaling(b *testing.B, workerCount int) {
 			return nil
 		})
 		node := workflow.NewNode(nodeName, action)
-		dag.AddNode(node)
+		mustAddNode(dag, node)
 	}
 
 	// Create a star topology (all nodes depend on node0)
 	for i := 1; i < nodeCount; i++ {
-		dag.AddDependency(fmt.Sprintf("node%d", i), "node0")
+		mustAddDep(dag, fmt.Sprintf("node%d", i), "node0")
 	}
 
-	// Create executor with custom config
-	config := workflow.ExecutionConfig{
+	// Apply the worker-count concurrency limit and run the real wired path.
+	dag.WithExecutionConfig(workflow.ExecutionConfig{
 		MaxConcurrency: workerCount,
-		PreserveOrder:  true,
-	}
-	executor := workflow.NewParallelNodeExecutor(config)
+	})
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -124,25 +114,14 @@ func benchmarkConcurrencyScaling(b *testing.B, workerCount int) {
 		// Create workflow data
 		data := workflow.NewWorkflowData(fmt.Sprintf("concurrency-test-%d", i))
 
-		// Set node0 as completed to allow parallel execution of other nodes
-		data.SetNodeStatus("node0", workflow.Completed)
-
-		// Execute the DAG
+		// Execute the DAG through the real path. node0 is the star root; once it
+		// completes, the remaining nodes run in parallel bounded by MaxConcurrency.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := executor.ExecuteNodes(ctx, getNodesFromDAG(dag), data)
+		err := dag.Execute(ctx, data)
 		cancel()
 
 		if err != nil {
 			b.Fatalf("DAG execution failed: %v", err)
 		}
 	}
-}
-
-// getNodesFromDAG extracts nodes from a DAG
-func getNodesFromDAG(dag *workflow.DAG) []*workflow.Node {
-	nodes := make([]*workflow.Node, 0, len(dag.Nodes))
-	for _, node := range dag.Nodes {
-		nodes = append(nodes, node)
-	}
-	return nodes
 }

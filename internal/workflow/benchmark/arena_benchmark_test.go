@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
+	workflow "github.com/ppcavalcante/flow-orchestrator/internal/workflow"
 	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena"
-	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
 
 // BenchmarkArenaAllocation benchmarks memory allocation with and without arenas

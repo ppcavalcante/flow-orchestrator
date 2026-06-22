@@ -34,7 +34,7 @@ codecov-coverage: generate-fb
 	@go test -race -coverprofile=coverage.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
 	@echo "Coverage report generated at coverage.txt"
 	@echo "Coverage by priority level:"
-	@echo "Critical (pkg/workflow): $(shell go tool cover -func=coverage.txt | grep "pkg/workflow" | grep -v "pkg/workflow/fb" | grep total | awk '{print $$3}')"
+	@echo "Critical (pkg/workflow): $(shell go tool cover -func=coverage.txt | grep "pkg/workflow" | grep -v "internal/workflow/fb" | grep total | awk '{print $$3}')"
 	@echo "High (arena, memory): $(shell go tool cover -func=coverage.txt | grep "internal/workflow/arena\|internal/workflow/memory" | grep total | awk '{print $$3}')"
 	@echo "Medium (metrics, utils, concurrent): $(shell go tool cover -func=coverage.txt | grep "internal/workflow/metrics\|internal/workflow/utils\|internal/workflow/concurrent" | grep total | awk '{print $$3}')"
 
@@ -82,23 +82,28 @@ coverage-improvement:
 		fi; \
 	done
 
+# Pinned golangci-lint version. The repo's .golangci.yml uses the v2 schema, so
+# lint must run under v2. Pinning + `go run` makes lint reproducible regardless of
+# which (if any) golangci-lint binary a developer has installed locally.
+GOLANGCI_LINT_VERSION ?= v2.12.2
+
 # Run linter
 lint:
-	golangci-lint run --config .golangci.yml
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --config .golangci.yml
 
 # Clean build artifacts
 clean:
 	rm -f coverage*.txt coverage*.html
 	rm -rf ./bin
-	rm -rf pkg/workflow/fb
+	rm -rf internal/workflow/fb
 
 # FlatBuffers related targets
 check-flatbuffers:
 	./scripts/tools/check_flatbuffers.sh
 
 generate-fb: check-flatbuffers
-	mkdir -p pkg/workflow/fb
-	flatc --go -o pkg/workflow/fb pkg/workflow/schema/workflow_data.fbs
+	mkdir -p internal/workflow/fb
+	flatc --go -o internal/workflow/fb pkg/workflow/schema/workflow_data.fbs
 
 # Run examples
 examples:

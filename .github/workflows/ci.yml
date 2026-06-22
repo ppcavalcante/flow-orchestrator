@@ -2,34 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ anvil-m1, main ]
   pull_request:
-    branches: [ main ]
+
+permissions:
+  contents: read
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: true
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: latest
-          args: --timeout=5m --issues-exit-code=1
-
   test:
-    name: Test
+    name: Test (Go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.24.x = the go.mod floor (lowest supported); 1.25.x = the dev/build
+        # toolchain. Testing both catches "used a 1.25-only feature while
+        # declaring 1.24". 1.25.x is pinned to a patched release (>=1.25.11,
+        # the govulncheck stdlib-advisory ceiling) — see DEC-M5-toolchain.
+        go: [ '1.24.x', '1.25.11' ]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version: ${{ matrix.go }}
           cache: true
       - name: Install FlatBuffers compiler
         run: |
@@ -37,24 +32,62 @@ jobs:
           sudo apt-get install -y flatbuffers-compiler
       - name: Generate FlatBuffers code
         run: make generate-fb
-      - name: Generate coverage report for codecov
-        run: make codecov-coverage
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+      - name: Build
+        run: go build -v ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Gofmt (fail if any file is unformatted)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Test (race)
+        run: go test ./... -race
+      - name: govulncheck (symbol-scan blocking)
+        run: |
+          # Pin the gate tool itself (A2) — @latest would let the scanner drift,
+          # making a green/red result non-reproducible across runs.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.4.0
+          # Blocking on CALLED vulnerabilities (symbol scan). Uncalled module /
+          # imported findings are report-only and must not wedge CI; -scan=symbol
+          # is the default, the gate is the exit code on a called vuln.
+          govulncheck ./...
+
+  lint:
+    name: Lint (golangci-lint v2.12.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.txt
-          flags: unittests
-          fail_ci_if_error: false
+          go-version: '1.25.11'
+          cache: true
+      - name: Install FlatBuffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatbuffers-compiler
+      - name: Generate FlatBuffers code
+        run: make generate-fb
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          # Pinned to the repo-canonical version (matches Makefile GOLANGCI_LINT_VERSION)
+          # so CI == local. The 4-milestone "dark lint" was this job floating `latest`
+          # (which ran v1 against a v2 config) plus CI never triggering on the branch.
+          version: v2.12.2
+          args: --timeout=5m --issues-exit-code=1
 
   coverage:
     name: Coverage Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version: '1.25.11'
           cache: true
       - name: Install FlatBuffers compiler
         run: |
@@ -69,23 +102,54 @@ jobs:
       - name: Generate coverage report
         run: make coverage-report
       - name: Check coverage thresholds
+        # Backed by the T7-fixed check_coverage.sh: a failing test suite now
+        # exits non-zero (the swallow-bug is fixed) so this is a real gate.
         run: ./scripts/testing/check_coverage.sh
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unittests
+          # fail_ci_if_error stays false: a Codecov upload hiccup must not fail CI
+          # (the real coverage gate is check_coverage.sh above, not the upload).
+          fail_ci_if_error: false
       - name: Archive coverage reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-reports
           path: |
             coverage-focused.txt
             coverage-focused.html
 
+  fuzz:
+    name: Fuzz (bounded discovery)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.11'
+          cache: true
+      - name: Install FlatBuffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatbuffers-compiler
+      - name: Generate FlatBuffers code
+        run: make generate-fb
+      - name: Fuzz FlatBuffersStore.Load (bounded)
+        # Structural evidence artifact, NOT a Decision gate: a crash fails the job,
+        # but "no crash found in 60s" is an existential non-finding, never a proof.
+        # The durable gate is the committed seed-corpus replay in the race test job.
+        run: go test ./pkg/workflow/ -run='^$' -fuzz='^FuzzFlatBuffersStoreLoad$' -fuzztime=60s
+
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version: '1.25.11'
           cache: true
       - name: Install FlatBuffers compiler
         run: |
@@ -101,4 +165,4 @@ jobs:
             dir=$(dirname $example)
             echo "Running example: $dir"
             cd $dir && go build -v && cd -
-          done 
+          done

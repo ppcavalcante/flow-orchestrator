@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,11 +16,8 @@ import (
 func TestParallelExecution(t *testing.T) {
 	t.Run("DefaultExecutionConfig", func(t *testing.T) {
 		config := DefaultConfig()
-		if config.MaxConcurrency != 4 {
-			t.Errorf("Expected default MaxConcurrency to be 4, got %d", config.MaxConcurrency)
-		}
-		if !config.PreserveOrder {
-			t.Error("Expected default PreserveOrder to be true")
+		if config.MaxConcurrency != DefaultMaxConcurrency {
+			t.Errorf("Expected default MaxConcurrency to be %d, got %d", DefaultMaxConcurrency, config.MaxConcurrency)
 		}
 	})
 
@@ -52,9 +50,8 @@ func TestParallelExecution(t *testing.T) {
 		}))
 
 		// Add nodes to the DAG
-		dag.AddNode(node1)
-		dag.AddNode(node2)
-
+		mustAddNode(t, dag, node1)
+		mustAddNode(t, dag, node2)
 		// Create workflow data
 		data := NewWorkflowData("test-dag")
 
@@ -95,8 +92,7 @@ func TestParallelExecution(t *testing.T) {
 		}))
 
 		// Add node to the DAG
-		dag.AddNode(failingNode)
-
+		mustAddNode(t, dag, failingNode)
 		// Create workflow data
 		data := NewWorkflowData("test-fail")
 
@@ -126,8 +122,7 @@ func TestParallelExecution(t *testing.T) {
 		}))
 
 		// Add node to the DAG
-		dag.AddNode(node)
-
+		mustAddNode(t, dag, node)
 		// Create workflow data
 		data := NewWorkflowData("test-cancel")
 
@@ -182,12 +177,9 @@ func TestParallelExecutionWithDefaultConfig(t *testing.T) {
 	node2 := NewNode("node2", action2)
 	node3 := NewNode("node3", action3)
 
-	// Create executor with default config
-	executor := NewParallelNodeExecutor(DefaultConfig())
-
-	// Test parallel execution
+	// Test parallel execution via the live level-executor.
 	nodes := []*Node{node1, node2, node3}
-	err := executor.ExecuteNodes(context.Background(), nodes, data)
+	err := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency)
 	require.NoError(t, err)
 
 	// Verify all nodes were executed
@@ -218,12 +210,9 @@ func TestParallelExecutionWithError(t *testing.T) {
 	node2 := NewNode("node2", action2)
 	node3 := NewNode("node3", action3)
 
-	// Create executor with default config
-	executor := NewParallelNodeExecutor(DefaultConfig())
-
-	// Test parallel execution
+	// Test parallel execution via the live level-executor.
 	nodes := []*Node{node1, node2, node3}
-	err := executor.ExecuteNodes(context.Background(), nodes, data)
+	err := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency)
 	require.Error(t, err)
 
 	// Verify node statuses
@@ -242,20 +231,79 @@ func TestParallelExecutionWithContext(t *testing.T) {
 	node1 := NewNode("node1", action1)
 	node2 := NewNode("node2", action2)
 
-	// Create executor with default config
-	executor := NewParallelNodeExecutor(DefaultConfig())
-
 	// Create context with short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	// Test parallel execution with timeout
+	// Test parallel execution with timeout via the live level-executor.
 	nodes := []*Node{node1, node2}
-	err := executor.ExecuteNodes(ctx, nodes, data)
+	err := executeNodesInLevel(ctx, nodes, data, DefaultConfig().MaxConcurrency)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "context deadline exceeded")
 
 	// Verify that actions were not completed
 	assert.False(t, action1.executed)
 	assert.False(t, action2.executed)
+}
+
+// TestMaxConcurrencyIsHonored is the API-01 acceptance test: it proves the
+// configured MaxConcurrency actually bounds the number of nodes running
+// simultaneously in a single level (DEC-M3-maxconcurrency). Each action tracks
+// the peak in-flight count via an atomic CAS-max; for a one-level DAG of N
+// independent nodes the observed peak must equal min(K, N) and never exceed K.
+func TestMaxConcurrencyIsHonored(t *testing.T) {
+	// buildSingleLevelDAG builds a DAG of n independent nodes (all at level 0)
+	// whose actions track the peak number of concurrently-running actions.
+	buildSingleLevelDAG := func(n int) (*DAG, *int64) {
+		var inFlight int64
+		var peak int64
+		dag := NewDAG("maxconc-test")
+		for i := 0; i < n; i++ {
+			node := NewNode(fmt.Sprintf("node%d", i), ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+				cur := atomic.AddInt64(&inFlight, 1)
+				// CAS-max: bump peak up to cur if cur is larger.
+				for {
+					old := atomic.LoadInt64(&peak)
+					if cur <= old || atomic.CompareAndSwapInt64(&peak, old, cur) {
+						break
+					}
+				}
+				// Hold the slot long enough for siblings to pile up.
+				time.Sleep(20 * time.Millisecond)
+				atomic.AddInt64(&inFlight, -1)
+				return nil
+			}))
+			require.NoError(t, dag.AddNode(node))
+		}
+		return dag, &peak
+	}
+
+	const n = 50
+
+	t.Run("LimitBites_K4", func(t *testing.T) {
+		dag, peak := buildSingleLevelDAG(n)
+		dag.WithExecutionConfig(ExecutionConfig{MaxConcurrency: 4})
+		require.NoError(t, dag.Execute(context.Background(), NewWorkflowData("k4")))
+		got := atomic.LoadInt64(peak)
+		assert.LessOrEqual(t, got, int64(4), "peak in-flight must not exceed the limit")
+		assert.Equal(t, int64(4), got, "with N>>K the peak must reach exactly K")
+	})
+
+	t.Run("DefaultK16", func(t *testing.T) {
+		dag, peak := buildSingleLevelDAG(n)
+		// Leave the DAG's DefaultConfig() (MaxConcurrency = DefaultMaxConcurrency = 16).
+		require.NoError(t, dag.Execute(context.Background(), NewWorkflowData("k16")))
+		got := atomic.LoadInt64(peak)
+		assert.LessOrEqual(t, got, int64(DefaultMaxConcurrency))
+		assert.Equal(t, int64(DefaultMaxConcurrency), got, "with N>>default the peak must reach the default 16")
+	})
+
+	t.Run("NonPositiveCoercesToDefault", func(t *testing.T) {
+		dag, peak := buildSingleLevelDAG(n)
+		dag.WithExecutionConfig(ExecutionConfig{MaxConcurrency: 0}) // <=0 must coerce to DefaultMaxConcurrency, never unbounded
+		require.NoError(t, dag.Execute(context.Background(), NewWorkflowData("k0")))
+		got := atomic.LoadInt64(peak)
+		assert.LessOrEqual(t, got, int64(DefaultMaxConcurrency), "<=0 must be bounded, not unbounded")
+		assert.Equal(t, int64(DefaultMaxConcurrency), got)
+	})
 }

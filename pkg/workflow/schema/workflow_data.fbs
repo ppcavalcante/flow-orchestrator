@@ -11,7 +11,8 @@ table KeyValueString {
 
 table KeyValueInt {
   key:string;
-  value:int;
+  value:int;       // legacy (M1) int32 storage; kept for backward-compatible reads
+  value_long:long; // M2 additive widening: faithful int64 storage (highest field id)
 }
 
 table KeyValueBool {

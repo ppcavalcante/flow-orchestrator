@@ -117,10 +117,10 @@ func TestWorkflowData(t *testing.T) {
 		data.SetNodeStatus("node1", Running)
 		data.SetOutput("node1", "output1")
 
-		// Create a temporary file
-		tmpfile, err := os.CreateTemp("", "workflow_*.json")
+		// Create a temporary file inside t.TempDir so it auto-removes at test end
+		// (no manual os.Remove, which errcheck check-blank would flag).
+		tmpfile, err := os.CreateTemp(t.TempDir(), "workflow_*.json")
 		require.NoError(t, err)
-		defer os.Remove(tmpfile.Name())
 
 		// Test SaveToJSON
 		err = data.SaveToJSON(tmpfile.Name())
@@ -258,12 +258,16 @@ func TestCloneMap(t *testing.T) {
 	require.Equal(t, original["bool"], cloned["bool"])
 
 	// Verify nested structures are deep copied
-	originalMap := original["map"].(map[string]interface{})
-	clonedMap := cloned["map"].(map[string]interface{})
+	originalMap, ok := original["map"].(map[string]interface{})
+	require.True(t, ok, "original[map] must be a map")
+	clonedMap, ok := cloned["map"].(map[string]interface{})
+	require.True(t, ok, "cloned[map] must be a map")
 	require.Equal(t, originalMap["nested"], clonedMap["nested"])
 
-	originalSlice := original["slice"].([]interface{})
-	clonedSlice := cloned["slice"].([]interface{})
+	originalSlice, ok := original["slice"].([]interface{})
+	require.True(t, ok, "original[slice] must be a slice")
+	clonedSlice, ok := cloned["slice"].([]interface{})
+	require.True(t, ok, "cloned[slice] must be a slice")
 	require.Equal(t, originalSlice, clonedSlice)
 
 	// Verify modifying clone doesn't affect original

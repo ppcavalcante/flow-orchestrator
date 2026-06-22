@@ -306,8 +306,8 @@ func RateLimitMiddleware(rps int) Middleware {
     }
 }
 
-// Usage
-action := workflow.RateLimitMiddleware(10)(myAction) // 10 requests per second
+// Usage (this is YOUR middleware, defined above — not shipped by the library)
+action := RateLimitMiddleware(10)(myAction) // 10 requests per second
 ```
 
 ### Example: Validation Middleware

@@ -105,7 +105,9 @@ func BenchmarkBuilderAPI(b *testing.B) {
 				WithAction(createSimpleAction()).
 				DependsOn("process-data")
 
-			_, _ = builder.Build()
+			if _, err := builder.Build(); err != nil {
+				b.Fatalf("Build failed: %v", err)
+			}
 		}
 	})
 
@@ -133,7 +135,9 @@ func BenchmarkBuilderAPI(b *testing.B) {
 						}
 					}
 
-					_, _ = builder.Build()
+					if _, err := builder.Build(); err != nil {
+						b.Fatalf("Build failed: %v", err)
+					}
 				}
 			})
 		}
@@ -160,7 +164,9 @@ func BenchmarkCoordinationOverhead(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				// Call each action directly
 				for _, action := range actions {
-					_ = action.Execute(ctx, data)
+					if err := action.Execute(ctx, data); err != nil {
+						b.Fatalf("action.Execute failed: %v", err)
+					}
 				}
 			}
 		})
@@ -186,12 +192,17 @@ func BenchmarkCoordinationOverhead(b *testing.B) {
 				lastNode = nodeName
 			}
 
-			dag, _ := builder.Build()
+			dag, err := builder.Build()
+			if err != nil {
+				b.Fatalf("Build failed: %v", err)
+			}
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				data := workflow.NewWorkflowData("orchestrated")
-				_ = dag.Execute(ctx, data)
+				if err := dag.Execute(ctx, data); err != nil {
+					b.Fatalf("Execute failed: %v", err)
+				}
 			}
 		})
 	})

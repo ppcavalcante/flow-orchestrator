@@ -7,7 +7,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Records milestone state for M4, M5, M6, and M7. The in-code version constant is
+`0.7.0-alpha` (bumped at the M7 close from `0.5.0-alpha`; the 0.6 line was never
+cut as a const — M6 closed without a bump, so the combined M6+M7 release jumps to
+0.7.0-alpha — see `version.go`); no release tag is cut on this branch yet — these
+entries record milestone state pending the parked `anvil-m1`→`main` merge + tag
+(same disposition as the v0.2.0/v0.3.0 entries below). The latest *published* tag
+remains `v0.1.1-alpha`, which predates all M2–M7 work; see [STABILITY.md](STABILITY.md).
+
 ### Added
+- **Typed-key data API (milestone M7)** — an additive, type-safe layer over the
+  string-keyed `WorkflowData.Set`/`Get`: `Key[T]` (with `NewKey[T](name)` and
+  `Name()`) plus the package-level generic functions `Set[T]`, `Get[T]`
+  (comma-ok; returns `(zero, false)` on absent-or-type-mismatch, never panics),
+  and `GetOr[T]`. Producer and consumer share a typed `Key`, so type mismatches
+  are compile errors. Values live in the same underlying store as the string API,
+  so the two fully interoperate; the typed layer adds no state and inherits
+  `WorkflowData`'s locking. (Go forbids type-parameterized methods, hence
+  package-level functions.) See
+  [api-reference.md → Typed-Key Data API](docs/reference/api-reference.md#typed-key-data-api-added-v070).
+- **Per-node continue-on-error (milestone M7)** — `Node.WithContinueOnError()` and
+  `NodeBuilder.WithContinueOnError()`, plus the `Node.ContinueOnError` field. A
+  node so marked still records `Failed` on failure, but the failure no longer
+  cancels its siblings or fails the workflow; dependents run and observe its
+  `Failed` status. The dependency guard treats a continue-on-error `Failed`
+  dependency as *resolved* (`DEC-P21-depguard`); a normal `Failed` dependency
+  still blocks fail-fast. `DAG.Execute` returns `nil` iff every
+  non-continue-on-error node succeeded. The default (unset) behavior is unchanged.
+  See [api-reference.md → Failure Semantics](docs/reference/api-reference.md#failure-semantics).
+- **Formal & property-based verification of the executor (milestone M7)** —
+  `pkg/workflow/invariants_property_test.go` is a gopter property suite over random
+  DAGs (topological order, peak concurrency within `MaxConcurrency`, run-once
+  completeness, dependencies-before-run, and the continue-on-error/fail-fast
+  failure semantics), gated in `go test ./...`. `specs/` adds a TLA+/PlusCal model
+  of the level executor (`Executor.tla` + `MCExecutor.tla` with three `.cfg`
+  scenarios), TLC-checked for safety (concurrency bound, dependencies-before-run,
+  fail-fast halting) and liveness (termination / deadlock-freedom). See
+  [`specs/README.md`](specs/README.md) for the honest scope.
+- **OpenTelemetry metrics bridge (milestone M6)** — `pkg/workflow/metrics`
+  gains `OTelBridge` and `NewOTelBridge(c *MetricsCollector, mp metric.MeterProvider)`
+  (plus `(*OTelBridge).Shutdown`), bridging the existing metrics to OpenTelemetry
+  via the OTel metrics **API only** (no SDK in the library's non-test dependency
+  graph; the host owns the SDK/exporter). It registers 6 observable instruments
+  under `flow_orchestrator.operation.*`. A separate-module
+  `examples/observability/` and the [Observability guide](docs/guides/observability.md)
+  ship with it.
+- **CI/release hardening (milestone M5)** — the curated `golangci-lint` v2 set now actually
+  runs in CI (pinned **v2.12.2**, matching the `Makefile`; the prior 4-milestone "dark lint"
+  came from a floated `latest` running v1 against a v2 config plus CI never triggering on the
+  branch). CI now triggers on `anvil-m1`/`main` pushes and all PRs, runs a `[1.24.x, 1.25.11]`
+  Go matrix (go.mod floor + patched dev toolchain), and gates on build, `go vet`, `gofmt`,
+  `go test ./... -race`, and `govulncheck` (pinned `v1.4.0`, blocking on *called*
+  vulnerabilities). GitHub Actions are SHA-pinned.
+- **Contributor-experience files (milestone M5, REL-01)** — root `CONTRIBUTING.md`,
+  `CODE_OF_CONDUCT.md` (Contributor Covenant), `.github/ISSUE_TEMPLATE/` (bug + feature),
+  `.github/PULL_REQUEST_TEMPLATE.md`, and honest README maturity/coverage badges.
+- **Layered bounds guard on `FlatBuffersStore.Load` (milestone M4)** — malformed, truncated, or
+  absurd-element-count `.fb` input is rejected *before* the FlatBuffers decode (a file-size cap,
+  a root-offset and minimum-length sanity pre-check, and per-element count caps), returning
+  `ErrCorruptData` with `data == nil` and no panic. The M1 `recover()` remains as a residual
+  backstop. Bounds are internal default constants (64 MiB file size, 1 Mi elements) — **no new
+  public surface**. See [ADR-0008](docs/architecture/adr/0008-layered-bounds-guard-trust-reratify.md).
+- `FuzzFlatBuffersStoreLoad` fuzz harness with a seeded malformed corpus and regression-seed
+  replay wired into the normal test suite (M4).
+
+### Changed
+- **Version constant bumped to `0.5.0-alpha`** (M5; folds in M4's skipped bump). The
+  authoritative release version remains the git tag, cut post-release; the constant is the
+  in-code dev marker.
+- **Install guidance is now honest** (M5, REL-02): `docs/getting-started/*` use a working
+  install line plus a "Versioning" note that the latest tagged release (`v0.1.1-alpha`)
+  predates the M2–M5 hardening and that `main` is substantially ahead and unreleased.
+- **FlatBuffers `Load` size cap is now race-free** (M5, SEC-01): enforced atomically by reading
+  through an `io.LimitReader(cap+1)` rather than `os.Stat`-then-`os.ReadFile`, removing the
+  TOCTOU window. Posture and bounds unchanged.
+- The persistence trust contract is **re-ratified, not re-opened** (M4): "malformed input is
+  rejected before structural traversal," not merely recovered-from-panic. Posture unchanged
+  (caller-controlled; ceiling = availability; NOT adversarial-proof). The semantic-forgery
+  residual is disclosed explicitly — the guard checks structure, not meaning, so a
+  well-formed-but-hostile file can still load. See `docs/guides/persistence.md` and ADR-0008.
+
+## [0.3.0-alpha] - 2026-06-15
+
+"API Truth & Surface Cleanup" (milestone M3). Aggressive pre-1.0 cleanup so the public
+`pkg/workflow` surface tells the truth before later milestones harden, gate, and instrument
+it. See [STABILITY.md](STABILITY.md) for the going-forward contract.
+
+### Added
+- `ExecutionConfig.MaxConcurrency` is now **wired end-to-end** into `DAG.Execute` — the
+  per-level concurrency limit is configurable, with a bounded default of 16.
+- `WorkflowBuilder.WithExecutionConfig(ExecutionConfig)` and `DAG.WithExecutionConfig(ExecutionConfig)`
+  hooks to set the execution config.
+- `DefaultMaxConcurrency` constant (16).
+- Store/persistence error sentinels for `errors.Is` branching: `ErrNotFound`,
+  `ErrValidation`, `ErrCorruptData`, `ErrIO` (wrapped with `%w`; `ErrCorruptData` keeps a
+  generic public message so it does not leak file paths). Distinct from the existing
+  action-execution sentinels (`ErrInputNotFound`/`ErrInvalidInput`/`ErrExecutionFailed`) —
+  the two families are intentionally not aliased.
+
+### Changed
+- **BREAKING**: Moved internal packages out of `pkg/`: the generated FlatBuffers code
+  (`pkg/workflow/fb/workflow` → `internal/workflow/fb/workflow`), the concurrent-map
+  implementations (`pkg/workflow/concurrent` → `internal/workflow/concurrent`), and the
+  misc helpers (`pkg/workflow/utils` → `internal/workflow/utils`).
+  *Migration:* these were infrastructure/generated code with no intended external use; do
+  not import them. Use the public `pkg/workflow` API.
+- **BREAKING**: Unexported in-package-only helpers: `ExecuteNodesInLevel` →
+  `executeNodesInLevel`; `StatusToFBStatus` (FB converter); the `ConcurrentMap`/
+  `ReadOptimizedMap` family; the `StringInterner` family.
+  *Migration:* these had no external callers; drive execution via `DAG.Execute` and the
+  builder.
+- **BREAKING**: `DefaultConfig().MaxConcurrency` default changed **4 → 16**. *Effective*
+  concurrency is unchanged — the live execution path was already running a hardcoded 16; the
+  default now matches it, and the value is honored end-to-end. A non-positive value coerces
+  to 16; concurrency is never unbounded.
+
+### Removed
+- **BREAKING**: Deleted the unused standalone parallel executor:
+  `ParallelNodeExecutor`, `NewParallelNodeExecutor`, and `ExecuteNodes`.
+  *Migration:* use `ExecutionConfig.MaxConcurrency` via `WithExecutionConfig` on the builder
+  or DAG — `DAG.Execute` now honors it directly.
+- **BREAKING**: Removed inert `WorkflowDataConfig` fields `MaxInternStringLength` and
+  `InternStringCapacity` (and the preset assignments to them). They were written by config
+  presets but never read by the interner, so removal is **not a behavior change**.
+  *Migration:* delete any assignments to these fields. (Configurable interning may return as
+  an honest feature in a future release.)
+- **BREAKING**: Removed the inert `ExecutionConfig.PreserveOrder` field (never wired).
+
+### Fixed
+- Documentation reconciled to the cleaned surface (`docs/reference/configuration.md`,
+  `docs/reference/api-reference.md`, `docs/guides/performance-optimization.md`): the
+  previously-documented phantom `MaxConcurrency` knob, the deleted `ParallelNodeExecutor`,
+  the removed intern knobs, and the now-internal concurrent-map API.
+
+## [0.2.0-alpha] - 2026-06-15
+
+"Persistence Fidelity" (milestone M2). Integer round-trip fidelity for the FlatBuffers store,
+plus the M1 correctness/security fixes that were never recorded in this file.
+
+### Added
+- `WorkflowData.GetInt64(key string) (int64, bool)` — a portable integer accessor that
+  returns the full `int64` range on every architecture. Use it for values that may exceed
+  `MaxInt32`; `GetInt` remains `(int, bool)` (platform-width) for backward compatibility.
+- FlatBuffers schema gained an additive `value_long:long` field on `KeyValueInt`
+  (regenerated FB code), enabling faithful `int64` storage.
+
+### Fixed
+- **Integer fidelity (FB store)**: the FlatBuffers store previously clamped integers to
+  `int32` on save, silently corrupting values outside the `int32` range. Save now writes the
+  full `int64` (`value_long`); Load reads `value_long` with a fallback to the legacy `value`
+  for older files. The FlatBuffers store now matches the JSON store, which already round-tripped
+  `int64` faithfully. (M2 fidelity contract: int64-widen-additive.)
+- **`GetInt` documentation**: documented the 32-bit platform limit (values > `MaxInt32` are
+  not representable as `int` on 32-bit builds — use `GetInt64`); this is a documented limit,
+  not a silent bug.
+- **(M1) Persistence crash hardening**: `FlatBuffersStore.Load` wraps decoding in `recover()`
+  and returns a "corrupt workflow file" error instead of panicking on a malformed `.fb` file.
+  (A full FlatBuffers verifier and size cap remain deferred.)
+- **(M1) Path-traversal guard**: an unexported `validateWorkflowID` guard now protects all
+  file-store entry points (save/load/list/delete), rejecting unsafe workflow IDs.
+
+### Compatibility
+- **Data-compatible**: older `.fb` files (with only the legacy `value` field) still load via
+  the legacy fallback; the schema change is additive.
 
 ## [0.1.1-alpha] - 2025-07-01
 
@@ -40,6 +202,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Limited persistence options
 - Documentation is being improved
 
-[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.1.1-alpha...HEAD
+[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.3.0-alpha...HEAD
+[0.3.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.2.0-alpha...v0.3.0-alpha
+[0.2.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.1.1-alpha...v0.2.0-alpha
 [0.1.1-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.1.0-alpha...v0.1.1-alpha
 [0.1.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.1.0-alpha
+
+<!--
+Close-ritual note: this CHANGELOG is updated at every milestone close as part of the
+documentation workstream. Each milestone records its Added/Changed/Removed/Fixed entries
+with migration notes for any breaking change; breaks are batched into a minor release per
+STABILITY.md. The git tags above are created at release time (the project is not yet tagged
+past v0.1.1-alpha; v0.2.0/v0.3.0 entries record milestone state pending a release tag).
+-->
+

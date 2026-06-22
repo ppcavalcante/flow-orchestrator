@@ -212,7 +212,8 @@ func TestValidationActionExecute(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 	valid, ok := data.Get("valid")
-	if !ok || !valid.(bool) {
+	validBool, isBool := valid.(bool)
+	if !ok || !isBool || !validBool {
 		t.Error("Expected valid to be true")
 	}
 
@@ -223,7 +224,8 @@ func TestValidationActionExecute(t *testing.T) {
 		t.Error("Expected an error")
 	}
 	errMsg, ok := data.Get("error")
-	if !ok || errMsg.(string) != "input cannot be empty" {
+	errStr, isStr := errMsg.(string)
+	if !ok || !isStr || errStr != "input cannot be empty" {
 		t.Errorf("Expected error message 'input cannot be empty', got %v", errMsg)
 	}
 
@@ -234,7 +236,8 @@ func TestValidationActionExecute(t *testing.T) {
 		t.Error("Expected an error")
 	}
 	errMsg, ok = data.Get("error")
-	if !ok || errMsg.(string) != "validation failed: input key test_input not found" {
+	errStr, isStr = errMsg.(string)
+	if !ok || !isStr || errStr != "validation failed: input key test_input not found" {
 		t.Errorf("Expected error message 'validation failed: input key test_input not found', got %v", errMsg)
 	}
 }

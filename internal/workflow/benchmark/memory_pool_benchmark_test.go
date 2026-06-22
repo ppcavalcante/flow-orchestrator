@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	wfintern "github.com/ppcavalcante/flow-orchestrator/internal/workflow"
 	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/memory"
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
 )
@@ -132,7 +133,7 @@ func BenchmarkStringInterning(b *testing.B) {
 
 	b.Run("IndividualIntern", func(b *testing.B) {
 		b.ReportAllocs()
-		interner := workflow.NewStringInterner()
+		interner := wfintern.NewStringInterner()
 
 		for i := 0; i < b.N; i++ {
 			for _, s := range testStrings {
@@ -148,7 +149,7 @@ func BenchmarkStringInterning(b *testing.B) {
 
 	b.Run("BatchIntern", func(b *testing.B) {
 		b.ReportAllocs()
-		interner := workflow.NewStringInterner()
+		interner := wfintern.NewStringInterner()
 
 		for i := 0; i < b.N; i++ {
 			internedStrings := interner.InternBatch(testStrings)
@@ -209,7 +210,11 @@ func BenchmarkMemoryPooling(b *testing.B) {
 			// Get objects from pool
 			objs := make([][]byte, 100)
 			for j := 0; j < 100; j++ {
-				objs[j] = pool.Get().([]byte)
+				obj, ok := pool.Get().([]byte)
+				if !ok {
+					b.Fatal("pool.Get did not return []byte")
+				}
+				objs[j] = obj
 			}
 			// Use the objects
 			for j := 0; j < 100; j++ {

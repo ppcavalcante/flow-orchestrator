@@ -36,13 +36,18 @@ func TestDeadlockDetection(t *testing.T) {
 			data.IsNodeRunnable(node.Name)
 		}},
 		{"Snapshot", func() {
-			snapshot, _ := data.Snapshot()
+			snapshot, err := data.Snapshot()
+			if err != nil {
+				t.Errorf("Snapshot failed: %v", err)
+			}
 			_ = snapshot // Use snapshot to avoid unused variable warning
 		}},
 		{"LoadSnapshot", func() {
 			// Create a JSON snapshot
 			jsonData := []byte(`{"id":"test","data":{"key1":"value1"},"nodeStatus":{},"outputs":{}}`)
-			data.LoadSnapshot(jsonData)
+			if err := data.LoadSnapshot(jsonData); err != nil {
+				t.Errorf("Failed to load snapshot: %v", err)
+			}
 		}},
 	}
 
@@ -151,7 +156,10 @@ func TestConcurrentAccess(t *testing.T) {
 					}
 					// Create a new data and load the snapshot
 					newData := workflow.NewWorkflowData("test2")
-					newData.LoadSnapshot(snapshot)
+					if err := newData.LoadSnapshot(snapshot); err != nil {
+						t.Errorf("Failed to load snapshot: %v", err)
+						continue
+					}
 				}
 				done <- true
 			}()

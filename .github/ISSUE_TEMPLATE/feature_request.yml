@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a new capability or API change
+title: "feat: <short description>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Flow Orchestrator is **pre-1.0 alpha** — the public API can still change.
+        Breaking changes are allowed but must be deliberate, documented, and
+        reflected in `CHANGELOG.md` / `STABILITY.md`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do that the library makes hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API or behavior
+      description: Sketch the surface you'd like (function signatures, builder methods, options).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or other designs you weighed.
+    validations:
+      required: false
+  - type: dropdown
+    id: compat
+    attributes:
+      label: Backward compatibility
+      description: Does this change existing public API behavior?
+      options:
+        - "Additive (no break to existing surface)"
+        - "Breaking (changes existing public API) — acceptable pre-1.0 if documented"
+        - "Not sure"
+    validations:
+      required: true

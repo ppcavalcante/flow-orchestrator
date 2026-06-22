@@ -6,6 +6,8 @@ This guide describes the memory management and concurrent data structures used i
 
 Flow Orchestrator uses custom memory management components to optimize performance and reduce garbage collection pressure in high-throughput scenarios.
 
+> **API accuracy note:** The arena and string pool shown below are exported from the `pkg/workflow/arena` package — import that package directly (e.g. `arena.NewArena()`), not `workflow.NewArena()`. The buffer pool and node pool live in `internal/workflow/memory`: they are **internal implementation details** used automatically by the engine and are **not** part of the importable public API.
+
 ### Arena Memory Allocator
 
 The Arena memory allocator provides efficient memory allocation with minimal overhead. It allocates memory in large blocks and then sub-allocates from these blocks, reducing the number of system allocations and garbage collection pressure.
@@ -59,20 +61,19 @@ graph TD
 #### Usage
 
 ```go
-// Create a new arena
-arena := workflow.NewArena()
+import "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
+
+// Create a new arena (lives in pkg/workflow/arena, not the root workflow package)
+a := arena.NewArena()
 
 // Allocate memory
-data := arena.Alloc(1024)
+data := a.Alloc(1024)
 
 // Allocate and copy a string
-str := arena.AllocString("example string")
+str := a.AllocString("example string")
 
-// Reset the arena (free all allocations at once)
-arena.Reset()
-
-// Free the arena
-arena.Free()
+// Reset the arena (reuse all memory at once)
+a.Reset()
 ```
 
 ### String Pool
@@ -89,15 +90,16 @@ The String Pool provides string interning capabilities, allowing strings with th
 #### Usage
 
 ```go
-// Create a new string pool with an arena
-arena := NewArena()
-pool := NewStringPool(arena)
+import "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
 
-// Intern a string
+// Create a string pool backed by an arena (both live in pkg/workflow/arena)
+a := arena.NewArena()
+pool := arena.NewStringPool(a)
+
+// Intern a string — repeated content shares memory
 str1 := pool.Intern("example")
 str2 := pool.Intern("example")
-
-// str1 and str2 point to the same memory
+// str1 and str2 point to the same backing memory
 ```
 
 ### Buffer Pool
@@ -114,20 +116,9 @@ The Buffer Pool provides a pool of reusable byte buffers, reducing allocations f
 #### Usage
 
 ```go
-// Get a buffer from the pool
-buf := GetBuffer(1024)
-
-// Use the buffer
-// ...
-
-// Return the buffer to the pool
-PutBuffer(buf)
-
-// Or use the WithBuffer helper
-err := WithBuffer(1024, func(buf *[]byte) error {
-    // Use the buffer
-    return nil
-})
+// NOTE: the buffer pool lives in internal/workflow/memory and is NOT importable by
+// external code (Go internal-package rule). It is an internal optimization used by the
+// engine; there is no public buffer-pool API to call directly.
 ```
 
 ### Node Pool
@@ -143,18 +134,9 @@ The Node Pool provides a pool of reusable workflow nodes, reducing allocations w
 #### Usage
 
 ```go
-// Get a node from the pool
-node := GetNode()
-
-// Configure the node
-node.Name = "example"
-node.Action = someAction
-
-// Use the node
-// ...
-
-// Return the node to the pool
-PutNode(node)
+// NOTE: the node pool lives in internal/workflow/memory and is NOT importable by
+// external code (Go internal-package rule). It is an internal optimization; there is
+// no public node-pool API to call directly.
 ```
 
 ## Concurrent Data Structures
@@ -175,22 +157,10 @@ The Concurrent Map provides a thread-safe map implementation with better perform
 #### Usage
 
 ```go
-// Create a new concurrent map
-cm := NewConcurrentMap()
-
-// Set a value
-cm.Set("key", "value")
-
-// Get a value
-value, exists := cm.Get("key")
-
-// Delete a value
-cm.Delete("key")
-
-// Iterate over all items
-cm.ForEach(func(key string, value interface{}) {
-    // Process key and value
-})
+// NOTE: as of v0.3.0 the concurrent-map implementation lives in
+// internal/workflow/concurrent and is NOT importable by external code (Go
+// internal-package rule). It is an internal optimization used by the engine;
+// there is no public concurrent-map API to call directly.
 ```
 
 ### Read Map (Lock-Free Map)
@@ -206,22 +176,22 @@ The Read Map provides a lock-free map implementation optimized for read-heavy wo
 
 ## Performance Optimization Techniques
 
-### 1. Use Appropriate Concurrency Settings
+### 1. Concurrency Behavior
 
-Configure the workflow engine with appropriate concurrency settings:
+Level-wise execution runs the nodes within each DAG level in parallel, bounded by a **configurable per-level concurrency limit** (default **16**). As of v0.3.0 this limit is set through `ExecutionConfig.MaxConcurrency` and wired end-to-end into `DAG.Execute`:
 
 ```go
-options := workflow.WorkflowOptions{
-    MaxConcurrency: runtime.NumCPU(), // Set based on available CPU cores
-}
+// On the builder:
+dag, _ := workflow.NewWorkflowBuilder().
+    WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 8}).
+    // ... AddNode(...)
+    Build()
 
-workflow := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "my-workflow",
-    Store:      store,
-    Options:    options,
-}
+// Or directly on a DAG:
+dag.WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 8})
 ```
+
+A non-positive `MaxConcurrency` coerces to the bounded default of 16 — concurrency is **never unbounded** (an unbounded level would spawn one goroutine per node, a goroutine-explosion hazard on large levels). To further influence parallelism, structure your DAG so independent work shares a level (see *Optimize DAG Structure* below).
 
 ### 2. Optimize Action Size
 
@@ -231,17 +201,20 @@ workflow := &workflow.Workflow{
 
 ### 3. Use Memory Optimization Features
 
-Enable memory optimization features for high-throughput scenarios:
+Enable arena allocation through the `WorkflowData` constructors (there is no `WorkflowOptions` struct):
 
 ```go
-options := workflow.WorkflowOptions{
-    EnableArenaAllocator: true,
-    ArenaSize: 64 * 1024, // 64KB blocks
-    EnableStringInterning: true,
-    EnableBufferPooling: true,
-    EnableNodePooling: true,
-}
+// Arena allocator: use the arena-backed constructor.
+data := workflow.NewWorkflowDataWithArena(
+    "my-workflow",
+    workflow.DefaultWorkflowDataConfig(),
+    64*1024, // optional arena block size in bytes
+)
 ```
+
+String interning is applied automatically by the engine; it is not user-tunable. The previously documented `WorkflowDataConfig.MaxInternStringLength` / `InternStringCapacity` fields were **removed in v0.3.0** — they were inert (written by presets, never read), so removing them is not a behavior change. (Configurable length-gating may return as an honest feature in a future release.)
+
+Buffer pooling and node pooling are internal implementation details applied automatically by the engine; they are not user-configurable toggles.
 
 ### 4. Minimize State Size
 
@@ -255,14 +228,11 @@ options := workflow.WorkflowOptions{
 - Use FlatBuffers store for high performance
 - Batch persistence operations
 - Configure appropriate persistence intervals
-- Use compression for large workflow states
 
 ```go
-// Create a FlatBuffers store with compression
-store, err := workflow.NewFlatBuffersStore(
-    "./workflow_data", 
-    workflow.WithCompression(true),
-)
+// Create a FlatBuffers store (recommended for performance).
+// NewFlatBuffersStore takes only a base directory — there is no compression option.
+store, err := workflow.NewFlatBuffersStore("./workflow_data")
 ```
 
 ### 6. Profile and Tune
@@ -288,19 +258,10 @@ go test -bench=. -blockprofile=block.prof
 
 ## Benchmarking Your Workflows
 
-Use the built-in benchmarking tools to measure performance:
+There is no public benchmarking API. Benchmark your workflows with Go's standard tooling against the benchmark suite under `internal/workflow/benchmark`:
 
-```go
-// Create a workflow benchmark
-bench := workflow.NewBenchmark(dag)
-
-// Run the benchmark
-results := bench.Run(10) // Run 10 iterations
-
-// Print results
-fmt.Printf("Average execution time: %v\n", results.AvgExecutionTime)
-fmt.Printf("Memory allocations: %d\n", results.Allocations)
-fmt.Printf("Bytes allocated: %d\n", results.BytesAllocated)
+```bash
+go test -bench=. -benchmem ./internal/workflow/benchmark/
 ```
 
 ## Conclusion

@@ -131,9 +131,10 @@ func benchmarkRecoveryAfterFailure(b *testing.B, failureCount int) {
 		dag, failedNodes := createDAGWithFailingNodes(nodeCount, failureCount)
 		data := workflow.NewWorkflowData(fmt.Sprintf("recovery-data-%d", i))
 
-		// First execution - will fail
+		// First execution - will fail. Error is EXPECTED and intentionally
+		// ignored: failing nodes are the scenario this benchmark sets up.
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		_ = dag.Execute(ctx, data) // Some nodes will fail
+		_ = dag.Execute(ctx, data) //nolint:errcheck // failure is the scenario under test
 		cancel()
 
 		// Fix the failed nodes for recovery (mark them as ready to run again)
@@ -141,10 +142,11 @@ func benchmarkRecoveryAfterFailure(b *testing.B, failureCount int) {
 			data.SetNodeStatus(nodeName, workflow.Pending)
 		}
 
-		// Second execution - benchmark recovery performance
+		// Second execution - benchmark recovery performance. Recovery may still
+		// surface node errors; ignored intentionally (we measure recovery throughput).
 		ctx = context.Background()
 		b.StartTimer()
-		_ = dag.Execute(ctx, data)
+		_ = dag.Execute(ctx, data) //nolint:errcheck // recovery-path throughput measurement
 	}
 }
 
@@ -169,12 +171,18 @@ func createDAGWithFailingNodes(totalNodes, failingNodes int) (*workflow.DAG, []s
 		}
 
 		node := workflow.NewNode(nodeName, action)
-		dag.AddNode(node)
+		// Setup helper (no *testing.B in scope): a graph that cannot be built is
+		// a broken benchmark — panic loudly rather than silently ignore.
+		if err := dag.AddNode(node); err != nil {
+			panic(fmt.Sprintf("createDAGWithFailingNodes: AddNode: %v", err))
+		}
 
 		// Add dependencies - make a linear chain for simplicity
 		if i > 0 {
 			prevNodeName := fmt.Sprintf("node-%d", i-1)
-			dag.AddDependency(prevNodeName, nodeName)
+			if err := dag.AddDependency(prevNodeName, nodeName); err != nil {
+				panic(fmt.Sprintf("createDAGWithFailingNodes: AddDependency: %v", err))
+			}
 		}
 	}
 
@@ -214,7 +222,9 @@ func benchmarkPanicRecovery(b *testing.B) {
 		ctx := context.Background()
 
 		b.StartTimer()
-		_ = dag.Execute(ctx, data) // Should not actually panic
+		// Node errors may occur; ignored intentionally — this benchmark asserts
+		// (via no panic) that a panicking action is contained, not that Execute succeeds.
+		_ = dag.Execute(ctx, data) //nolint:errcheck // panic-containment scenario
 	}
 }
 

@@ -14,8 +14,11 @@ func TestNewWorkflow(t *testing.T) {
 	store := NewInMemoryStore()
 	workflow := NewWorkflow(store)
 
+	// t.Fatal (not t.Error) on the nil check: t.Error continues execution, so the
+	// subsequent field derefs would nil-panic if workflow were nil (SA5011). Fatal
+	// halts the goroutine before the derefs.
 	if workflow == nil {
-		t.Error("NewWorkflow should return a non-nil workflow")
+		t.Fatal("NewWorkflow should return a non-nil workflow")
 	}
 	if workflow.Store == nil {
 		t.Error("Workflow should have a store")

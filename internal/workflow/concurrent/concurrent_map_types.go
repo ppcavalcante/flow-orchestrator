@@ -1,7 +1,8 @@
 package concurrent
 
 // concurrentMapI is the internal interface for thread-safe maps.
-// The canonical public interface is defined in pkg/workflow/concurrent_map.go.
+// These concurrent maps are internal infrastructure; the workflow package's
+// concurrentMap wrapper (pkg/workflow/concurrent_map.go) is itself unexported.
 type concurrentMapI interface {
 	// Core operations
 	Set(key string, value interface{})

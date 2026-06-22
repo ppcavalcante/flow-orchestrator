@@ -61,11 +61,9 @@ func BenchmarkStorage(b *testing.B) {
 
 // Setup temp directory for JSON storage
 func setupTempDir(b *testing.B) string {
-	tmpDir, err := os.MkdirTemp("", "workflow-benchmark")
-	if err != nil {
-		b.Fatalf("Failed to create temp directory: %v", err)
-	}
-	return tmpDir
+	// b.TempDir auto-removes at benchmark end — no manual os.RemoveAll (which
+	// errcheck check-blank would flag), and no leaked dirs on b.Fatal.
+	return b.TempDir()
 }
 
 // Create test workflow data with various sizes
@@ -116,7 +114,6 @@ func createTestWorkflowData(size int) *workflow.WorkflowData {
 // Benchmark JSON storage backend save performance
 func benchmarkJSONSave(b *testing.B, size int) {
 	tmpDir := setupTempDir(b)
-	defer os.RemoveAll(tmpDir)
 
 	jsonStore, err := NewJSONFileStore(tmpDir)
 	if err != nil {
@@ -138,7 +135,6 @@ func benchmarkJSONSave(b *testing.B, size int) {
 // Benchmark JSON storage backend load performance
 func benchmarkJSONLoad(b *testing.B, size int) {
 	tmpDir := setupTempDir(b)
-	defer os.RemoveAll(tmpDir)
 
 	jsonStore, err := NewJSONFileStore(tmpDir)
 	if err != nil {
@@ -230,7 +226,9 @@ func benchmarkRestoreSnapshot(b *testing.B, size int) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		data := workflow.NewWorkflowData(fmt.Sprintf("new-data-%d", i))
-		data.LoadSnapshot(snapshot)
+		if err := data.LoadSnapshot(snapshot); err != nil {
+			b.Fatalf("Failed to load snapshot: %v", err)
+		}
 	}
 }
 
@@ -320,7 +318,9 @@ func (s *inMemoryStore) Save(data *workflow.WorkflowData) error {
 
 	// Create a new data instance and load the snapshot
 	clonedData := workflow.NewWorkflowData(id)
-	clonedData.LoadSnapshot(snapshot)
+	if err := clonedData.LoadSnapshot(snapshot); err != nil {
+		return fmt.Errorf("failed to load snapshot: %w", err)
+	}
 
 	// Store the cloned data
 	s.data[id] = clonedData
@@ -342,7 +342,9 @@ func (s *inMemoryStore) Load(id string) (*workflow.WorkflowData, error) {
 
 	// Create a new data instance and load the snapshot
 	clonedData := workflow.NewWorkflowData(id)
-	clonedData.LoadSnapshot(snapshot)
+	if err := clonedData.LoadSnapshot(snapshot); err != nil {
+		return nil, fmt.Errorf("failed to load snapshot: %w", err)
+	}
 
 	return clonedData, nil
 }

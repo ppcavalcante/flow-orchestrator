@@ -21,14 +21,21 @@ Flow Orchestrator implements several security measures to protect the supply cha
 
 As a smaller project, we're taking an incremental approach to SLSA compliance, focusing on the most impactful security practices first.
 
+**Already in place** (`.github/workflows/release.yml`):
+
+- **Build provenance**: the release workflow runs the SLSA GitHub generator on a
+  tag push, producing signed provenance attestations attached to the release
+  (keyless OIDC signing; the generator is referenced by tag, as required for its
+  provenance-identity verification).
+- **Dependency pinning**: third-party GitHub Actions are SHA-pinned and
+  dependencies are tracked via Dependabot; `govulncheck` runs (blocking) in CI.
+
 ## Future Security Enhancements
 
-We plan to enhance our supply chain security in the future:
+We plan to enhance our supply chain security further:
 
-1. **Improved Build Provenance**: Generate metadata about how artifacts were built
-2. **Hermetic Builds**: Ensure builds are self-contained and reproducible
-3. **Enhanced CI/CD Security**: Implement additional security checks in our pipeline
-4. **Dependency Pinning**: Pin all dependencies to specific versions for reproducibility
+1. **Hermetic Builds**: Ensure builds are self-contained and reproducible
+2. **Enhanced CI/CD Security**: Additional security checks in the pipeline
 
 ## References
 

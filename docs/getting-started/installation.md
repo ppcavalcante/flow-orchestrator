@@ -23,7 +23,7 @@ The recommended way to install Flow Orchestrator is using Go modules:
 
 ```bash
 # Add to your project
-go get github.com/ppcavalcante/flow-orchestrator@v0.1.1-alpha
+go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 In your `go.mod` file, you'll see a line like:
@@ -31,6 +31,15 @@ In your `go.mod` file, you'll see a line like:
 ```
 require github.com/ppcavalcante/flow-orchestrator v0.1.1-alpha
 ```
+
+> **Versioning:** the only published tags are `v0.1.0-alpha` and `v0.1.1-alpha`, so `@latest` resolves to
+> `v0.1.1-alpha` — which **predates the M2–M7 hardening** (typed-int fidelity, untrusted-input
+> bounds, CI gates, OpenTelemetry export, typed-key data + continue-on-error + formal verification).
+> The current code lives on `main` and is **not yet tagged**. To build against it,
+> use `@main` or pin a specific commit (e.g. `go get github.com/ppcavalcante/flow-orchestrator@main`)
+> until the next release tag is cut. The in-code dev version (`pkg/workflow.Version`) reads
+> `0.7.0-alpha`; that is the development marker, **not** a published tag. See
+> [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH
 
@@ -103,8 +112,8 @@ For development work on Flow Orchestrator itself, we recommend:
 3. Set up the development environment:
 
 ```bash
-# Install development dependencies
-make deps
+# Fetch Go module dependencies (also done automatically by build/test)
+go mod download
 
 # Generate FlatBuffers code (requires flatc)
 make generate-fb

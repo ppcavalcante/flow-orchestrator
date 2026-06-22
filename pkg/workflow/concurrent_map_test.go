@@ -9,9 +9,9 @@ import (
 )
 
 func TestNewConcurrentMap(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 	if m == nil {
-		t.Fatal("NewConcurrentMap returned nil")
+		t.Fatal("newConcurrentMap returned nil")
 	}
 	if m.m == nil {
 		t.Fatal("Internal map is nil")
@@ -20,7 +20,7 @@ func TestNewConcurrentMap(t *testing.T) {
 
 func TestNewConcurrentMapWithCapacity(t *testing.T) {
 	capacity := 10
-	m := NewConcurrentMapWithCapacity(capacity)
+	m := newConcurrentMapWithCapacity(capacity)
 	if m == nil {
 		t.Fatal("NewConcurrentMapWithCapacity returned nil")
 	}
@@ -30,7 +30,7 @@ func TestNewConcurrentMapWithCapacity(t *testing.T) {
 }
 
 func TestConcurrentMapSetGet(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Test setting and getting values
 	m.Set("key1", "value1")
@@ -61,7 +61,7 @@ func TestConcurrentMapSetGet(t *testing.T) {
 }
 
 func TestConcurrentMapDelete(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Add some items
 	m.Set("key1", "value1")
@@ -90,7 +90,7 @@ func TestConcurrentMapDelete(t *testing.T) {
 }
 
 func TestConcurrentMapLen(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Empty map should have length 0
 	if m.Len() != 0 {
@@ -116,7 +116,7 @@ func TestConcurrentMapLen(t *testing.T) {
 }
 
 func TestConcurrentMapKeys(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Empty map should return empty slice
 	keys := m.Keys()
@@ -147,7 +147,7 @@ func TestConcurrentMapKeys(t *testing.T) {
 }
 
 func TestConcurrentMapForEach(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Add items
 	m.Set("key1", "value1")
@@ -174,7 +174,7 @@ func TestConcurrentMapForEach(t *testing.T) {
 }
 
 func TestConcurrentMapClear(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Add items
 	m.Set("key1", "value1")
@@ -199,7 +199,7 @@ func TestConcurrentMapClear(t *testing.T) {
 }
 
 func TestConcurrentMapHas(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Check non-existent key
 	if m.Has("key1") {
@@ -224,7 +224,7 @@ func TestConcurrentMapHas(t *testing.T) {
 }
 
 func TestConcurrentMapCount(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Empty map should have count 0
 	if m.Count() != 0 {
@@ -244,7 +244,7 @@ func TestConcurrentMapCount(t *testing.T) {
 }
 
 func TestConcurrentMapItems(t *testing.T) {
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Empty map should return empty map
 	items := m.Items()
@@ -275,7 +275,7 @@ func TestConcurrentMapItems(t *testing.T) {
 
 func TestConcurrentMapMethods(t *testing.T) {
 	t.Log("Running TestConcurrentMapMethods")
-	m := NewConcurrentMap()
+	m := newConcurrentMap()
 
 	// Test Set and Get
 	m.Set("key1", "value1")
@@ -355,30 +355,30 @@ func TestConcurrentMapMethods(t *testing.T) {
 }
 
 func TestDefaultMapConfig(t *testing.T) {
-	config := DefaultMapConfig()
+	config := defaultMapConfig()
 	if config.Capacity != 0 {
 		t.Errorf("Expected default capacity 0, got %d", config.Capacity)
 	}
-	if config.Type != MapTypeStandard {
+	if config.Type != mapTypeStandard {
 		t.Errorf("Expected default type MapTypeStandard, got %v", config.Type)
 	}
 }
 
 func TestReadOptimizedMapConfig(t *testing.T) {
 	capacity := 100
-	config := ReadOptimizedMapConfig(capacity)
+	config := readOptimizedMapConfig(capacity)
 	if config.Capacity != capacity {
 		t.Errorf("Expected capacity %d, got %d", capacity, config.Capacity)
 	}
-	if config.Type != MapTypeReadOptimized {
+	if config.Type != mapTypeReadOptimized {
 		t.Errorf("Expected type MapTypeReadOptimized, got %v", config.Type)
 	}
 }
 
 func TestNewReadMap(t *testing.T) {
-	m := NewReadMap()
+	m := newReadMap()
 	if m == nil {
-		t.Fatal("NewReadMap returned nil")
+		t.Fatal("newReadMap returned nil")
 	}
 
 	// Basic functionality test
@@ -391,7 +391,7 @@ func TestNewReadMap(t *testing.T) {
 
 func TestNewReadMapWithCapacity(t *testing.T) {
 	capacity := 10
-	m := NewReadMapWithCapacity(capacity)
+	m := newReadMapWithCapacity(capacity)
 	if m == nil {
 		t.Fatal("NewReadMapWithCapacity returned nil")
 	}
@@ -406,15 +406,15 @@ func TestNewReadMapWithCapacity(t *testing.T) {
 
 func TestNewConcurrentMapFromConfig(t *testing.T) {
 	// Test with standard config
-	config := DefaultMapConfig()
-	m1 := NewConcurrentMapFromConfig(config)
+	config := defaultMapConfig()
+	m1 := newConcurrentMapFromConfig(config)
 	if m1 == nil {
 		t.Fatal("NewConcurrentMapFromConfig with standard config returned nil")
 	}
 
 	// Test with read-optimized config
-	config = ReadOptimizedMapConfig(10)
-	m2 := NewConcurrentMapFromConfig(config)
+	config = readOptimizedMapConfig(10)
+	m2 := newConcurrentMapFromConfig(config)
 	if m2 == nil {
 		t.Fatal("NewConcurrentMapFromConfig with read-optimized config returned nil")
 	}
@@ -435,7 +435,7 @@ func TestNewConcurrentMapFromConfig(t *testing.T) {
 
 func TestConcurrentMapOperations(t *testing.T) {
 	t.Run("Basic Operations", func(t *testing.T) {
-		m := NewConcurrentMap()
+		m := newConcurrentMap()
 
 		// Test Set and Get
 		m.Set("key1", "value1")
@@ -461,7 +461,7 @@ func TestConcurrentMapOperations(t *testing.T) {
 	})
 
 	t.Run("Concurrent Operations", func(t *testing.T) {
-		m := NewConcurrentMap()
+		m := newConcurrentMap()
 		var wg sync.WaitGroup
 		numGoroutines := 100
 		numOperations := 1000
@@ -505,17 +505,17 @@ func TestConcurrentMapOperations(t *testing.T) {
 
 	t.Run("Map Configurations", func(t *testing.T) {
 		// Test DefaultMapConfig
-		config := DefaultMapConfig()
-		assert.Equal(t, MapTypeStandard, config.Type)
+		config := defaultMapConfig()
+		assert.Equal(t, mapTypeStandard, config.Type)
 		assert.Equal(t, 0, config.Capacity)
 
 		// Test ReadOptimizedMapConfig
-		config = ReadOptimizedMapConfig(32)
-		assert.Equal(t, MapTypeReadOptimized, config.Type)
+		config = readOptimizedMapConfig(32)
+		assert.Equal(t, mapTypeReadOptimized, config.Type)
 		assert.Equal(t, 32, config.Capacity)
 
 		// Test NewConcurrentMapFromConfig
-		m := NewConcurrentMapFromConfig(config)
+		m := newConcurrentMapFromConfig(config)
 		assert.NotNil(t, m)
 
 		// Test operations with configured map
@@ -526,7 +526,7 @@ func TestConcurrentMapOperations(t *testing.T) {
 	})
 
 	t.Run("Edge Cases", func(t *testing.T) {
-		m := NewConcurrentMapWithCapacity(1)
+		m := newConcurrentMapWithCapacity(1)
 
 		// Test empty string key
 		m.Set("", "empty")

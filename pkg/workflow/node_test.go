@@ -245,12 +245,10 @@ func TestNode(t *testing.T) {
 		dag := NewDAG("test-dependencies")
 
 		// Add nodes to the DAG
-		_ = dag.AddNode(node1)
-		_ = dag.AddNode(node2)
-
+		mustAddNode(t, dag, node1)
+		mustAddNode(t, dag, node2)
 		// Add dependencies
-		_ = dag.AddDependency("node1", "node2")
-
+		mustAddDep(t, dag, "node1", "node2")
 		data := NewWorkflowData("test-workflow")
 
 		err := dag.Execute(context.Background(), data)

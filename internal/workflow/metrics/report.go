@@ -55,11 +55,11 @@ func GenerateMetricsReport() string {
 	// Format lock contention stats
 	sb.WriteString("\n== Lock Contention Stats ==\n")
 	contentionStats := GetLockContentionStats()
-	sb.WriteString(fmt.Sprintf("Contention Count: %d\n", contentionStats.Count))
-	sb.WriteString(fmt.Sprintf("Total Contention Time: %s\n", FormatDuration(contentionStats.TotalTimeNs)))
-	sb.WriteString(fmt.Sprintf("Max Contention Time: %s\n", FormatDuration(contentionStats.MaxTimeNs)))
+	fmt.Fprintf(&sb, "Contention Count: %d\n", contentionStats.Count)
+	fmt.Fprintf(&sb, "Total Contention Time: %s\n", FormatDuration(contentionStats.TotalTimeNs))
+	fmt.Fprintf(&sb, "Max Contention Time: %s\n", FormatDuration(contentionStats.MaxTimeNs))
 	if contentionStats.Count > 0 {
-		sb.WriteString(fmt.Sprintf("Avg Contention Time: %s\n", FormatDuration(contentionStats.AvgTimeNs)))
+		fmt.Fprintf(&sb, "Avg Contention Time: %s\n", FormatDuration(contentionStats.AvgTimeNs))
 	}
 
 	// Find hotspots

@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
-	fb "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/fb/workflow"
+	fb "github.com/ppcavalcante/flow-orchestrator/internal/workflow/fb/workflow"
 )
 
 // WorkflowStore defines the interface for persisting workflow state.
@@ -32,6 +34,25 @@ type WorkflowStore interface {
 	// Delete removes a workflow.
 	// Returns an error if the delete operation fails.
 	Delete(workflowID string) error
+}
+
+// validateWorkflowID rejects any workflow ID that is not a single safe path
+// segment, preventing path traversal when the ID is joined onto a store's
+// baseDir. An ID is rejected if it is empty, contains a path separator, is not
+// local (per filepath.IsLocal — catches "..", absolute paths, and volume names),
+// or does not survive a filepath.Base round-trip. Callers that build a filesystem
+// path from a caller-supplied ID must call this first.
+func validateWorkflowID(workflowID string) error {
+	if workflowID == "" {
+		return fmt.Errorf("%w: workflow ID cannot be empty", ErrValidation)
+	}
+	if strings.ContainsRune(workflowID, '/') ||
+		strings.ContainsRune(workflowID, os.PathSeparator) ||
+		!filepath.IsLocal(workflowID) ||
+		filepath.Base(workflowID) != workflowID {
+		return fmt.Errorf("%w: invalid workflow ID %q: must be a single path segment with no separators or traversal", ErrValidation, workflowID)
+	}
+	return nil
 }
 
 // JSONFileStore is a file-based implementation of WorkflowStore that uses JSON serialization.
@@ -64,13 +85,13 @@ func (s *JSONFileStore) Save(data *WorkflowData) error {
 	defer s.mu.Unlock()
 
 	if data == nil {
-		return errors.New("cannot save nil workflow data")
+		return fmt.Errorf("%w: cannot save nil workflow data", ErrValidation)
 	}
 
 	// Get workflow ID
 	workflowID := data.GetWorkflowID()
-	if workflowID == "" {
-		return errors.New("workflow ID cannot be empty")
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
 	}
 
 	// Create snapshot
@@ -98,7 +119,7 @@ func (s *JSONFileStore) Save(data *WorkflowData) error {
 	filePath := filepath.Join(s.baseDir, workflowID+".json")
 	err = os.WriteFile(filePath, jsonData, 0600)
 	if err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+		return newIOError("write", workflowID, err)
 	}
 
 	return nil
@@ -109,8 +130,8 @@ func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if workflowID == "" {
-		return nil, errors.New("workflow ID cannot be empty")
+	if err := validateWorkflowID(workflowID); err != nil {
+		return nil, err
 	}
 
 	// Construct file path
@@ -120,7 +141,10 @@ func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
 	// nolint:gosec // This is an internal function with controlled file paths
 	jsonData, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read workflow file: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
+		}
+		return nil, newIOError("read", workflowID, err)
 	}
 
 	// Create new workflow data
@@ -128,7 +152,10 @@ func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
 
 	// Load from snapshot
 	if err := data.LoadSnapshot(jsonData); err != nil {
-		return nil, fmt.Errorf("failed to load snapshot: %w", err)
+		// A decode failure means the persisted JSON is malformed. Keep the
+		// boundary message generic (no path / raw detail leak); the underlying
+		// error stays reachable via errors.Unwrap.
+		return nil, fmt.Errorf("%w: malformed JSON workflow data: %w", ErrCorruptData, err)
 	}
 
 	return data, nil
@@ -162,15 +189,18 @@ func (s *JSONFileStore) Delete(workflowID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if workflowID == "" {
-		return errors.New("workflow ID cannot be empty")
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
 	}
 
 	// Delete file
 	filePath := filepath.Join(s.baseDir, workflowID+".json")
 	err := os.Remove(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to delete workflow: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrNotFound, workflowID)
+		}
+		return newIOError("delete", workflowID, err)
 	}
 
 	return nil
@@ -247,6 +277,33 @@ func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStor
 	return fbStore, nil
 }
 
+// Layered bounds-guard limits for FlatBuffersStore.Load. The Go flatbuffers
+// runtime ships no Verifier, so these hand-rolled caps reject malformed,
+// truncated, oversized, or absurd-count buffers before they reach the
+// (unbounded) accessor offset-deref. They are internal defaults — no public
+// surface — bounding the availability ceiling DEC-M1-trust-contract declares:
+// Load won't panic and won't unbounded-allocate. They do NOT make Load a
+// structural verifier (a well-formed-but-forged buffer still loads).
+
+// defaultMaxFileSize caps the bytes Load reads from a .fb (enforced atomically
+// via io.LimitReader(cap+1), not a separate os.Stat — see Load). 64 MiB is far
+// above any realistic snapshot yet bounds a single Load's memory to a fixed
+// ceiling. A var (not const) so tests can shrink it to assert the read bound on
+// the live Load path without materializing a 64 MiB file; production never
+// reassigns it.
+var defaultMaxFileSize int64 = 64 << 20 // 64 MiB
+
+// defaultMaxElements caps each FlatBuffers vector length (the six *Length()
+// counts) before the load loops allocate/iterate, stopping a tiny header that
+// claims billions of elements.
+const defaultMaxElements int = 1 << 20 // 1,048,576 entries per vector
+
+// openForRead is the file-open seam used by Load (default os.Open). Tests swap
+// it for a byte-counting wrapper to assert the bytes consumed from the fd are
+// bounded by cap+1 on the live path. Production never reassigns it.
+// nolint:gosec // controlled internal file paths
+var openForRead = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+
 // FlatBuffersStore is a file-based implementation of WorkflowStore that uses FlatBuffers serialization.
 // It provides better performance than JSONFileStore for large workflows.
 type FlatBuffersStore struct {
@@ -275,13 +332,13 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	defer s.mu.Unlock()
 
 	if data == nil {
-		return errors.New("cannot save nil workflow data")
+		return fmt.Errorf("%w: cannot save nil workflow data", ErrValidation)
 	}
 
 	// Get workflow ID
 	workflowID := data.GetWorkflowID()
-	if workflowID == "" {
-		return errors.New("workflow ID cannot be empty")
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
 	}
 
 	// Create FlatBuffer builder
@@ -299,34 +356,25 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	data.ForEach(func(k string, value interface{}) {
 		switch v := value.(type) {
 		case int:
+			// M2: write the full int64 magnitude to value_long (no clamp). The
+			// legacy value:int field is left at its default; Load reads value_long
+			// first and only falls back to value for pre-M2 (M1-format) buffers.
 			fbKey := builder.CreateString(k)
 			fb.KeyValueIntStart(builder)
 			fb.KeyValueIntAddKey(builder, fbKey)
-			if v > math.MaxInt32 {
-				fb.KeyValueIntAddValue(builder, math.MaxInt32)
-			} else if v < math.MinInt32 {
-				fb.KeyValueIntAddValue(builder, math.MinInt32)
-			} else {
-				fb.KeyValueIntAddValue(builder, int32(v)) //nolint:gosec // bounds checked above
-			}
+			fb.KeyValueIntAddValueLong(builder, int64(v))
 			intDataOffsets = append(intDataOffsets, fb.KeyValueIntEnd(builder))
 		case int32:
 			fbKey := builder.CreateString(k)
 			fb.KeyValueIntStart(builder)
 			fb.KeyValueIntAddKey(builder, fbKey)
-			fb.KeyValueIntAddValue(builder, v)
+			fb.KeyValueIntAddValueLong(builder, int64(v))
 			intDataOffsets = append(intDataOffsets, fb.KeyValueIntEnd(builder))
 		case int64:
 			fbKey := builder.CreateString(k)
 			fb.KeyValueIntStart(builder)
 			fb.KeyValueIntAddKey(builder, fbKey)
-			if v > math.MaxInt32 {
-				fb.KeyValueIntAddValue(builder, math.MaxInt32)
-			} else if v < math.MinInt32 {
-				fb.KeyValueIntAddValue(builder, math.MinInt32)
-			} else {
-				fb.KeyValueIntAddValue(builder, int32(v)) //nolint:gosec // bounds checked above
-			}
+			fb.KeyValueIntAddValueLong(builder, v)
 			intDataOffsets = append(intDataOffsets, fb.KeyValueIntEnd(builder))
 		case bool:
 			fbKey := builder.CreateString(k)
@@ -420,7 +468,7 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 		// Create NodeStatusEntry table
 		fb.NodeStatusEntryStart(builder)
 		fb.NodeStatusEntryAddNodeName(builder, fbNodeName)
-		fb.NodeStatusEntryAddStatus(builder, nodeStatusToFB(status))
+		fb.NodeStatusEntryAddStatus(builder, statusToFBStatus(status))
 		nodeStatusOffsets = append(nodeStatusOffsets, fb.NodeStatusEntryEnd(builder))
 	})
 
@@ -511,42 +559,133 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
 	err := os.WriteFile(filePath, buf, 0600)
 	if err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+		return newIOError("write", workflowID, err)
 	}
 
 	return nil
 }
 
 // Load retrieves workflow data using FlatBuffers
-func (s *FlatBuffersStore) Load(workflowID string) (*WorkflowData, error) {
+func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if workflowID == "" {
-		return nil, errors.New("workflow ID cannot be empty")
+	if err := validateWorkflowID(workflowID); err != nil {
+		return nil, err
 	}
 
 	// Construct file path
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
 
-	// Read the file
-	// nolint:gosec // This is an internal function with controlled file paths
-	buf, err := os.ReadFile(filePath)
+	// Bounds guard (1/3): cap input size ATOMICALLY with the read. Opening the
+	// file once and reading through an io.LimitReader(cap+1) eliminates the
+	// os.Stat -> os.ReadFile TOCTOU (M4-SEC-02): a file cannot grow between a
+	// size check and the read because there is no separate check — we simply
+	// never read more than cap+1 bytes regardless of the on-disk size. Reading
+	// cap+1 (one past the limit) lets us distinguish "exactly at cap" (accepted)
+	// from "over cap" (rejected). A missing file surfaces as ErrNotFound from
+	// os.Open (the single not-exist path).
+	// openForRead is a test seam (default os.Open). Tests swap it for a
+	// byte-counting wrapper to assert the bytes Load actually consumes from the
+	// file descriptor are bounded — the property that discriminates this atomic
+	// LimitReader read from a stat-then-ReadFile (which consults size separately).
+	f, err := openForRead(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read workflow file: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
+		}
+		return nil, newIOError("read", workflowID, err)
+	}
+	defer func() {
+		// Surface a Close error only if Load was otherwise succeeding — a failed
+		// read/parse error takes precedence. errcheck (check-blank: true) requires
+		// the Close error be consumed, not blank-assigned.
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = newIOError("read", workflowID, cerr)
+		}
+	}()
+
+	buf, err := io.ReadAll(io.LimitReader(f, defaultMaxFileSize+1))
+	if err != nil {
+		return nil, newIOError("read", workflowID, err)
+	}
+	if int64(len(buf)) > defaultMaxFileSize {
+		return nil, fmt.Errorf("%w: file exceeds max size", ErrCorruptData)
+	}
+
+	// FlatBuffers accessors index into the buffer using offsets read from the
+	// buffer itself, with no bounds validation; a malformed, truncated, or
+	// version-skewed file makes them panic. The layered bounds guard below
+	// (atomic size cap @io.LimitReader, root/offset min-length sanity pre-check,
+	// element-count caps) rejects the common malformed shapes deterministically and typed,
+	// BEFORE the decode. This recover() is the RESIDUAL backstop behind that
+	// guard — for deep-offset cases the cheap pre-walk cannot cover — so Load
+	// never crashes the host process. (The Go flatbuffers runtime ships no
+	// Verifier; this layered guard is the hardening, not a structural verifier:
+	// a well-formed-but-forged buffer can still load in-bounds garbage.)
+	defer func() {
+		if r := recover(); r != nil {
+			data = nil
+			// Generic boundary message: do not leak the raw panic internals or
+			// path. The category is ErrCorruptData; recovered detail is dropped
+			// (a panic value is not an error to wrap, and may contain internals).
+			err = fmt.Errorf("%w: malformed FlatBuffers data", ErrCorruptData)
+		}
+	}()
+
+	// Bounds guard (2/3): root-offset + min-length sanity pre-check. The
+	// generated GetRootAsWorkflowState reads a 4-byte root UOffsetT from buf[0:]
+	// then derefs at that offset with no validation — a buffer shorter than the
+	// offset width, or a root offset pointing past the buffer, is the most common
+	// truncation/short-file panic. Reject both deterministically as ErrCorruptData
+	// here, BEFORE the decode, rather than relying on the recover() net below.
+	// Generic message — no path or buffer internals leak.
+	if len(buf) < flatbuffers.SizeUOffsetT {
+		return nil, fmt.Errorf("%w: malformed FlatBuffers data", ErrCorruptData)
+	}
+	if rootOffset := flatbuffers.GetUOffsetT(buf); uint64(rootOffset) >= uint64(len(buf)) {
+		return nil, fmt.Errorf("%w: malformed FlatBuffers data", ErrCorruptData)
 	}
 
 	// Get the root
 	fbState := fb.GetRootAsWorkflowState(buf, 0)
 
 	// Create new workflow data
-	data := NewWorkflowData(workflowID)
+	data = NewWorkflowData(workflowID)
 
-	// Load int data
+	// Bounds guard (3/3): element-count caps. Each *Length() is read from the
+	// (now root-sanity-checked) buffer; a small header can still claim a vector
+	// of billions of elements, driving the loops below into a huge alloc/iterate.
+	// Reject any vector length over defaultMaxElements before the loops run.
+	// (Hand-rolled — the Go runtime has no Verifier MaxTables to lean on.)
+	if fbState.IntDataLength() > defaultMaxElements ||
+		fbState.BoolDataLength() > defaultMaxElements ||
+		fbState.DoubleDataLength() > defaultMaxElements ||
+		fbState.StringDataLength() > defaultMaxElements ||
+		fbState.NodeStatusesLength() > defaultMaxElements ||
+		fbState.NodeOutputsLength() > defaultMaxElements {
+		return nil, fmt.Errorf("%w: element count exceeds max", ErrCorruptData)
+	}
+
+	// Load int data. M2 buffers carry the faithful magnitude in value_long;
+	// M1-format buffers wrote only value:int, so value_long is absent and its
+	// accessor returns the FlatBuffers default (0) — in that case fall back to
+	// the legacy value:int. The v==0 fallback is sound, NOT ambiguous: FlatBuffers
+	// ELIDES default-valued scalars (PrependInt64Slot skips a value equal to the
+	// field default 0), so a genuine M2-stored 0 writes no value_long either — it
+	// is indistinguishable on the wire from an absent field, and in BOTH cases the
+	// fallback reads the legacy value, which is also 0 (M2 leaves value at default;
+	// M1 stored 0). So every path that yields v==0 here is correct. The value is
+	// stored as int64 — matching the JSON and InMemory backends, and avoiding the
+	// 32-bit truncation the old int(kv.Value()) cast caused.
 	for i := 0; i < fbState.IntDataLength(); i++ {
 		var kv fb.KeyValueInt
 		if fbState.IntData(&kv, i) {
-			data.Set(string(kv.Key()), int(kv.Value()))
+			v := kv.ValueLong()
+			if v == 0 {
+				v = int64(kv.Value())
+			}
+			data.Set(string(kv.Key()), v)
 		}
 	}
 
@@ -582,22 +721,10 @@ func (s *FlatBuffersStore) Load(workflowID string) (*WorkflowData, error) {
 		if fbState.NodeStatuses(&entry, i) {
 			nodeName := string(entry.NodeName())
 
-			// Convert fb.NodeStatus to our NodeStatus
-			var status NodeStatus
-			switch entry.Status() {
-			case fb.NodeStatusPending:
-				status = Pending
-			case fb.NodeStatusRunning:
-				status = Running
-			case fb.NodeStatusCompleted:
-				status = Completed
-			case fb.NodeStatusFailed:
-				status = Failed
-			case fb.NodeStatusSkipped:
-				status = Skipped
-			default:
-				status = Pending
-			}
+			// Convert fb.NodeStatus to our NodeStatus via the shared helper
+			// (symmetric with Save's statusToFBStatus; was previously inlined here,
+			// leaving the helper dead — T3 makes it live, removing the duplication).
+			status := fbStatusToNodeStatus(entry.Status())
 
 			data.SetNodeStatus(nodeName, status)
 		}
@@ -644,39 +771,37 @@ func (s *FlatBuffersStore) Delete(workflowID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if workflowID == "" {
-		return errors.New("workflow ID cannot be empty")
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
 	}
 
 	// Delete file
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
 	err := os.Remove(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to delete workflow: %w", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrNotFound, workflowID)
+		}
+		return newIOError("delete", workflowID, err)
 	}
 
 	return nil
 }
 
-// statusToFBStatus converts our NodeStatus to fb.NodeStatus
-// nolint:unused // This function is kept for future use
-func statusToFBStatus(status NodeStatus) fb.NodeStatus {
-	return StatusToFBStatus(status)
-}
-
-// fbStatusToNodeStatus converts fb.NodeStatus to NodeStatus
-// nolint:unused // This function is kept for future use
-func fbStatusToNodeStatus(status byte) NodeStatus {
+// fbStatusToNodeStatus converts an fb.NodeStatus to our NodeStatus.
+// The type-symmetric inverse of statusToFBStatus (which Save uses); called by
+// Load. Taking fb.NodeStatus directly avoids a lossy int8->byte conversion.
+func fbStatusToNodeStatus(status fb.NodeStatus) NodeStatus {
 	switch status {
-	case byte(fb.NodeStatusPending):
+	case fb.NodeStatusPending:
 		return Pending
-	case byte(fb.NodeStatusRunning):
+	case fb.NodeStatusRunning:
 		return Running
-	case byte(fb.NodeStatusCompleted):
+	case fb.NodeStatusCompleted:
 		return Completed
-	case byte(fb.NodeStatusFailed):
+	case fb.NodeStatusFailed:
 		return Failed
-	case byte(fb.NodeStatusSkipped):
+	case fb.NodeStatusSkipped:
 		return Skipped
 	default:
 		return Pending
@@ -703,12 +828,12 @@ func (s *InMemoryStore) Save(data *WorkflowData) error {
 	defer s.mu.Unlock()
 
 	if data == nil {
-		return errors.New("cannot save nil workflow data")
+		return fmt.Errorf("%w: cannot save nil workflow data", ErrValidation)
 	}
 
 	workflowID := data.GetWorkflowID()
 	if workflowID == "" {
-		return errors.New("workflow ID cannot be empty")
+		return fmt.Errorf("%w: workflow ID cannot be empty", ErrValidation)
 	}
 
 	// Clone the data to avoid external modification
@@ -722,12 +847,12 @@ func (s *InMemoryStore) Load(workflowID string) (*WorkflowData, error) {
 	defer s.mu.RUnlock()
 
 	if workflowID == "" {
-		return nil, errors.New("workflow ID cannot be empty")
+		return nil, fmt.Errorf("%w: workflow ID cannot be empty", ErrValidation)
 	}
 
 	data, ok := s.data[workflowID]
 	if !ok {
-		return nil, fmt.Errorf("workflow not found: %s", workflowID)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
 	}
 
 	// Return a clone to avoid external modification
@@ -753,21 +878,15 @@ func (s *InMemoryStore) Delete(workflowID string) error {
 	defer s.mu.Unlock()
 
 	if workflowID == "" {
-		return errors.New("workflow ID cannot be empty")
+		return fmt.Errorf("%w: workflow ID cannot be empty", ErrValidation)
 	}
 
 	delete(s.data, workflowID)
 	return nil
 }
 
-// nodeStatusToFB converts our NodeStatus to fb.NodeStatus
-func nodeStatusToFB(status NodeStatus) fb.NodeStatus {
-	return StatusToFBStatus(status)
-}
-
-// StatusToFBStatus converts NodeStatus to fb.NodeStatus
-// This function is exported for use by other files in the package
-func StatusToFBStatus(status NodeStatus) fb.NodeStatus {
+// statusToFBStatus converts our NodeStatus to fb.NodeStatus.
+func statusToFBStatus(status NodeStatus) fb.NodeStatus {
 	switch status {
 	case Pending:
 		return fb.NodeStatusPending
