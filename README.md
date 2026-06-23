@@ -35,15 +35,15 @@ Flow Orchestrator is a flexible workflow engine designed for embedding within Go
 ### Installation
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.7.1-alpha
+go get github.com/ppcavalcante/flow-orchestrator@v0.7.2-alpha
 ```
 
-> **Versioning:** the current release is **`v0.7.1-alpha`** (the M1–M7 work: typed-int fidelity,
+> **Versioning:** the current release is **`v0.7.2-alpha`** (the M1–M7 work: typed-int fidelity,
 > untrusted-input bounds, CI gates, OpenTelemetry export, typed-key data + continue-on-error +
 > formal verification). Because it is a **pre-release** tag, `go get @latest` will **not** select it
 > (Go prefers stable versions, and the only stable tag — `v0.1.0` — predates all M2–M7 work), so
 > **pin it explicitly** as shown above. The in-code version (`pkg/workflow.Version`) reads
-> `0.7.1-alpha`. See [CHANGELOG.md](CHANGELOG.md) and [STABILITY.md](STABILITY.md).
+> `0.7.2-alpha`. See [CHANGELOG.md](CHANGELOG.md) and [STABILITY.md](STABILITY.md).
 
 ### Providing Feedback
 
@@ -394,7 +394,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Current release**: `v0.7.1-alpha` (published pre-release tag; the `pkg/workflow.Version` marker on `main` reads `0.7.1-alpha`). Pin it explicitly — `@latest` won't select a pre-release; see the Versioning note under [Installation](#installation).
+- **Current release**: `v0.7.2-alpha` (published pre-release tag; the `pkg/workflow.Version` marker on `main` reads `0.7.2-alpha`). Pin it explicitly — `@latest` won't select a pre-release; see the Versioning note under [Installation](#installation).
 - **Latest *stable* tag**: `v0.1.0` (predates the M2–M7 hardening; this is what bare `@latest` resolves to)
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.

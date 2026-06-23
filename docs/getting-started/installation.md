@@ -32,12 +32,12 @@ In your `go.mod` file, you'll see a line like:
 require github.com/ppcavalcante/flow-orchestrator v0.1.1-alpha
 ```
 
-> **Versioning:** the current release is **`v0.7.1-alpha`** (the M1–M7 work: typed-int fidelity,
+> **Versioning:** the current release is **`v0.7.2-alpha`** (the M1–M7 work: typed-int fidelity,
 > untrusted-input bounds, CI gates, OpenTelemetry export, typed-key data + continue-on-error +
 > formal verification). It is a **pre-release** tag, so `go get @latest` will **not** select it
 > (Go prefers stable versions, and the only stable tag — `v0.1.0` — predates all M2–M7 work). Pin it
-> explicitly: `go get github.com/ppcavalcante/flow-orchestrator@v0.7.1-alpha`. The in-code version
-> (`pkg/workflow.Version`) reads `0.7.1-alpha`. See
+> explicitly: `go get github.com/ppcavalcante/flow-orchestrator@v0.7.2-alpha`. The in-code version
+> (`pkg/workflow.Version`) reads `0.7.2-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH

@@ -8,12 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Records milestone state for M4, M5, M6, and M7. The in-code version constant is
-`0.7.1-alpha` (the combined M6+M7 release; M5 set `0.5.0-alpha`, the 0.6 line was
-never cut as a const, M7 close set `0.7.0-alpha`, and `0.7.1-alpha` patches the
-first-CI-run findings below — see `version.go`). Published tags now include
-`v0.7.0-alpha` and `v0.7.1-alpha`; **use `v0.7.1-alpha`** (`v0.7.0-alpha`'s first
-CI run on `main` surfaced the int64 JSON-fidelity bug fixed in `0.7.1-alpha`).
-See [STABILITY.md](STABILITY.md).
+`0.7.2-alpha` (the combined M6+M7 release; M5 set `0.5.0-alpha`, the 0.6 line was
+never cut as a const, M7 close set `0.7.0-alpha`, then two patches followed from
+the first real CI runs on `main` — see `version.go`). Published tags:
+`v0.7.0-alpha`, `v0.7.1-alpha`, `v0.7.2-alpha`; **use `v0.7.2-alpha`** — the only
+one with a fully-green CI run. (`v0.7.0-alpha`'s first CI run surfaced the int64
+JSON-fidelity bug fixed in `0.7.1-alpha`; `v0.7.1-alpha`'s run surfaced a coverage
+gate failure fixed in `0.7.2-alpha`.) See [STABILITY.md](STABILITY.md).
+
+### Changed
+- **Test coverage gate cleared honestly (0.7.2-alpha).** The first CI run of
+  `v0.7.1-alpha` failed the per-package coverage gate (`pkg/workflow` 88% vs the 90%
+  threshold). Closed it the honest way rather than padding or lowering the bar:
+  deleted the entirely-dead `pkg/workflow/concurrent_map.go` (an unexported,
+  test-only wrapper over `internal/workflow/concurrent` with zero production
+  callers) and added behavior-asserting tests for genuinely-public untested API
+  (`WithExecutionConfig`, builder/DAG error paths, `GetFloat64`/`GetInt` conversions,
+  the int64 JSON round-trip incl. `MaxInt64`, store `Delete`). `pkg/workflow` → 90%.
 
 ### Fixed
 - **int64 JSON-persistence fidelity (0.7.1-alpha).** `WorkflowData.LoadFromJSON`
