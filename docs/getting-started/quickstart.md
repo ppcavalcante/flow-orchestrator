@@ -10,10 +10,11 @@ Install Flow Orchestrator using Go modules:
 go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
-> **Versioning:** `@latest` resolves to the most recent tag, `v0.1.1-alpha`, which predates
-> substantial hardening (M2–M4). `main` is significantly ahead and currently **unreleased** — for
-> the latest code use `@main` (or pin a commit) until the next tag is cut. See
-> [CHANGELOG](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
+> **Versioning:** every published tag is a pre-release (alpha; no stable `v1`+ release yet), so
+> `@latest` resolves to the highest pre-release — currently **`v0.7.3-alpha`** — which the command
+> above installs. Pinning `@v0.7.3-alpha` is optional but recommended for reproducibility; the API
+> may change between alpha minors. See [CHANGELOG](../../CHANGELOG.md) and
+> [STABILITY.md](../../STABILITY.md).
 
 ## Creating a Simple Workflow
 

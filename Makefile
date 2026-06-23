@@ -36,7 +36,7 @@ codecov-coverage: generate-fb
 	@echo "Coverage by priority level:"
 	@echo "Critical (pkg/workflow): $(shell go tool cover -func=coverage.txt | grep "pkg/workflow" | grep -v "internal/workflow/fb" | grep total | awk '{print $$3}')"
 	@echo "High (arena, memory): $(shell go tool cover -func=coverage.txt | grep "internal/workflow/arena\|internal/workflow/memory" | grep total | awk '{print $$3}')"
-	@echo "Medium (metrics, utils, concurrent): $(shell go tool cover -func=coverage.txt | grep "internal/workflow/metrics\|internal/workflow/utils\|internal/workflow/concurrent" | grep total | awk '{print $$3}')"
+	@echo "Medium (metrics, utils): $(shell go tool cover -func=coverage.txt | grep "internal/workflow/metrics\|internal/workflow/utils" | grep total | awk '{print $$3}')"
 
 # Run tests for core functionality only
 test-core: generate-fb

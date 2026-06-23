@@ -82,7 +82,6 @@ check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/memor
 # Medium priority packages (70-80% coverage)
 check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics" 70 "Medium"
 check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils" 70 "Medium"
-check_package "github.com/ppcavalcante/flow-orchestrator/internal/workflow/concurrent" 80 "Medium"
 
 # Print summary
 print_header "Coverage Summary"

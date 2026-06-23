@@ -50,5 +50,4 @@ flags:
     paths:
       - internal/workflow/metrics/
       - internal/workflow/utils/
-      - internal/workflow/concurrent/
     carryforward: true

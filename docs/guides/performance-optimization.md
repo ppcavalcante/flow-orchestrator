@@ -139,41 +139,6 @@ The Node Pool provides a pool of reusable workflow nodes, reducing allocations w
 // no public node-pool API to call directly.
 ```
 
-## Concurrent Data Structures
-
-Flow Orchestrator uses custom concurrent data structures to ensure thread safety and high performance in multi-threaded scenarios.
-
-### Concurrent Map
-
-The Concurrent Map provides a thread-safe map implementation with better performance characteristics than using a standard map with a mutex in high-concurrency scenarios.
-
-#### Key Features
-
-- **Thread-safe operations**: All operations are safe for concurrent use
-- **Fine-grained locking**: Uses sharding to reduce lock contention
-- **Full map operations**: Provides all standard map operations (get, set, delete, etc.)
-- **Iteration support**: Supports iterating over all keys and values
-
-#### Usage
-
-```go
-// NOTE: as of v0.3.0 the concurrent-map implementation lives in
-// internal/workflow/concurrent and is NOT importable by external code (Go
-// internal-package rule). It is an internal optimization used by the engine;
-// there is no public concurrent-map API to call directly.
-```
-
-### Read Map (Lock-Free Map)
-
-The Read Map provides a lock-free map implementation optimized for read-heavy workloads, using atomic operations to ensure thread safety without locks for read operations.
-
-#### Key Features
-
-- **Lock-free reads**: Read operations don't require locks
-- **Atomic updates**: Updates are performed atomically
-- **Copy-on-write semantics**: Updates create a new copy of the map
-- **Thread-safe operations**: All operations are safe for concurrent use
-
 ## Performance Optimization Techniques
 
 ### 1. Concurrency Behavior

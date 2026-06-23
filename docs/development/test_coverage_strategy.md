@@ -11,7 +11,6 @@ This document outlines our approach to test coverage for the Flow Orchestrator p
 | internal/workflow/memory | 90% | High | Memory utilities are critical |
 | internal/workflow/metrics | 70% | Medium | Metrics collection |
 | internal/workflow/utils | 70% | Medium | Utility functions |
-| internal/workflow/concurrent | 80% | Medium | Concurrency utilities |
 | internal/workflow/fb | 0% | Low | Generated code, no testing needed |
 | internal/workflow/benchmark | 0% | Low | Benchmarks are tests themselves |
 | examples/ | 0% | Low | Examples are for demonstration |
@@ -236,8 +235,6 @@ go test ./internal/workflow/arena -run TestArenaProperties
 go test ./internal/workflow/arena -run TestStringPoolProperties
 go test ./internal/workflow/memory -run TestBufferPoolProperties
 go test ./internal/workflow/memory -run TestNodePoolProperties
-go test ./internal/workflow/concurrent -run TestConcurrentMapProperties
-go test ./internal/workflow/concurrent -run TestReadMapProperties
 ```
 
 ### Integration Testing

@@ -8,15 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Records milestone state for M4, M5, M6, and M7. The in-code version constant is
-`0.7.2-alpha` (the combined M6+M7 release; M5 set `0.5.0-alpha`, the 0.6 line was
-never cut as a const, M7 close set `0.7.0-alpha`, then two patches followed from
-the first real CI runs on `main` — see `version.go`). Published tags:
-`v0.7.0-alpha`, `v0.7.1-alpha`, `v0.7.2-alpha`; **use `v0.7.2-alpha`** — the only
-one with a fully-green CI run. (`v0.7.0-alpha`'s first CI run surfaced the int64
-JSON-fidelity bug fixed in `0.7.1-alpha`; `v0.7.1-alpha`'s run surfaced a coverage
-gate failure fixed in `0.7.2-alpha`.) See [STABILITY.md](STABILITY.md).
+`0.7.3-alpha` (the combined M6+M7 release; M5 set `0.5.0-alpha`, the 0.6 line was
+never cut as a const, M7 close set `0.7.0-alpha`, then patches followed from the
+first real CI runs on `main` — see `version.go`). Published tags:
+`v0.7.0-alpha` … `v0.7.3-alpha`; **use `v0.7.3-alpha`** (the latest; every tag is a
+pre-release so `go get @latest` resolves to it). (`v0.7.0-alpha`'s first CI run
+surfaced the int64 JSON-fidelity bug fixed in `0.7.1-alpha`; `v0.7.1-alpha`'s run
+surfaced a coverage gate failure fixed in `0.7.2-alpha`; `0.7.3-alpha` is a
+dead-code + docs-accuracy cleanup.) See [STABILITY.md](STABILITY.md).
 
 ### Changed
+- **Dead-code prune + docs accuracy (0.7.3-alpha).** Removed the orphaned
+  `internal/workflow/concurrent` package (zero production importers after the
+  0.7.2 `concurrent_map.go` deletion) and its coverage/property-test gate entries;
+  swept the now-dangling references to it from the docs. Corrected the install/
+  versioning docs: all tags are pre-releases (no stable `v1`+ release), so
+  `go get @latest` resolves to the highest pre-release (`v0.7.3-alpha`) — the prior
+  notes wrongly implied a stable `v0.1.0` and that `@latest` wouldn't select the
+  current release. Removed the ancient `v0.1.0-alpha`/`v0.1.1-alpha` tags. No
+  library-facing API or behavior change.
 - **Test coverage gate cleared honestly (0.7.2-alpha).** The first CI run of
   `v0.7.1-alpha` failed the per-package coverage gate (`pkg/workflow` 88% vs the 90%
   threshold). Closed it the honest way rather than padding or lowering the bar:
@@ -101,8 +111,10 @@ gate failure fixed in `0.7.2-alpha`.) See [STABILITY.md](STABILITY.md).
   authoritative release version remains the git tag, cut post-release; the constant is the
   in-code dev marker.
 - **Install guidance is now honest** (M5, REL-02): `docs/getting-started/*` use a working
-  install line plus a "Versioning" note that the latest tagged release (`v0.1.1-alpha`)
-  predates the M2–M5 hardening and that `main` is substantially ahead and unreleased.
+  install line plus a "Versioning" note. *(Historical: at M5 the latest tag was `v0.1.1-alpha`,
+  which predated the M2–M5 hardening. That tag — and `v0.1.0-alpha` — were later deleted; the
+  only published tags are now `v0.7.0/0.1/0.2-alpha`, and `@latest` resolves to `v0.7.2-alpha`.
+  The install docs reflect the current state.)*
 - **FlatBuffers `Load` size cap is now race-free** (M5, SEC-01): enforced atomically by reading
   through an `io.LimitReader(cap+1)` rather than `os.Stat`-then-`os.ReadFile`, removing the
   TOCTOU window. Posture and bounds unchanged.
@@ -227,7 +239,10 @@ plus the M1 correctness/security fixes that were never recorded in this file.
 - Limited persistence options
 - Documentation is being improved
 
-[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.3.0-alpha...HEAD
+[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.7.2-alpha...HEAD
+[0.7.2-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.2-alpha
+[0.7.1-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.1-alpha
+[0.7.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.0-alpha
 [0.3.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.2.0-alpha...v0.3.0-alpha
 [0.2.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.1.1-alpha...v0.2.0-alpha
 [0.1.1-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.1.0-alpha...v0.1.1-alpha
@@ -237,7 +252,9 @@ plus the M1 correctness/security fixes that were never recorded in this file.
 Close-ritual note: this CHANGELOG is updated at every milestone close as part of the
 documentation workstream. Each milestone records its Added/Changed/Removed/Fixed entries
 with migration notes for any breaking change; breaks are batched into a minor release per
-STABILITY.md. The git tags above are created at release time (the project is not yet tagged
-past v0.1.1-alpha; v0.2.0/v0.3.0 entries record milestone state pending a release tag).
+STABILITY.md. The git tags above are created at release time. The published tags are
+`v0.7.0-alpha`, `v0.7.1-alpha`, `v0.7.2-alpha` (the old `v0.1.x-alpha` tags were deleted);
+`@latest` resolves to `v0.7.2-alpha`. The v0.1.x/0.2.0/0.3.0 sections below are historical
+milestone records — their compare links may 404 since those tags no longer exist.
 -->
 

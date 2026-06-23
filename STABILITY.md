@@ -34,8 +34,8 @@ package** and its intended-public subpackages:
 
 **`internal/**` is NOT public API.** The Go toolchain forbids importing it from outside this
 module, and we make no compatibility promise about it. As of `v0.3.0` this includes the
-generated FlatBuffers code (`internal/workflow/fb/...`), the concurrent-map implementations
-(`internal/workflow/concurrent`), and the misc helpers (`internal/workflow/utils`) — these
+generated FlatBuffers code (`internal/workflow/fb/...`) and the misc helpers
+(`internal/workflow/utils`) — these
 were previously under `pkg/` by accident and never belonged to the contract.
 
 A symbol being *exported* inside an intended-public package does not by itself make it part

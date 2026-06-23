@@ -70,17 +70,6 @@ if ! run_property_test "internal/workflow/memory" "TestNodePoolProperties" "Node
     ((failures++))
 fi
 
-# Concurrent Data Structures Properties
-print_header "Concurrent Data Structures Properties"
-
-if ! run_property_test "internal/workflow/concurrent" "TestConcurrentMapProperties" "Concurrent Map"; then
-    ((failures++))
-fi
-
-if ! run_property_test "internal/workflow/concurrent" "TestReadMapProperties" "Read Map (Lock-Free Map)"; then
-    ((failures++))
-fi
-
 # Summary
 print_header "Summary"
 

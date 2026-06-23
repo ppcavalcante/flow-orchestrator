@@ -46,8 +46,9 @@ Add Flow Orchestrator as a dependency:
 go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
-> `@latest` resolves to `v0.1.1-alpha` (pre-hardening); use `@main` for the current unreleased code.
-> See the [Installation Guide](./installation.md#using-go-modules-recommended) for details.
+> All tags are pre-releases (alpha; no stable release yet), so `@latest` resolves to the highest
+> pre-release — currently `v0.7.3-alpha`. See the
+> [Installation Guide](./installation.md#using-go-modules-recommended) for details.
 
 ## Step 1: Create the Main Application File
 

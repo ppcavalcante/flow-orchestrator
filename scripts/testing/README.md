@@ -13,7 +13,6 @@ Flow Orchestrator follows a tiered approach to test coverage, with different thr
 | internal/workflow/memory | 90% | High | Memory utilities are critical |
 | internal/workflow/metrics | 70% | Medium | Metrics collection |
 | internal/workflow/utils | 70% | Medium | Utility functions |
-| internal/workflow/concurrent | 80% | Medium | Concurrency utilities |
 | pkg/workflow/fb | 0% | Low | Generated code, no testing needed |
 | internal/workflow/benchmark | 0% | Low | Benchmarks are tests themselves |
 | examples/ | 0% | Low | Examples are for demonstration |

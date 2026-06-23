@@ -35,15 +35,18 @@ Flow Orchestrator is a flexible workflow engine designed for embedding within Go
 ### Installation
 
 ```bash
-go get github.com/ppcavalcante/flow-orchestrator@v0.7.2-alpha
+go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
-> **Versioning:** the current release is **`v0.7.2-alpha`** (the M1–M7 work: typed-int fidelity,
-> untrusted-input bounds, CI gates, OpenTelemetry export, typed-key data + continue-on-error +
-> formal verification). Because it is a **pre-release** tag, `go get @latest` will **not** select it
-> (Go prefers stable versions, and the only stable tag — `v0.1.0` — predates all M2–M7 work), so
-> **pin it explicitly** as shown above. The in-code version (`pkg/workflow.Version`) reads
-> `0.7.2-alpha`. See [CHANGELOG.md](CHANGELOG.md) and [STABILITY.md](STABILITY.md).
+> **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
+> **no stable (`v1`+) release**. The latest is **`v0.7.3-alpha`** (the M1–M7 work: typed-int
+> fidelity, untrusted-input bounds, CI gates, OpenTelemetry export, typed-key data +
+> continue-on-error + formal verification). Because there is no stable tag, `go get @latest`
+> resolves to the highest pre-release — currently **`v0.7.3-alpha`** — so the command above is
+> correct. Pinning the exact version (`@v0.7.3-alpha`) is optional but recommended for
+> reproducibility, and the API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
+> The in-code version (`pkg/workflow.Version`) reads `0.7.3-alpha`. See
+> [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -394,8 +397,8 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Current release**: `v0.7.2-alpha` (published pre-release tag; the `pkg/workflow.Version` marker on `main` reads `0.7.2-alpha`). Pin it explicitly — `@latest` won't select a pre-release; see the Versioning note under [Installation](#installation).
-- **Latest *stable* tag**: `v0.1.0` (predates the M2–M7 hardening; this is what bare `@latest` resolves to)
+- **Latest release**: `v0.7.3-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.7.3-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.
 

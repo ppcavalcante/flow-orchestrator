@@ -132,7 +132,6 @@ The codebase is organized into a public package and an internal tree:
 
 - `internal/workflow`: implementation details, not importable by consumers:
   - `internal/workflow/arena`: memory arena allocator + string pool
-  - `internal/workflow/concurrent`: concurrent map implementations
   - `internal/workflow/fb`: generated FlatBuffers code
   - `internal/workflow/memory`: object/buffer pools
   - `internal/workflow/metrics`: metrics collector (the facade aliases this)
