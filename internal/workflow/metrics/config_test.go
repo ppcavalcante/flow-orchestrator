@@ -10,8 +10,8 @@ import (
 func TestDefaultMetricsConfig(t *testing.T) {
 	config := DefaultMetricsConfig()
 
-	if !config.Enabled {
-		t.Error("DefaultMetricsConfig should be enabled")
+	if config.Enabled {
+		t.Error("DefaultMetricsConfig should be disabled (metrics are opt-in)")
 	}
 
 	if config.SamplingRate != 1.0 {

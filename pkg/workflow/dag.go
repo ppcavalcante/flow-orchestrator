@@ -328,6 +328,17 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 
 	// Execute each level in sequence
 	for levelIndex, level := range levels {
+		// Stop scheduling further levels if the context has been cancelled or
+		// timed out. Without this check the executor would keep launching every
+		// remaining level even after the caller cancelled — the level barrier
+		// only bounds work within a level, not across the loop. Returning the
+		// wrapped ctx error surfaces the cancellation to the caller instead of
+		// running to completion. (Per-node cancellation within a level is handled
+		// by executeNodesInLevel via the level context.)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("workflow cancelled before level %d: %w", levelIndex, err)
+		}
+
 		// Skip empty levels
 		if len(level) == 0 {
 			continue

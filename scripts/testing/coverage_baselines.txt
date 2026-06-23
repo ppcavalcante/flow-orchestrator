@@ -1,0 +1,8 @@
+# Per-package coverage high-water baselines for the ratchet gate.
+# Auto-updated upward by check_coverage.sh; commit increases. See the
+# script header for how to intentionally lower a baseline. Format: <pkg> <pct>
+github.com/ppcavalcante/flow-orchestrator/pkg/workflow 93.4
+github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena 100.0
+github.com/ppcavalcante/flow-orchestrator/internal/workflow/memory 91.7
+github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics 86.9
+github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils 100.0

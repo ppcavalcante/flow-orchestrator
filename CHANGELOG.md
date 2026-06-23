@@ -7,15 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Records milestone state for M4, M5, M6, and M7. The in-code version constant is
-`0.7.3-alpha` (the combined M6+M7 release; M5 set `0.5.0-alpha`, the 0.6 line was
-never cut as a const, M7 close set `0.7.0-alpha`, then patches followed from the
-first real CI runs on `main` — see `version.go`). Published tags:
-`v0.7.0-alpha` … `v0.7.3-alpha`; **use `v0.7.3-alpha`** (the latest; every tag is a
-pre-release so `go get @latest` resolves to it). (`v0.7.0-alpha`'s first CI run
-surfaced the int64 JSON-fidelity bug fixed in `0.7.1-alpha`; `v0.7.1-alpha`'s run
-surfaced a coverage gate failure fixed in `0.7.2-alpha`; `0.7.3-alpha` is a
-dead-code + docs-accuracy cleanup.) See [STABILITY.md](STABILITY.md).
+Records milestone state for M4–M8. The in-code version constant is `0.7.4-alpha`
+(M5 set `0.5.0-alpha`; the 0.6 line was never cut as a const; M7 close set
+`0.7.0-alpha`; 0.7.1–0.7.3 patched the first-CI-run findings; **0.7.4-alpha is the
+M8 Tier-1 "polish & honesty" batch** from the post-v0.7.3 deep review — see
+`version.go`). Published tags: `v0.7.0-alpha` … `v0.7.4-alpha`; **use `v0.7.4-alpha`**
+(the latest; every tag is a pre-release so `go get @latest` resolves to it). See
+[STABILITY.md](STABILITY.md).
+
+### Changed (0.7.4-alpha — M8 Tier-1)
+- **Metrics are now OFF by default + a metrics-free fast path on the data plane.**
+  Observability is opt-in (matches the OTel "host owns it" philosophy); removes a
+  measured ~3× per-op tax on `Set`/`Get`/`SetNodeStatus` when unused. Enable via the
+  per-instance `MetricsConfig`.
+- **Dropped string interning from the read path** — `Get*`/`Has*` no longer take the
+  interner lock (Go maps key by value, so it bought nothing on reads); interning
+  stays on the write path.
+- **Symmetric bounded reads on the JSON load paths (closes M5-SEC-01).** `JSONFileStore.Load`
+  and `WorkflowData.LoadFromJSON`/`LoadFromFlatBuffer` now read via
+  `io.LimitReader(cap+1)` with a strict over-cap reject (`ErrCorruptData`) + an
+  element-count cap — mirroring the FlatBuffers path, no `os.Stat` TOCTOU.
+- **Coverage gate hardened** from a knife-edge `<90` to a hard-floor + per-package
+  ratchet (catches silent erosion above the floor; absorbs jitter).
+- **Explicit persistence trust contract** documented in STABILITY.md (per-store
+  guarantees, caller trust boundary, honest availability ceiling).
+
+### Fixed (0.7.4-alpha — M8 Tier-1)
+- **Context cancellation now halts scheduling between levels** — a cancelled
+  workflow no longer launches subsequent levels; `Execute` returns the ctx error.
+- **`Workflow.Execute` no longer swallows `Store.Load` errors on resume** — a corrupt
+  persisted state surfaces instead of silently starting fresh.
+
+### Added (0.7.4-alpha — M8 Tier-1)
+- Runnable godoc `Example_*` functions (build→Execute, string + typed `Key[T]` data,
+  store round-trip) so pkg.go.dev shows compile-checked usage; `doc.go` rendering fixed.
+- Test coverage for the FlatBuffers all-types Save→Load dispatch (previously only
+  int64/string were exercised).
 
 ### Changed
 - **Dead-code prune + docs accuracy (0.7.3-alpha).** Removed the orphaned

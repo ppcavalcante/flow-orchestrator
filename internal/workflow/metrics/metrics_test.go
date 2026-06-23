@@ -143,10 +143,10 @@ func TestUpdateConfig(t *testing.T) {
 func TestUpdateConfigComprehensive(t *testing.T) {
 	collector := NewMetricsCollector()
 
-	// Initial state - should have default config
+	// Initial state - should have default config (metrics are opt-in, so disabled)
 	initialConfig := collector.GetConfig()
-	if !initialConfig.Enabled {
-		t.Error("Default config should be enabled")
+	if initialConfig.Enabled {
+		t.Error("Default config should be disabled (metrics are opt-in)")
 	}
 
 	// Test updating with nil config (should not change anything)

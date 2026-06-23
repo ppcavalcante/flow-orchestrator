@@ -77,22 +77,36 @@ if err != nil {
 ## Trust & Safety
 
 The persistence layer has a defined, deliberately bounded trust model. Read it before
-loading state that any other process or user can influence.
+loading state that any other process or user can influence. This guide covers the worked
+detail; the **authoritative one-statement contract is in
+[`STABILITY.md`](../../STABILITY.md#trust--safety--the-persistence-contract)** — read that for
+the per-store summary, what is guaranteed, and the honest ceiling.
 
 - **Persistence files and workflow IDs are caller-controlled.** The store reads and
   writes files under the `baseDir` you supply, named by the workflow ID you supply.
-  You own that directory and those IDs.
+  You own that directory and those IDs — they are in your trust boundary, and the library
+  does not authenticate, sign, or structurally verify what it loads.
+- **Both load paths reject oversized input *atomically with the read* — no stat-then-read
+  race.** Every `Load` (both stores) and the `WorkflowData` JSON load helpers
+  (`LoadFromJSON`/`LoadFromFlatBuffer`) read through an `io.LimitReader(cap+1)` and reject
+  anything over the size cap (64 MiB) as `ErrCorruptData`. There is no separate `os.Stat`, so
+  the file cannot grow between a size check and the read — the reader simply never consumes
+  more than `cap+1` bytes (reading one past the limit distinguishes "exactly at cap," accepted,
+  from "over cap," rejected). The decoded element count is also capped: a JSON section
+  (`data`/`nodeStatus`/`outputs`) or a FlatBuffers vector over ~1M entries is rejected before
+  the maps are populated, so a small-on-disk-but-huge-decoded document cannot drive an
+  unbounded allocation.
 - **`FlatBuffersStore.Load` rejects malformed input *before* structural traversal —
   it does not merely recover from a panic after the fact.** FlatBuffers accessors index
   into the file's own offsets with no bounds checking, so a corrupt file would otherwise
-  crash the process. A layered bounds guard now runs ahead of the decode: a file-size cap
-  (enforced atomically by reading through an `io.LimitReader`, so the file cannot grow between
-  the size check and the read — no stat-then-read race), a root-offset and minimum-length sanity
-  check, and per-element count caps before each load loop. Anything that fails is rejected as
-  `ErrCorruptData` with `data == nil`, deterministically and without relying on a panic. The
-  M1 `recover()` remains as a residual backstop for deep-offset cases the cheap pre-walk
-  cannot reach. The result: `Load` will not panic and will not perform an unbounded
-  allocation on hostile input.
+  crash the process. A layered bounds guard runs ahead of the decode: the atomic size cap
+  above, a root-offset and minimum-length sanity check, and per-element count caps before each
+  load loop. Anything that fails is rejected as `ErrCorruptData` with `data == nil`,
+  deterministically and without relying on a panic. The M1 `recover()` remains as a residual
+  backstop for deep-offset cases the cheap pre-walk cannot reach. The result: `Load` will not
+  panic and will not perform an unbounded allocation on hostile input. (The JSON path gets the
+  no-panic property for free — `encoding/json` returns an error rather than panicking on
+  malformed input — so the JSON guards are the size and element-count caps above.)
 - **The guard checks *structure*, not *meaning* — this is the honest residual.** Go's
   FlatBuffers runtime ships no `flatbuffers.Verifier`, so this is a hand-rolled bounds
   guard, not a full structural verifier. Even with the guard, a *well-formed* file can
@@ -101,7 +115,8 @@ loading state that any other process or user can influence.
   drive `WorkflowData` into any schema-permitted state. Concretely, a near-complete
   truncation of a valid file can still decode its in-range scalar fields and load as
   in-bounds data rather than being rejected, because FlatBuffers places the root and vtable
-  near the front of the buffer. The contract promises **"won't panic / won't
+  near the front of the buffer. The JSON path likewise loads any schema-permitted state a
+  valid (sub-cap) document encodes. The contract promises **"won't panic / won't
   unbounded-alloc,"** *not* "won't load malicious-but-valid data." See ADR-0008 for the
   decision and its residual.
 - **`workflowID` is validated as a single safe path segment; traversal IDs are
@@ -112,9 +127,11 @@ loading state that any other process or user can influence.
   `baseDir`.
 - **The engine is NOT hardened against a determined attacker feeding crafted files.**
   The guarantees above prevent crashes and path traversal; they do not make the
-  deserializer adversarial-proof. If persistence input can cross a trust boundary,
-  validate and sandbox it before loading — do not point a store at a directory an
-  untrusted party can write to and assume safety.
+  deserializer adversarial-proof. There is no network, process-exec, or injection surface in
+  the persistence path — the only attack surface a file presents is what it decodes into your
+  own workflow state. If persistence input can cross a trust boundary, validate and sandbox it
+  before loading — do not point a store at a directory an untrusted party can write to and
+  assume safety.
 
 See *Persistence fidelity* below for the type-faithfulness limits of a save/load
 round-trip.

@@ -55,6 +55,77 @@ new minor that renames or removes Go symbols without re-serializing your stored 
 state. If we ever need to break the on-disk format, that will be called out far more loudly
 than an API break — it is the stronger promise.
 
+## Trust & Safety — the persistence contract
+
+This is the one authoritative statement of what the persistence layer does and does **not**
+defend against. It is deliberately honest about its ceiling: the guarantees are about
+*availability* (the library will not crash or balloon memory on bad input), **not** about
+*adversarial integrity* (a well-formed-but-forged file still loads as valid data).
+
+### The trust boundary
+
+**The persistence directory is in the caller's trust boundary.** Both the `JSONFileStore`
+and the `FlatBuffersStore` read and write files under the `baseDir` you supply, named by the
+workflow ID you supply. The library **does not authenticate, sign, or structurally verify**
+stored data — it has no notion of who wrote a file. Anyone who can write to `baseDir` can
+influence what a `Load` returns, within the robustness bounds below. Treat that directory the
+way you would treat any input channel: if an untrusted party can write to it, validate and
+sandbox the contents before loading.
+
+There is **no network, process-exec, template, or query surface** anywhere in the
+persistence path — loading state cannot trigger an outbound request, run a command, or inject
+into a downstream interpreter. The only attack surface a persisted file presents is what it
+decodes *into* your own workflow state.
+
+### Robustness guarantees that ARE made
+
+These hold for **both** stores, symmetrically (the JSON paths were brought to parity with the
+FlatBuffers path — see the `v0.7.x` change closing M5-SEC-01):
+
+- **`Load` never panics on malformed input.** A corrupt, truncated, or version-skewed file is
+  rejected as `ErrCorruptData` with `data == nil` — it does not crash the host process.
+  - For `FlatBuffersStore`, whose accessors index into the file's own offsets with no bounds
+    checking, this is a layered bounds guard *ahead of* the decode (size cap, root-offset and
+    minimum-length sanity check, per-element count caps), with the M1 `recover()` left only as
+    a residual backstop for deep-offset cases the cheap pre-walk cannot reach.
+  - For the JSON paths (`JSONFileStore.Load`, `WorkflowData.LoadFromJSON`/`LoadFromFlatBuffer`),
+    the `encoding/json` decoder returns an error rather than panicking by construction; the
+    added guards are the size and element-count caps below.
+- **Oversized input is rejected, not loaded.** Every load path reads through an
+  `io.LimitReader(cap+1)` and rejects anything over `defaultMaxFileSize` (64 MiB) as
+  `ErrCorruptData`. The cap is enforced **atomically with the read** — there is no separate
+  `os.Stat`, so there is no stat-then-read TOCTOU: the reader simply never consumes more than
+  `cap+1` bytes, so the file's on-disk size cannot change the outcome between a check and the
+  read (there is no check to race). A decoded JSON section (`data`/`nodeStatus`/`outputs`)
+  over `defaultMaxElements` (~1M entries) is likewise rejected before the maps are populated,
+  so a small-on-disk-but-huge-decoded document cannot drive an unbounded allocation.
+- **`workflowID` is path-traversal-guarded.** Every store entry point (Save/Load/Delete on
+  both stores) rejects an ID that is empty, contains a path separator, is non-local
+  (`..`, absolute, volume name), or does not survive a `filepath.Base` round-trip. An ID like
+  `../../etc/passwd` is refused with an error, never joined onto `baseDir`.
+- **int64 fidelity is exact.** A save/load round-trip preserves the full `int64` range with no
+  silent float64 precision loss, on every platform (both the JSON `UseNumber` decode and the
+  FlatBuffers `value_long` field). See *Data compatibility* above.
+
+### The ceiling — what is NOT promised
+
+The guarantees are **availability, not adversarial-proofing.** Concretely:
+
+- A **well-formed-but-forged file still loads.** The bounds guards check *structure and size*,
+  not *meaning or provenance*. Go's FlatBuffers runtime ships no `flatbuffers.Verifier`, so the
+  FB guard is hand-rolled and not a full structural verifier; a structurally-valid file can
+  carry semantically-hostile content, and a near-complete truncation can still decode its
+  in-range scalar fields as in-bounds data. The JSON path will load any schema-permitted state
+  a valid (sub-cap) document encodes.
+- Loading is **not free even when bounded** — a valid file may allocate up to the size/element
+  caps.
+- The library does **not** sign, encrypt, or integrity-check persisted state, and does not
+  defend against a determined attacker who controls `baseDir`.
+
+If persistence input can cross a trust boundary, validate and sandbox it before loading. See
+[`docs/guides/persistence.md`](docs/guides/persistence.md) for the worked detail and ADR-0008
+for the FlatBuffers-hardening decision and its residual.
+
 ## Error contract — two domains, intentionally not aliased
 
 Flow Orchestrator exposes two distinct families of sentinel errors. They are matched with

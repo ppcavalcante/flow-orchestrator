@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -500,6 +501,74 @@ func TestDAGExecution(t *testing.T) {
 		// Explicitly set node C status to Pending to ensure it exists
 		data.SetNodeStatus("C", Pending)
 		assert.ExpectNodeStatus("C", Pending)
+	})
+
+	t.Run("Cancellation between levels halts further scheduling", func(t *testing.T) {
+		// Chain A -> B -> C across three levels. A cancels the context while it
+		// runs; the level barrier lets A's level finish, then the ctx.Err()
+		// check at the top of DAG.Execute's level loop must stop before
+		// scheduling B (level 1) and C (level 2).
+		dag := NewDAG("cancel-workflow")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var aRan, bRan, cRan atomic.Int32
+
+		nodeA := NewNode("A", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			aRan.Add(1)
+			cancel() // request cancellation mid-run, after A but before B's level
+			return nil
+		}))
+		nodeB := NewNode("B", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			bRan.Add(1)
+			return nil
+		}))
+		nodeC := NewNode("C", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			cRan.Add(1)
+			return nil
+		}))
+
+		mustAddNode(t, dag, nodeA)
+		mustAddNode(t, dag, nodeB)
+		mustAddNode(t, dag, nodeC)
+		mustAddDep(t, dag, "A", "B")
+		mustAddDep(t, dag, "B", "C")
+
+		data := NewWorkflowData("cancel-workflow")
+		err := dag.Execute(ctx, data)
+
+		// Execute must surface the cancellation, not run to completion.
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+
+		// A's level ran; subsequent levels were never scheduled.
+		assert.Equal(t, int32(1), aRan.Load(), "level 0 (A) should have run")
+		assert.Equal(t, int32(0), bRan.Load(), "level 1 (B) must not run after cancel")
+		assert.Equal(t, int32(0), cRan.Load(), "level 2 (C) must not run after cancel")
+	})
+
+	t.Run("Already-cancelled context halts before any level", func(t *testing.T) {
+		// A context cancelled before Execute must stop at the first loop-top
+		// check — no level runs at all.
+		dag := NewDAG("precancelled-workflow")
+
+		var ran atomic.Int32
+		node := NewNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			ran.Add(1)
+			return nil
+		}))
+		mustAddNode(t, dag, node)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // cancel before Execute
+
+		data := NewWorkflowData("precancelled-workflow")
+		err := dag.Execute(ctx, data)
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(0), ran.Load(), "no level should run when ctx is already cancelled")
 	})
 }
 

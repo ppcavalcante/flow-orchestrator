@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -54,11 +55,26 @@ func (w *Workflow) Execute(ctx context.Context) error {
 	// Create workflow data
 	data := NewWorkflowData(w.WorkflowID)
 
-	// Load existing state if available
+	// Load existing state if available.
+	//
+	// A missing workflow (ErrNotFound) is the expected "no prior state" case —
+	// resume simply starts fresh with the newly created data. Any OTHER error
+	// (e.g. ErrCorruptData from a malformed/truncated persisted payload, or an
+	// I/O failure) must NOT be swallowed: silently discarding it would start
+	// fresh and overwrite the persisted state on the next Save, losing it.
+	// Propagate it so a corrupt resume surfaces instead of masquerading as a
+	// clean first run.
 	if w.Store != nil {
 		existingData, err := w.Store.Load(w.WorkflowID)
-		if err == nil && existingData != nil {
-			data = existingData
+		switch {
+		case err == nil:
+			if existingData != nil {
+				data = existingData
+			}
+		case errors.Is(err, ErrNotFound):
+			// No prior state — start fresh with the new data.
+		default:
+			return fmt.Errorf("failed to load workflow state: %w", err)
 		}
 	}
 

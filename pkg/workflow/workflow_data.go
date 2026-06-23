@@ -109,6 +109,14 @@ func NewWorkflowDataWithArenaBlockSize(id string, config WorkflowDataConfig, blo
 // Set stores a value in the workflow data.
 // This method is thread-safe and can be called concurrently.
 func (w *WorkflowData) Set(key string, value interface{}) {
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.data[w.internKey(key)] = value
+		return
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpSet, func() {
 		w.mu.Lock()
@@ -124,11 +132,22 @@ func (w *WorkflowData) Get(key string) (interface{}, bool) {
 	var result interface{}
 	var exists bool
 
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		// No interning on the read path: Go maps key by string value, so a raw
+		// key matches a stored interned key. Interning would only take the
+		// interner's lock and (for arenas) pollute the pool with read-only keys.
+		result, exists = w.data[key]
+		return result, exists
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpGet, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		result, exists = w.data[w.internKey(key)]
+		result, exists = w.data[key]
 	})
 
 	return result, exists
@@ -139,6 +158,18 @@ func (w *WorkflowData) Get(key string) (interface{}, bool) {
 // This method is thread-safe and can be called concurrently.
 func (w *WorkflowData) Delete(key string) bool {
 	var existed bool
+
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		internedKey := w.internKey(key)
+		_, existed = w.data[internedKey]
+		if existed {
+			delete(w.data, internedKey)
+		}
+		return existed
+	}
 
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpDelete, func() {
@@ -157,6 +188,14 @@ func (w *WorkflowData) Delete(key string) bool {
 // SetNodeStatus updates the status of a node in the workflow.
 // This method is thread-safe and can be called concurrently.
 func (w *WorkflowData) SetNodeStatus(nodeName string, status NodeStatus) {
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.nodeStatus[w.internKey(nodeName)] = status
+		return
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpSetStatus, func() {
 		w.mu.Lock()
@@ -172,11 +211,20 @@ func (w *WorkflowData) GetNodeStatus(nodeName string) (NodeStatus, bool) {
 	var status NodeStatus
 	var exists bool
 
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		// No interning on the read path (see Get).
+		status, exists = w.nodeStatus[nodeName]
+		return status, exists
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpGetStatus, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		status, exists = w.nodeStatus[w.internKey(nodeName)]
+		status, exists = w.nodeStatus[nodeName]
 	})
 
 	return status, exists
@@ -185,6 +233,14 @@ func (w *WorkflowData) GetNodeStatus(nodeName string) (NodeStatus, bool) {
 // SetOutput stores the output of a node.
 // This method is thread-safe and can be called concurrently.
 func (w *WorkflowData) SetOutput(nodeName string, output interface{}) {
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.outputs[w.internKey(nodeName)] = output
+		return
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpSetOutput, func() {
 		w.mu.Lock()
@@ -200,14 +256,34 @@ func (w *WorkflowData) GetOutput(nodeName string) (interface{}, bool) {
 	var output interface{}
 	var exists bool
 
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		// No interning on the read path (see Get).
+		output, exists = w.outputs[nodeName]
+		return output, exists
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpGetOutput, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		output, exists = w.outputs[w.internKey(nodeName)]
+		output, exists = w.outputs[nodeName]
 	})
 
 	return output, exists
+}
+
+// metricsDisabled reports whether the metrics closure should be skipped for this
+// operation — either because metrics are disabled outright, or because this
+// operation falls outside the sampling rate. When true, callers take a
+// metrics-free fast path (direct lock + map op) that avoids the TrackOperation
+// closure, the per-op time.Now()/time.Since() pair, and the atomic bookkeeping.
+// This mirrors the existing branches in IsNodeRunnable/Snapshot/LoadSnapshot.
+func (w *WorkflowData) metricsDisabled() bool {
+	return !w.metrics.IsEnabled() ||
+		(w.metrics.GetSamplingRate() < 1.0 && utils.SecureRandomFloat64() > w.metrics.GetSamplingRate())
 }
 
 // internKey interns a string key to reduce memory usage.
@@ -249,8 +325,9 @@ func (w *WorkflowData) IsNodeRunnable(nodeName string) bool {
 // isNodeRunnableInternal is the internal implementation of IsNodeRunnable.
 // Caller must hold the read lock.
 func (w *WorkflowData) isNodeRunnableInternal(nodeName string) bool {
+	// No interning on the read path (see Get).
 	// If the node is already running, completed, failed, or skipped, it's not runnable
-	if status, ok := w.nodeStatus[w.internKey(nodeName)]; ok {
+	if status, ok := w.nodeStatus[nodeName]; ok {
 		if status == Running || status == Completed || status == Failed || status == Skipped {
 			return false
 		}
@@ -267,8 +344,9 @@ func (w *WorkflowData) IsNodeRunnableWithDeps(nodeName string, depNames []string
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
+	// No interning on the read path (see Get).
 	// Check own status first
-	if status, ok := w.nodeStatus[w.internKey(nodeName)]; ok {
+	if status, ok := w.nodeStatus[nodeName]; ok {
 		if status == Running || status == Completed || status == Failed || status == Skipped {
 			return false
 		}
@@ -276,7 +354,7 @@ func (w *WorkflowData) IsNodeRunnableWithDeps(nodeName string, depNames []string
 
 	// Check all dependencies are completed
 	for _, depName := range depNames {
-		depStatus, exists := w.nodeStatus[w.internKey(depName)]
+		depStatus, exists := w.nodeStatus[depName]
 		if !exists || depStatus != Completed {
 			return false
 		}
@@ -355,6 +433,18 @@ func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
 	dec.UseNumber()
 	if err := dec.Decode(&snapshot); err != nil {
 		return err
+	}
+
+	// Bounds guard: element-count caps, symmetric with the FlatBuffers Load path
+	// (defaultMaxElements per vector). A small JSON document can still decode into
+	// maps of millions of entries; reject any section over the cap as ErrCorruptData
+	// before populating the maps, so a malformed/abusive payload cannot drive a huge
+	// allocation. (The byte-size cap upstream bounds the document; this bounds the
+	// decoded entry count typed and early.)
+	for _, section := range []string{"data", "nodeStatus", "outputs"} {
+		if m, ok := snapshot[section].(map[string]interface{}); ok && len(m) > defaultMaxElements {
+			return fmt.Errorf("%w: element count exceeds max", ErrCorruptData)
+		}
 	}
 
 	// Update ID
@@ -510,10 +600,21 @@ func (w *WorkflowData) Clone() *WorkflowData {
 func (w *WorkflowData) GetBool(key string) (bool, bool) {
 	var result bool
 	var found bool
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		// No interning on the read path (see Get).
+		val, ok := w.data[key]
+		if !ok {
+			return false, false
+		}
+		boolVal, ok := val.(bool)
+		return boolVal, ok
+	}
 	w.metrics.TrackOperation(metrics.OpGetBool, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		val, ok := w.data[w.internKey(key)]
+		val, ok := w.data[key]
 		if !ok {
 			found = false
 			return
@@ -529,10 +630,21 @@ func (w *WorkflowData) GetBool(key string) (bool, bool) {
 func (w *WorkflowData) GetString(key string) (string, bool) {
 	var result string
 	var found bool
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		// No interning on the read path (see Get).
+		val, ok := w.data[key]
+		if !ok {
+			return "", false
+		}
+		strVal, ok := val.(string)
+		return strVal, ok
+	}
 	w.metrics.TrackOperation(metrics.OpGetString, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		val, ok := w.data[w.internKey(key)]
+		val, ok := w.data[key]
 		if !ok {
 			found = false
 			return
@@ -549,32 +661,44 @@ func (w *WorkflowData) GetFloat64(key string) (float64, bool) {
 	var result float64
 	var found bool
 
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		return w.getFloat64Internal(key)
+	}
+
 	// Track the operation with metrics
 	w.metrics.TrackOperation(metrics.OpGetFloat64, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		val, ok := w.data[w.internKey(key)]
-		if !ok {
-			found = false
-			return
-		}
-		switch v := val.(type) {
-		case float64:
-			result, found = v, true
-		case float32:
-			result, found = float64(v), true
-		case int:
-			result, found = float64(v), true
-		case int64:
-			result, found = float64(v), true
-		case int32:
-			result, found = float64(v), true
-		default:
-			found = false
-		}
+		result, found = w.getFloat64Internal(key)
 	})
 
 	return result, found
+}
+
+// getFloat64Internal performs the float64 coercion read. Caller must hold the
+// read lock. No interning on the read path (see Get).
+func (w *WorkflowData) getFloat64Internal(key string) (float64, bool) {
+	val, ok := w.data[key]
+	if !ok {
+		return 0, false
+	}
+	switch v := val.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
 
 // GetInt gets an int value from the workflow data.
@@ -587,26 +711,39 @@ func (w *WorkflowData) GetFloat64(key string) (float64, bool) {
 func (w *WorkflowData) GetInt(key string) (int, bool) {
 	var result int
 	var found bool
+
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		return w.getIntInternal(key)
+	}
+
 	w.metrics.TrackOperation(metrics.OpGetInt, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		val, ok := w.data[w.internKey(key)]
-		if !ok {
-			found = false
-			return
-		}
-		switch v := val.(type) {
-		case int:
-			result, found = v, true
-		case int64:
-			result, found = int(v), true
-		case int32:
-			result, found = int(v), true
-		default:
-			found = false
-		}
+		result, found = w.getIntInternal(key)
 	})
 	return result, found
+}
+
+// getIntInternal performs the int coercion read. Caller must hold the read lock.
+// No interning on the read path (see Get).
+func (w *WorkflowData) getIntInternal(key string) (int, bool) {
+	val, ok := w.data[key]
+	if !ok {
+		return 0, false
+	}
+	switch v := val.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case int32:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 // GetInt64 gets an integer value from the workflow data as an int64.
@@ -617,26 +754,39 @@ func (w *WorkflowData) GetInt(key string) (int, bool) {
 func (w *WorkflowData) GetInt64(key string) (int64, bool) {
 	var result int64
 	var found bool
+
+	// Metrics-free fast path when metrics are disabled or sampled out.
+	if w.metricsDisabled() {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		return w.getInt64Internal(key)
+	}
+
 	w.metrics.TrackOperation(metrics.OpGetInt64, func() {
 		w.mu.RLock()
 		defer w.mu.RUnlock()
-		val, ok := w.data[w.internKey(key)]
-		if !ok {
-			found = false
-			return
-		}
-		switch v := val.(type) {
-		case int:
-			result, found = int64(v), true
-		case int64:
-			result, found = v, true
-		case int32:
-			result, found = int64(v), true
-		default:
-			found = false
-		}
+		result, found = w.getInt64Internal(key)
 	})
 	return result, found
+}
+
+// getInt64Internal performs the int64 coercion read. Caller must hold the read lock.
+// No interning on the read path (see Get).
+func (w *WorkflowData) getInt64Internal(key string) (int64, bool) {
+	val, ok := w.data[key]
+	if !ok {
+		return 0, false
+	}
+	switch v := val.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case int32:
+		return int64(v), true
+	default:
+		return 0, false
+	}
 }
 
 // SaveToJSON saves the workflow data to a JSON file
@@ -658,9 +808,10 @@ func (w *WorkflowData) SaveToJSON(filePath string) error {
 
 // LoadFromJSON loads the workflow data from a JSON file
 func (w *WorkflowData) LoadFromJSON(filePath string) error {
-	// Read the file
-	// nolint:gosec // This is an internal function with controlled file paths
-	data, err := os.ReadFile(filePath)
+	// Bounds guard: read through io.LimitReader(cap+1) and reject over-cap input
+	// as ErrCorruptData, symmetric with the FlatBuffers/store Load paths. Bounds
+	// memory regardless of on-disk size; cap+1 distinguishes at-cap from over-cap.
+	data, err := readBoundedFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read JSON file: %w", err)
 	}
@@ -701,9 +852,9 @@ func (w *WorkflowData) SaveToFlatBuffer(filePath string) error {
 //
 // Deprecated: Use FlatBuffersStore for actual FlatBuffer deserialization.
 func (w *WorkflowData) LoadFromFlatBuffer(filePath string) error {
-	// Read the file
-	// nolint:gosec // This is an internal function with controlled file paths
-	data, err := os.ReadFile(filePath)
+	// Bounds guard: same bounded read as LoadFromJSON (this method also decodes a
+	// JSON snapshot internally). Reject over-cap input as ErrCorruptData.
+	data, err := readBoundedFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
@@ -734,7 +885,7 @@ func (w *WorkflowData) HasKey(key string) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	key = w.internKey(key)
+	// No interning on the read path (see Get).
 	_, exists := w.data[key]
 	return exists
 }

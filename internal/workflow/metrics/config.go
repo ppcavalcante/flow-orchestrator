@@ -24,10 +24,18 @@ type MetricsConfig struct {
 	HighContentionThreshold int
 }
 
-// DefaultMetricsConfig returns a default configuration for metrics collection
+// DefaultMetricsConfig returns a default configuration for metrics collection.
+//
+// Metrics are DISABLED by default: collection adds a ~3x cost to every
+// WorkflowData data-plane operation (Set/Get/SetNodeStatus/...), so observability
+// is opt-in — the caller turns it on explicitly via WithEnabled(true),
+// ProductionMetricsConfig, or a MetricsConfig with Enabled:true. This mirrors the
+// "host owns observability" philosophy of the OTel bridge. The remaining fields
+// keep the previous developer-friendly defaults (full sampling, operation timing)
+// so that flipping Enabled to true yields the historical behavior.
 func DefaultMetricsConfig() *MetricsConfig {
 	return &MetricsConfig{
-		Enabled:                 true,
+		Enabled:                 false,
 		SamplingRate:            1.0,
 		EnableOperationTiming:   true,
 		EnableLockContention:    true,

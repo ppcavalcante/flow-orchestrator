@@ -143,14 +143,34 @@ func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
 	// Construct file path
 	filePath := filepath.Join(s.baseDir, workflowID+".json")
 
-	// Read the file
-	// nolint:gosec // This is an internal function with controlled file paths
-	jsonData, err := os.ReadFile(filePath)
+	// Bounds guard: cap input size ATOMICALLY with the read, symmetric with the
+	// FlatBuffers Load path. Reading through io.LimitReader(cap+1) eliminates any
+	// os.Stat -> os.ReadFile TOCTOU and bounds memory regardless of on-disk size;
+	// cap+1 lets us distinguish "exactly at cap" (accepted) from "over cap"
+	// (rejected). openForRead is the same test seam used by FB Load (default
+	// os.Open). A missing file surfaces as ErrNotFound.
+	f, err := openForRead(filePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
 		}
 		return nil, newIOError("read", workflowID, err)
+	}
+	defer func() {
+		// Surface a Close error only if Load was otherwise succeeding; a failed
+		// read/parse error takes precedence (errcheck check-blank requires the
+		// Close error be consumed).
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = newIOError("read", workflowID, cerr)
+		}
+	}()
+
+	jsonData, err := io.ReadAll(io.LimitReader(f, defaultMaxFileSize+1))
+	if err != nil {
+		return nil, newIOError("read", workflowID, err)
+	}
+	if int64(len(jsonData)) > defaultMaxFileSize {
+		return nil, fmt.Errorf("%w: file exceeds max size", ErrCorruptData)
 	}
 
 	// Create new workflow data
@@ -158,9 +178,9 @@ func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
 
 	// Load from snapshot
 	if err := data.LoadSnapshot(jsonData); err != nil {
-		// A decode failure means the persisted JSON is malformed. Keep the
-		// boundary message generic (no path / raw detail leak); the underlying
-		// error stays reachable via errors.Unwrap.
+		// A decode failure (or element-count overflow) means the persisted JSON
+		// is malformed/abusive. Keep the boundary message generic (no path / raw
+		// detail leak); the underlying error stays reachable via errors.Unwrap.
 		return nil, fmt.Errorf("%w: malformed JSON workflow data: %w", ErrCorruptData, err)
 	}
 
@@ -309,6 +329,34 @@ const defaultMaxElements int = 1 << 20 // 1,048,576 entries per vector
 // bounded by cap+1 on the live path. Production never reassigns it.
 // nolint:gosec // controlled internal file paths
 var openForRead = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+
+// readBoundedFile reads an entire file through io.LimitReader(cap+1) — the same
+// bounded-read discipline as JSONFileStore.Load / FlatBuffersStore.Load — so the
+// WorkflowData JSON load helpers (LoadFromJSON / LoadFromFlatBuffer) share one
+// symmetric size bound. It bounds memory regardless of on-disk size and rejects
+// over-cap input as ErrCorruptData (cap+1 distinguishes at-cap from over-cap).
+// openForRead is the same test seam used by Load; the open error (incl.
+// fs.ErrNotExist) is returned verbatim for the caller to classify/wrap.
+func readBoundedFile(path string) (data []byte, err error) {
+	f, err := openForRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+
+	data, err = io.ReadAll(io.LimitReader(f, defaultMaxFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > defaultMaxFileSize {
+		return nil, fmt.Errorf("%w: file exceeds max size", ErrCorruptData)
+	}
+	return data, nil
+}
 
 // FlatBuffersStore is a file-based implementation of WorkflowStore that uses FlatBuffers serialization.
 // It provides better performance than JSONFileStore for large workflows.

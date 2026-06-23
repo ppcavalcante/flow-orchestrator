@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +163,54 @@ func TestWorkflowExecution(t *testing.T) {
 			t.Errorf("Expected error to contain '%v', got '%v'", expectedErr, err)
 		}
 	})
+
+	t.Run("Corrupt Store.Load error is propagated, not swallowed", func(t *testing.T) {
+		// A corrupt persisted payload must surface as an error from Execute.
+		// Swallowing it would start fresh and overwrite the persisted state on
+		// the next Save, silently losing it.
+		store := newMockWorkflowStore()
+		store.loadError = fmt.Errorf("%w: malformed JSON workflow data", ErrCorruptData)
+
+		var ran bool
+		wf := &Workflow{
+			DAG:        NewDAG("corrupt-resume"),
+			WorkflowID: "corrupt-resume",
+			Store:      store,
+		}
+		require.NoError(t, wf.AddNode(NewNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			ran = true
+			return nil
+		}))))
+
+		err := wf.Execute(context.Background())
+
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrCorruptData, "corrupt load must propagate")
+		require.False(t, ran, "DAG must not run when resume load is corrupt")
+		require.Nil(t, store.data, "must not save fresh state over the corrupt entry")
+	})
+
+	t.Run("ErrNotFound from Store.Load starts fresh and succeeds", func(t *testing.T) {
+		// A missing workflow is the expected "no prior state" case — resume
+		// starts fresh and runs to completion.
+		store := newMockWorkflowStore() // empty -> Load returns ErrNotFound
+		wf := &Workflow{
+			DAG:        NewDAG("fresh-start"),
+			WorkflowID: "fresh-start",
+			Store:      store,
+		}
+		var ran bool
+		require.NoError(t, wf.AddNode(NewNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			ran = true
+			return nil
+		}))))
+
+		err := wf.Execute(context.Background())
+
+		require.NoError(t, err, "ErrNotFound must be treated as start-fresh")
+		require.True(t, ran, "DAG should run on a fresh start")
+		require.NotNil(t, store.data, "fresh final state should be saved")
+	})
 }
 
 func TestWorkflowBuilderOperations(t *testing.T) {
@@ -276,7 +325,10 @@ func (m *mockWorkflowStore) Load(id string) (*WorkflowData, error) {
 		return nil, m.loadError
 	}
 	if m.data == nil || m.data.GetWorkflowID() != id {
-		return nil, errors.New("workflow not found")
+		// Mirror the real stores' contract: a missing workflow is ErrNotFound
+		// (the expected "start fresh" signal), not a generic error. Workflow.Execute
+		// treats ErrNotFound as start-fresh and propagates any other load error.
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	return m.data, nil
 }
