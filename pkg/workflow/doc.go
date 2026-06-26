@@ -62,13 +62,17 @@ Middleware provides cross-cutting concerns like logging, retries, and timeouts:
 
 # Persistence
 
-Workflow state can be persisted using various storage backends:
+Workflow state can be persisted using various storage backends, all
+interchangeable behind the WorkflowStore interface:
 
 	// In-memory store (for testing)
 	store := workflow.NewInMemoryStore()
 
-	// File-based store (durable, on-disk)
+	// File-based store using the fast binary FlatBuffers format (durable, on-disk)
 	store, err := workflow.NewFlatBuffersStore("./workflows")
+
+	// File-based store using human-readable, recovery-friendly JSON (durable, on-disk)
+	store, err := workflow.NewJSONFileStore("./workflows")
 
 # Examples
 

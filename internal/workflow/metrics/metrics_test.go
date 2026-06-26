@@ -364,6 +364,79 @@ func TestStartEndOperation(t *testing.T) {
 	}
 }
 
+// enabledCollector returns a per-instance collector with metrics turned on
+// (NewMetricsCollector defaults to Enabled=false since the Phase-A OFF-by-default
+// change, so the enabled recording paths need an explicit config to exercise).
+func enabledCollector() *MetricsCollector {
+	return NewMetricsCollectorWithConfig(&MetricsConfig{
+		Enabled:               true,
+		SamplingRate:          1.0,
+		EnableOperationTiming: true,
+		EnableLockContention:  true,
+	})
+}
+
+// TestStartEndOperation_Enabled exercises the ENABLED Start/End/RecordTiming
+// path on a per-instance collector — the recording branches that the default
+// (disabled) collector short-circuits past. This is the live per-instance
+// surface that the removed global-facade/InstrumentedRWMutex tests used to cover
+// indirectly; it is now covered directly on the per-instance collector.
+func TestStartEndOperation_Enabled(t *testing.T) {
+	c := enabledCollector()
+
+	// First call creates the per-op counters and increments active.
+	start := c.StartOperation(OpSet)
+	if got := atomic.LoadInt64(c.activeOperations[OpSet]); got != 1 {
+		t.Fatalf("active after StartOperation = %d, want 1", got)
+	}
+
+	time.Sleep(1 * time.Millisecond)
+	dur := c.EndOperation(OpSet, start)
+	if dur <= 0 {
+		t.Fatalf("EndOperation duration = %v, want > 0", dur)
+	}
+	if got := atomic.LoadInt64(c.activeOperations[OpSet]); got != 0 {
+		t.Fatalf("active after EndOperation = %d, want 0", got)
+	}
+
+	// A second op of the SAME type reuses the existing counters (the
+	// already-exists branch of StartOperation/RecordOperationTiming).
+	start2 := c.StartOperation(OpSet)
+	_ = c.EndOperation(OpSet, start2)
+
+	stats := c.GetOperationStats(OpSet)
+	if stats.Count != 2 {
+		t.Fatalf("Count = %d, want 2 (two enabled operations)", stats.Count)
+	}
+	if stats.TotalTimeNs <= 0 || stats.MaxTimeNs <= 0 {
+		t.Fatalf("timing not accumulated: total=%d max=%d", stats.TotalTimeNs, stats.MaxTimeNs)
+	}
+	// Min must have been normalized off the max-int64 sentinel.
+	if stats.MinTimeNs <= 0 || stats.MinTimeNs > stats.MaxTimeNs {
+		t.Fatalf("min not normalized: min=%d max=%d", stats.MinTimeNs, stats.MaxTimeNs)
+	}
+}
+
+// TestRecordOperationTiming_EnabledDirect covers RecordOperationTiming's enabled
+// path (counter-create + min/max update) directly on a per-instance collector.
+func TestRecordOperationTiming_EnabledDirect(t *testing.T) {
+	c := enabledCollector()
+	c.RecordOperationTiming(OpGet, 5*time.Millisecond)
+	c.RecordOperationTiming(OpGet, 1*time.Millisecond) // smaller -> updates min
+	c.RecordOperationTiming(OpGet, 9*time.Millisecond) // larger -> updates max
+
+	stats := c.GetOperationStats(OpGet)
+	if stats.Count != 3 {
+		t.Fatalf("GetOperationStats(OpGet) = %+v, want Count 3", stats)
+	}
+	if stats.MinTimeNs != (1 * time.Millisecond).Nanoseconds() {
+		t.Fatalf("MinTimeNs = %d, want %d", stats.MinTimeNs, (1 * time.Millisecond).Nanoseconds())
+	}
+	if stats.MaxTimeNs != (9 * time.Millisecond).Nanoseconds() {
+		t.Fatalf("MaxTimeNs = %d, want %d", stats.MaxTimeNs, (9 * time.Millisecond).Nanoseconds())
+	}
+}
+
 func TestRecordOperationTiming(t *testing.T) {
 	collector := NewMetricsCollector()
 
@@ -667,114 +740,6 @@ func TestReset(t *testing.T) {
 	contentionTime := *collector.lockContentionTime
 	if contentionTime != 0 {
 		t.Errorf("Contention time should be reset to 0, got %d", contentionTime)
-	}
-}
-
-// Test global functions
-func TestGlobalFunctions(t *testing.T) {
-	// Reset global state
-	Reset()
-
-	// Set global config
-	config := ProductionMetricsConfig()
-	config.Enabled = true
-	config.SamplingRate = 1.0
-	config.EnableOperationTiming = true
-	config.EnableLockContention = true
-	SetGlobalConfig(config)
-
-	// Get global config
-	returnedConfig := GetGlobalConfig()
-	if returnedConfig != config {
-		t.Error("GetGlobalConfig should return the config set by SetGlobalConfig")
-	}
-
-	// Track operation
-	TrackOperation(OpSet, func() {
-		// Do nothing
-	})
-
-	// Record contention
-	RecordLockContention(5 * time.Millisecond)
-
-	// Get operation stats
-	stats := GetOperationStats(OpSet)
-	if stats.Count != 1 {
-		t.Errorf("OpSet stats count should be 1, got %d", stats.Count)
-	}
-
-	// Get contention stats
-	contentionStats := GetLockContentionStats()
-	if contentionStats.Count != 1 {
-		t.Errorf("Contention stats count should be 1, got %d", contentionStats.Count)
-	}
-
-	// Get all operation stats
-	allStats := GetAllOperationStats()
-	if len(allStats) == 0 {
-		t.Error("GetAllOperationStats should return non-empty map")
-	}
-
-	// Reset again
-	Reset()
-
-	// Stats should be reset
-	stats = GetOperationStats(OpSet)
-	if stats.Count != 0 {
-		t.Errorf("OpSet stats count should be reset to 0, got %d", stats.Count)
-	}
-}
-
-func TestInstrumentedRWMutexRLockContention(t *testing.T) {
-	// Create a metrics collector with lock contention enabled
-	collector := NewMetricsCollector()
-	config := DefaultMetricsConfig()
-	config.Enabled = true
-	config.EnableLockContention = true
-	collector.UpdateConfig(config)
-
-	// Create an instrumented mutex with the same config
-	mutex := NewInstrumentedRWMutexWithConfig("test-mutex", config)
-
-	// Set up the global collector for the mutex to use
-	oldCollector := defaultCollector
-	defaultCollector = collector
-	defer func() {
-		defaultCollector = oldCollector
-	}()
-
-	// Acquire the write lock first to create contention
-	mutex.Lock()
-
-	// Try to acquire read lock in a goroutine (will block)
-	done := make(chan struct{})
-	go func() {
-		// This will block until the write lock is released. SA2001 intentional:
-		// the RLock/RUnlock pair is the lock-contention probe under test (it must
-		// block until the writer releases), not a critical section.
-		mutex.RLock()
-		mutex.RUnlock() //nolint:staticcheck // SA2001: empty CS is the contention probe
-		close(done)
-	}()
-
-	// Sleep to ensure the goroutine has time to attempt the read lock
-	time.Sleep(10 * time.Millisecond)
-
-	// Release the write lock, allowing the read lock to be acquired
-	mutex.Unlock()
-
-	// Wait for the read lock goroutine to complete
-	select {
-	case <-done:
-		// Success
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Timed out waiting for RLock to complete")
-	}
-
-	// Check that lock contention was recorded
-	stats := collector.GetLockContentionStats()
-	if stats.Count < 1 {
-		t.Errorf("Expected at least 1 lock contention, got %d", stats.Count)
 	}
 }
 

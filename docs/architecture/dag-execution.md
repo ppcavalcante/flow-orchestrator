@@ -61,12 +61,14 @@ During execution, a node transitions through several states:
 stateDiagram-v2
     [*] --> Pending
     Pending --> Running: When dependencies resolved
+    Pending --> Skipped: A non-resolving dependency (Failed non-coe, or Skipped) blocks it
     Running --> Completed: Successful execution
     Running --> Failed: Error occurs (after retries)
     Failed --> Running: Retry available
 
     Completed --> [*]
     Failed --> [*]
+    Skipped --> [*]
 
     state Running {
         [*] --> Executing
@@ -78,11 +80,18 @@ stateDiagram-v2
     }
 ```
 
-> Note: the executor itself only writes `Pending` → `Running` → `Completed`/`Failed`.
-> A normal `Failed` node halts the run fail-fast (dependents in later levels never
-> start); a continue-on-error `Failed` node lets dependents run. `Skipped` is a
-> defined, persistable status but the executor does not assign it — it is available
-> for callers that model skip explicitly.
+> Note: the executor initializes **every** node to `Pending` when `Execute`
+> begins, so node status is total over the DAG (a node never reached is observably
+> `Pending`, not absent). It then writes `Running` → `Completed`/`Failed` for nodes
+> that run. A normal `Failed` node halts the run fail-fast (dependents in later
+> levels never start); a continue-on-error `Failed` node lets dependents run.
+> `Skipped` **is** written by the executor (`DEC-CHUNK3-status`): a node is marked
+> `Skipped` iff it did not run **and** at least one dependency is in a terminal
+> non-resolving state — a non-continue-on-error dependency that `Failed`, or a
+> dependency that was itself `Skipped`. Skipping is transitive. A node that was
+> simply never reached (the run halted before it, with no failed/skipped
+> dependency of its own) stays `Pending` — `Skipped` means "an upstream you needed
+> failed", `Pending` means "the run stopped before reaching me".
 
 ## Building a DAG
 
@@ -196,10 +205,14 @@ The DAG execution algorithm proceeds as follows:
 3. **Node Execution**:
    - Check if dependencies are *resolved*: a dependency resolves when it
      "Completed", or when it is a continue-on-error node that "Failed"
-     (`DEC-P21-depguard`). A normal "Failed" dependency, or any
-     "Skipped"/"Running"/"Pending" dependency, still blocks.
-   - If a dependency is unresolved, the level reports an error (fail-fast) — the
-     executor does not itself mark dependents "Skipped".
+     (`DEC-P21-depguard`, the shared `depResolved` predicate). A normal "Failed"
+     dependency, or any "Skipped"/"Running"/"Pending" dependency, still blocks.
+   - If a dependency is unresolved **and** is a terminal skip-cause (a non-coe
+     "Failed" dependency, or an already-"Skipped" dependency), the node did not
+     run because an upstream it needed failed/was-skipped — it is marked "Skipped"
+     (`DEC-CHUNK3-status`, the shared `isSkipCause` predicate). If the dependency
+     is merely not-reached-yet ("Pending"/"Running"), the node is left for a later
+     pass, not skipped.
    - Otherwise, execute the node's action with the provided context and data
    - On success, set status to "Completed"
    - On failure, set status to "Failed" (after retries if configured)
@@ -270,19 +283,34 @@ The DAG execution model handles errors in several ways:
    - Mark the node as "Failed"
    - Try retries if configured
    - By default (fail-fast), the failure halts the run: in-flight siblings are
-     cancelled and no later level executes, so dependents do not run. If the node
-     is marked `WithContinueOnError()`, the workflow continues and dependents run
-     and observe the `Failed` status. The executor does not write a `Skipped`
-     status to dependents in either case.
+     cancelled and no later level executes, so dependents do not run. Before
+     returning, the executor runs a topological skip-sweep (`markSkippedFrom`):
+     every not-yet-terminal node transitively blocked by the failed node — i.e.
+     with a non-resolving `Failed`/`Skipped` dependency — is marked `Skipped`
+     (`DEC-CHUNK3-status`). Independent nodes that were never reached and have no
+     failed/skipped ancestor stay `Pending`. If the node is marked
+     `WithContinueOnError()`, the workflow continues and dependents run and observe
+     the `Failed` status (no skip sweep — nothing halted).
 
 2. **DAG-Level Errors**:
    - Structural errors (cycles, missing nodes)
    - Execution engine errors
 
-3. **Context Cancellation**:
-   - Gracefully stops execution of running nodes (the per-level context is
-     cancelled; `Execute` returns the wrapping error). The executor does not
-     re-label remaining nodes — they simply never transition out of `Pending`.
+3. **Context Cancellation** (cancellation wins, `DEC-CHUNK6`):
+   - When the context is cancelled or times out, `DAG.Execute` returns the
+     **wrapped context error** (`errors.Is` reaches `context.Canceled` /
+     `context.DeadlineExceeded`) — **never** an `*ExecutionError`. The executor
+     checks `ctx.Err()` after each level, before it would build any
+     `*ExecutionError`, so this holds whether the cancel lands between levels or
+     mid-level, and even if a genuine fail-fast failure coexisted; the incidental
+     cancel-induced node errors are dropped.
+   - The skip sweep is **not** run on the cancel path: unreached and downstream
+     nodes stay `Pending` ("stopped before reaching me"), not `Skipped` ("an
+     upstream you needed failed") — preserving the `DEC-CHUNK3-status`
+     distinction. There is no `Cancelled` status; in-flight nodes keep whatever
+     status `node.Execute` wrote, and any genuine failure stays observable via
+     `GetNodeStatus`.
+   - See [Error Handling → Context cancellation](../guides/error-handling.md#context-cancellation-and-timeouts).
 
 ## Observability
 
@@ -296,7 +324,12 @@ The DAG execution can be observed through:
 collector, node status, and logging middleware.)
 
 The engine's per-operation metrics can be exported to an OpenTelemetry backend
-via the API-only bridge — see the [Observability guide](../guides/observability.md).
+via the API-only bridge. The executor can also emit a **distributed trace** when
+a host supplies a `TracerProvider` (via `WithTracerProvider` on the DAG or
+builder, or `ExecutionConfig.TracerProvider`): a parent `workflow.execute` span
+with one child span per executed node (named after the node). Both are off by
+default and API-only — see the
+[Observability guide](../guides/observability.md).
 
 ## Conclusion
 

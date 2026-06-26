@@ -135,12 +135,11 @@ Possible status values for a workflow node:
 type NodeStatus string
 
 const (
-    Pending    NodeStatus = "pending"
-    Running    NodeStatus = "running"
-    Completed  NodeStatus = "completed"
-    Failed     NodeStatus = "failed"
-    Skipped    NodeStatus = "skipped"
-    NotStarted NodeStatus = "not_started"
+    Pending   NodeStatus = "pending"
+    Running   NodeStatus = "running"
+    Completed NodeStatus = "completed"
+    Failed    NodeStatus = "failed"
+    Skipped   NodeStatus = "skipped"
 )
 ```
 
@@ -213,12 +212,11 @@ Flow Orchestrator defines several constants that are available to users:
 ```go
 // Node status constants (pkg/workflow/node.go)
 const (
-    Pending    NodeStatus = "pending"
-    Running    NodeStatus = "running"
-    Completed  NodeStatus = "completed"
-    Failed     NodeStatus = "failed"
-    Skipped    NodeStatus = "skipped"
-    NotStarted NodeStatus = "not_started"
+    Pending   NodeStatus = "pending"
+    Running   NodeStatus = "running"
+    Completed NodeStatus = "completed"
+    Failed    NodeStatus = "failed"
+    Skipped   NodeStatus = "skipped"
 )
 
 // Default per-level execution concurrency (pkg/workflow/parallel_execution.go)

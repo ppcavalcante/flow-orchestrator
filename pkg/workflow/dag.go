@@ -6,6 +6,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DAG represents a Directed Acyclic Graph of workflow nodes.
@@ -62,6 +65,16 @@ func NewDAGWithCapacity(name string, nodeCapacity int) *DAG {
 // concurrency) and returns the DAG for chaining.
 func (d *DAG) WithExecutionConfig(config ExecutionConfig) *DAG {
 	d.config = config
+	return d
+}
+
+// WithTracerProvider sets the OpenTelemetry trace provider used to emit a span
+// per executed node (with a parent span per workflow run) and returns the DAG
+// for chaining. Passing nil disables tracing (the zero/default state). This is
+// API-only: the host owns the SDK and exporter; the library only emits spans
+// through the provided provider (DEC-M6-otel-api-only parity, DEC-CHUNK5).
+func (d *DAG) WithTracerProvider(tp trace.TracerProvider) *DAG {
+	d.config.TracerProvider = tp
 	return d
 }
 
@@ -326,6 +339,36 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 	// Get the levels for parallel execution (uses already-validated DAG)
 	levels := d.GetLevels()
 
+	// Resolve the tracer once (noop when tracing is off) and open the parent
+	// workflow span. Per-node spans started in executeNodesInLevel are children
+	// of this span because spanCtx flows down. The skipped_count attribute is
+	// set just before the span ends, once the final node statuses are known.
+	// (DEC-CHUNK5.)
+	tracer := resolveTracer(d.config.TracerProvider)
+	spanCtx, span := tracer.Start(ctx, workflowSpanName)
+	defer func() {
+		// Record how many nodes ended Skipped (Skipped nodes get no span of
+		// their own — a span implies execution — so the count is surfaced on
+		// the parent instead). Computed at span close so it reflects the final
+		// status map after any post-halt Skipped sweep.
+		span.SetAttributes(attribute.Int(attrWorkflowSkipped, countSkipped(levels, data)))
+		span.End()
+	}()
+	ctx = spanCtx
+
+	// Initialize every node to Pending so status is total over the DAG: a node
+	// that is never reached (e.g. a run that halts before it, with no failed or
+	// skipped dependency) is observably Pending rather than absent from the map.
+	// A node already carrying a terminal status from a resumed/persisted run is
+	// left as-is. (DEC-CHUNK3-status.)
+	for _, level := range levels {
+		for _, node := range level {
+			if status, ok := data.GetNodeStatus(node.Name); !ok || !isTerminalStatus(status) {
+				data.SetNodeStatus(node.Name, Pending)
+			}
+		}
+	}
+
 	// Execute each level in sequence
 	for levelIndex, level := range levels {
 		// Stop scheduling further levels if the context has been cancelled or
@@ -348,21 +391,86 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 		levelName := fmt.Sprintf("Level %d", levelIndex)
 		data.Set(fmt.Sprintf("current_level_%s", d.Name), levelName)
 
-		// Execute all nodes in this level in parallel, bounded by the
-		// configured per-level concurrency limit.
-		if err := executeNodesInLevel(ctx, level, data, d.config.MaxConcurrency); err != nil {
-			return fmt.Errorf("error executing level %d: %w", levelIndex, err)
+		// Execute all nodes in this level in parallel, bounded by the configured
+		// per-level concurrency limit. Fail-fast (non-continue-on-error)
+		// failures are returned; when several fail concurrently they are ALL
+		// captured (not just the first). Continue-on-error failures are tolerated
+		// and never returned here (observable via node status).
+		levelFailures := executeNodesInLevel(ctx, level, data, d.config.MaxConcurrency, tracer)
+
+		// Cancellation ALWAYS wins (DEC-CHUNK6, FORK 1 = a). If the context was
+		// cancelled or timed out, return the wrapped ctx error regardless of
+		// whether this level also produced fail-fast failures — those failures are
+		// incidental to the cancel (a well-behaved action returns ctx.Err() when it
+		// observes the cancel, which the executor records as a NodeError) and are
+		// DROPPED here so a cancelled run never returns an *ExecutionError. The
+		// caller's question "why did the workflow stop?" is answered by the ctx
+		// error; any genuine node failure stays observable via GetNodeStatus.
+		// Checking here (after the level, before building the ExecutionError)
+		// unifies the mid-level cancel path with the between-levels guard above and
+		// catches a cancellation in the LAST level even when it was a pure
+		// continue-on-error level that produced no fail-fast failure. We do NOT run
+		// the Skipped sweep on this path: unreached and downstream nodes stay
+		// Pending ("stopped before reaching me", not "an upstream you needed
+		// failed"), preserving the chunk-3 distinction (DEC-CHUNK3-status).
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("workflow cancelled during level %d: %w", levelIndex, err)
+		}
+
+		// A fail-fast failure halts the workflow: aggregate THIS level's failures
+		// (which may be more than one) into a single *ExecutionError and stop
+		// scheduling further levels. Before returning, run the Skipped sweep so
+		// nodes transitively blocked by the failure are marked Skipped (and
+		// independent unreached nodes stay Pending). (DEC-CHUNK3-status.)
+		if execErr := newExecutionError(levelFailures); execErr != nil {
+			markSkippedFrom(levels, levelIndex+1, data)
+			return execErr
 		}
 	}
 
 	return nil
 }
 
-// GetNodeByName returns a node by name
-func (d *DAG) GetNodeByName(name string) (*Node, bool) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+// markSkippedFrom sweeps the levels at index startLevel and beyond in
+// topological order, marking Skipped every not-yet-terminal node that has at
+// least one dependency in a terminal non-resolving state (a non-coe Failed dep,
+// or an already-Skipped dep). Because the sweep runs in level order, a node
+// marked Skipped here causes its own dependents (in later levels) to be marked
+// Skipped too — transitivity (DEC-CHUNK3-status, S1). A node whose dependencies
+// all resolved, or that has no failed/skipped ancestor, is left untouched
+// (stays Pending) — it was simply never reached.
+// countSkipped returns the number of nodes across all levels whose final status
+// is Skipped. It is used only to annotate the parent workflow span
+// (workflow.skipped_count); Skipped nodes get no span of their own because a
+// span implies execution (DEC-CHUNK5).
+func countSkipped(levels [][]*Node, data *WorkflowData) int {
+	n := 0
+	for _, level := range levels {
+		for _, node := range level {
+			if status, _ := data.GetNodeStatus(node.Name); status == Skipped {
+				n++
+			}
+		}
+	}
+	return n
+}
 
-	node, exists := d.Nodes[name]
-	return node, exists
+func markSkippedFrom(levels [][]*Node, startLevel int, data *WorkflowData) {
+	for li := startLevel; li < len(levels); li++ {
+		for _, node := range levels[li] {
+			if status, _ := data.GetNodeStatus(node.Name); isTerminalStatus(status) {
+				continue
+			}
+			for _, dep := range node.DependsOn {
+				depStatus, _ := data.GetNodeStatus(dep.Name)
+				if depResolved(dep, depStatus) {
+					continue
+				}
+				if isSkipCause(depStatus) {
+					data.SetNodeStatus(node.Name, Skipped)
+					break
+				}
+			}
+		}
+	}
 }

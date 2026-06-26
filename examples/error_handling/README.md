@@ -65,10 +65,8 @@ You can modify the configuration in the `main()` function to experiment with dif
 
 ```go
 config := Config{
-    UseArena:       true,
-    ArenaBlockSize: 8192,
-    WorkerCount:    runtime.NumCPU(),
-    ErrorType:      errorType,
+    WorkerCount: runtime.NumCPU(),
+    ErrorType:   errorType,
 }
 ```
 

@@ -118,9 +118,3 @@ func FromBuilder(builder *WorkflowBuilder) (*Workflow, error) {
 		Store:      builder.store,
 	}, nil
 }
-
-// NewWorkflowFromBuilder creates a new workflow builder.
-// This is a convenience function for the fluent API.
-func NewWorkflowFromBuilder() *WorkflowBuilder {
-	return NewWorkflowBuilder()
-}

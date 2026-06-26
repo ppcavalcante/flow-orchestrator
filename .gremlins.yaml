@@ -1,0 +1,50 @@
+# Gremlins mutation-testing configuration (M8 Phase B, chunk 6 part B).
+#
+# Mutation testing is the rung ABOVE coverage%: it mutates the source and checks
+# whether the test suite KILLS each mutant. A surviving (LIVED) mutant is a
+# behavior change no test caught — either a real test-quality gap or an
+# equivalent mutant (semantically identical, unkillable).
+#
+# Gremlins is a DEV tool. It is intentionally NOT in the library's go.mod / non-
+# test dependency graph; run it with the pinned version against the scoped
+# package:
+#   go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 unleash ./pkg/workflow
+# or an installed binary (`gremlins unleash ./pkg/workflow`).
+#
+# SCOPE: run gremlins against ./pkg/workflow and mutate ONLY the ~6 core
+# executor/data/error/tracing files — the logic where mutation coverage matters
+# most (the engine + chunk-2/5/6 code). Everything else under pkg/workflow is
+# excluded so the run stays fast and the survivor report stays focused.
+#
+# ⚠️ exclude-files patterns are regexps matched against paths RELATIVE TO THE RUN
+# TARGET (./pkg/workflow), i.e. bare filenames like "action.go" and the
+# "metrics/..." subdir — NOT repo-relative "pkg/workflow/action.go". (Gremlins
+# walks os.DirFS(module.Root/callingDir).) Get this wrong and the excludes
+# silently no-op.
+#
+# NON-BLOCKING by design: no thresholds are set, so a CI job running this config
+# never fails the build on a low score or a survivor — mutation testing is too
+# slow/variable to gate on. It is informational.
+
+unleash:
+  # Default mutant set (arithmetic-base, conditionals-boundary,
+  # conditionals-negation, increment-decrement, invert-negatives): the
+  # high-signal operators. The off-by-default ones add equivalent-mutant noise.
+
+  exclude-files:
+    # the metrics subpackage (chunk-4 / M6 territory, out of chunk-6 scope)
+    - "metrics/.*\\.go"
+    # non-target files directly under pkg/workflow
+    - "action.go"
+    - "builder.go"
+    - "doc.go"
+    - "errors.go"
+    - "middleware.go"
+    - "string_intern.go"
+    - "typed_data.go"
+    - "version.go"
+    - "workflow_data_config.go"
+    - "workflow_store.go"
+    - "workflow.go"
+    # IN-SCOPE (mutated): dag.go, parallel_execution.go, node.go,
+    # workflow_data.go, execution_error.go, tracing.go

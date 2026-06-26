@@ -168,64 +168,7 @@ func (m *MetricsCollector) GetAllOperationStats() map[OperationType]OperationSta
 	return m.collector.GetAllOperationStats()
 }
 
-// Default global metrics collector
-var defaultCollector = NewMetricsCollector()
-
-// TrackOperation tracks an operation using the default collector
-func TrackOperation(opType OperationType, fn func()) {
-	defaultCollector.TrackOperation(opType, fn)
-}
-
-// GetOperationStats gets stats from the default collector
-func GetOperationStats(opType OperationType) (OperationStats, bool) {
-	return defaultCollector.GetOperationStats(opType)
-}
-
-// GetAllOperationStats gets all stats from the default collector
-func GetAllOperationStats() map[OperationType]OperationStats {
-	return defaultCollector.GetAllOperationStats()
-}
-
-// Reset resets the default collector
-func Reset() {
-	defaultCollector.Reset()
-}
-
-// Enable enables the default collector
-func Enable() {
-	defaultCollector.Enable()
-}
-
-// Disable disables the default collector
-func Disable() {
-	defaultCollector.Disable()
-}
-
-// SetSamplingRate sets the sampling rate for the default collector
-func SetSamplingRate(rate float64) {
-	defaultCollector.WithSamplingRate(rate)
-}
-
-// IsEnabled returns whether the default collector is enabled
-func IsEnabled() bool {
-	return defaultCollector.IsEnabled()
-}
-
-// GetSamplingRate returns the sampling rate for the default collector
-func GetSamplingRate() float64 {
-	return defaultCollector.GetSamplingRate()
-}
-
 // DefaultConfig returns the default metrics configuration.
-// This function is maintained for backward compatibility.
 func DefaultConfig() *Config {
 	return NewConfig()
-}
-
-// ApplyConfig applies the given configuration to the default metrics collector.
-// This function is maintained for backward compatibility.
-func ApplyConfig(config *Config) {
-	if config != nil {
-		config.Apply()
-	}
 }

@@ -145,8 +145,8 @@ type WorkflowStore interface {
 
 Implementations include:
 - `InMemoryStore`: For ephemeral workflows
-- `JSONFileStore`: For simple file-based persistence
-- `FlatBuffersStore`: For high-performance production use
+- `JSONFileStore`: Human-readable file-based persistence; convenient for debugging and external tools that read the JSON
+- `FlatBuffersStore`: Faster binary format for high-throughput or large state
 
 ### Middleware
 
@@ -183,7 +183,7 @@ The `WorkflowBuilder` provides a fluent interface for defining workflows:
 ```go
 builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("order-processing").
-    WithStateStore(store)
+    WithStore(store)
 
 // Add nodes
 builder.AddStartNode("validate-order").
@@ -201,14 +201,20 @@ dag, err := builder.Build()
 
 Nodes have several possible status values that track their execution state:
 
-- `Pending`: Node has not yet started execution
+- `Pending`: Initial state. `Execute` sets **every** node to `Pending` when it
+  begins, so status is total over the DAG — a node that is never reached (the run
+  halted before it, with no failed/skipped dependency of its own) stays `Pending`
+  rather than being absent.
 - `Running`: Node is currently executing
 - `Completed`: Node has completed successfully
-- `Failed`: Node has failed execution
-- `Skipped`: A defined status (and persisted) for a node bypassed due to a
-  dependency failure. Note: the current executor does not mark nodes `Skipped`
-  itself — by default a node failure halts the workflow fail-fast (see Error
-  Handling below); the status exists for callers that model skip explicitly.
+- `Failed`: Node's action returned an error
+- `Skipped`: The node did **not** run because at least one dependency was in a
+  terminal non-resolving state — a non-continue-on-error dependency that `Failed`,
+  or a dependency that was itself `Skipped`. The executor writes this status
+  (`DEC-CHUNK3-status`); skipping is transitive. `Skipped` is **not** a failure —
+  skipped nodes never appear in an `ExecutionError`. (Contrast `Pending`: skipped
+  means "an upstream you needed failed"; pending means "the run stopped before
+  reaching me".)
 
 ```go
 // Get a node's status

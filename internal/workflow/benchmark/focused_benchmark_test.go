@@ -346,52 +346,6 @@ func BenchmarkFocusedWorkflowDataSetGet(b *testing.B) {
 					_ = val
 				}
 			})
-
-			// Arena-based WorkflowData
-			b.Run("Arena", func(b *testing.B) {
-				b.ReportAllocs()
-				config := workflow.DefaultWorkflowDataConfig()
-				config.ExpectedNodes = size
-				config.ExpectedData = size * 2
-				data := workflow.NewWorkflowDataWithArena("test", config)
-
-				// Setup with initial data
-				for i := 0; i < size; i++ {
-					data.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i))
-				}
-
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					// Mix of operations for realistic workload
-					key := fmt.Sprintf("key%d", i%size)
-					data.Set(key, fmt.Sprintf("value%d", i))
-					val, _ := data.Get(key)
-					_ = val
-				}
-			})
-
-			// Arena-based WorkflowData with reset
-			b.Run("ArenaWithReset", func(b *testing.B) {
-				b.ReportAllocs()
-				config := workflow.DefaultWorkflowDataConfig()
-				config.ExpectedNodes = size
-				config.ExpectedData = size * 2
-				data := workflow.NewWorkflowDataWithArena("test", config)
-
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					// Reset arena every 100 iterations
-					if i > 0 && i%100 == 0 {
-						data.ResetArena()
-					}
-
-					// Mix of operations for realistic workload
-					key := fmt.Sprintf("key%d", i%size)
-					data.Set(key, fmt.Sprintf("value%d", i))
-					val, _ := data.Get(key)
-					_ = val
-				}
-			})
 		})
 	}
 }
@@ -625,55 +579,6 @@ func BenchmarkFocusedArenaWorkflowExecution(b *testing.B) {
 						}
 					}
 				})
-
-				// Arena-based execution
-				b.Run("Arena", func(b *testing.B) {
-					b.ReportAllocs()
-
-					for i := 0; i < b.N; i++ {
-						// Create a new DAG for each iteration
-						dag, _ := topo.createDAG(size)
-
-						// Create workflow data with arena
-						config := workflow.DefaultWorkflowDataConfig()
-						config.ExpectedNodes = size
-						config.ExpectedData = size * 2
-						data := workflow.NewWorkflowDataWithArena(fmt.Sprintf("test-%d", i), config)
-
-						// Execute the workflow
-						ctx := context.Background()
-						executor := NewExecutor()
-						_, err := executor.Execute(ctx, dag, data)
-						if err != nil {
-							b.Fatalf("Workflow execution failed: %v", err)
-						}
-					}
-				})
-
-				// Arena-based execution with custom block size
-				b.Run("ArenaCustomBlock", func(b *testing.B) {
-					b.ReportAllocs()
-
-					for i := 0; i < b.N; i++ {
-						// Create a new DAG for each iteration
-						dag, _ := topo.createDAG(size)
-
-						// Create workflow data with arena and custom block size
-						config := workflow.DefaultWorkflowDataConfig()
-						config.ExpectedNodes = size
-						config.ExpectedData = size * 2
-						blockSize := 4096 * (size/10 + 1) // Scale block size with data size
-						data := workflow.NewWorkflowDataWithArenaBlockSize(fmt.Sprintf("test-%d", i), config, blockSize)
-
-						// Execute the workflow
-						ctx := context.Background()
-						executor := NewExecutor()
-						_, err := executor.Execute(ctx, dag, data)
-						if err != nil {
-							b.Fatalf("Workflow execution failed: %v", err)
-						}
-					}
-				})
 			})
 		}
 	}
@@ -705,77 +610,6 @@ func BenchmarkIntegratedWorkflow(b *testing.B) {
 
 					// Create standard workflow data
 					data := workflow.NewWorkflowData(fmt.Sprintf("test-%d", i))
-
-					// Initialize data
-					for j := 0; j < complexity.dataCount; j++ {
-						data.Set(fmt.Sprintf("key%d", j), fmt.Sprintf("value%d", j))
-					}
-
-					// Set all nodes to Completed status (since we're not actually executing)
-					for _, node := range nodes {
-						data.SetNodeStatus(node.Name, workflow.Completed)
-					}
-
-					// Verify some results
-					for j := 0; j < len(nodes); j += len(nodes) / 5 {
-						status, _ := data.GetNodeStatus(nodes[j].Name)
-						if status != workflow.Completed && status != workflow.Skipped {
-							b.Fatalf("Node %s should be completed or skipped, got %v", nodes[j].Name, status)
-						}
-					}
-				}
-			})
-
-			// Arena-based implementation
-			b.Run("Arena", func(b *testing.B) {
-				b.ReportAllocs()
-
-				for i := 0; i < b.N; i++ {
-					// Create a workflow with the specified complexity
-					_, nodes := createComplexWorkflow(complexity.nodeCount, complexity.depth)
-
-					// Create arena-based workflow data
-					config := workflow.DefaultWorkflowDataConfig()
-					config.ExpectedNodes = complexity.nodeCount
-					config.ExpectedData = complexity.dataCount
-					data := workflow.NewWorkflowDataWithArena(fmt.Sprintf("test-%d", i), config)
-
-					// Initialize data
-					for j := 0; j < complexity.dataCount; j++ {
-						data.Set(fmt.Sprintf("key%d", j), fmt.Sprintf("value%d", j))
-					}
-
-					// Set all nodes to Completed status (since we're not actually executing)
-					for _, node := range nodes {
-						data.SetNodeStatus(node.Name, workflow.Completed)
-					}
-
-					// Verify some results
-					for j := 0; j < len(nodes); j += len(nodes) / 5 {
-						status, _ := data.GetNodeStatus(nodes[j].Name)
-						if status != workflow.Completed && status != workflow.Skipped {
-							b.Fatalf("Node %s should be completed or skipped, got %v", nodes[j].Name, status)
-						}
-					}
-				}
-			})
-
-			// Arena-based implementation with custom block size
-			b.Run("ArenaCustomBlock", func(b *testing.B) {
-				b.ReportAllocs()
-
-				for i := 0; i < b.N; i++ {
-					// Create a workflow with the specified complexity
-					_, nodes := createComplexWorkflow(complexity.nodeCount, complexity.depth)
-
-					// Create arena-based workflow data with custom block size
-					config := workflow.DefaultWorkflowDataConfig()
-					config.ExpectedNodes = complexity.nodeCount
-					config.ExpectedData = complexity.dataCount
-
-					// Calculate a reasonable block size based on the expected data size
-					blockSize := 4096 * (complexity.nodeCount/10 + 1)
-					data := workflow.NewWorkflowDataWithArenaBlockSize(fmt.Sprintf("test-%d", i), config, blockSize)
 
 					// Initialize data
 					for j := 0; j < complexity.dataCount; j++ {
@@ -844,47 +678,6 @@ func BenchmarkWorkflowWithGC(b *testing.B) {
 				runtime.ReadMemStats(&memStats)
 				b.ReportMetric(float64(memStats.TotalAlloc-beforeAlloc)/float64(b.N), "B/op_total")
 			})
-
-			// Arena-based implementation
-			b.Run("Arena", func(b *testing.B) {
-				b.ReportAllocs()
-
-				var memStats runtime.MemStats
-				runtime.ReadMemStats(&memStats)
-				beforeAlloc := memStats.TotalAlloc
-
-				for i := 0; i < b.N; i++ {
-					// Create a workflow
-					dag, _ := createComplexDAGForBenchmark(size)
-
-					// Create arena-based workflow data
-					config := workflow.DefaultWorkflowDataConfig()
-					config.ExpectedNodes = size
-					config.ExpectedData = size * 2
-					data := workflow.NewWorkflowDataWithArena(fmt.Sprintf("test-%d", i), config)
-
-					// Initialize data
-					for j := 0; j < size*2; j++ {
-						data.Set(fmt.Sprintf("key%d", j), fmt.Sprintf("value%d", j))
-					}
-
-					// Execute the workflow
-					ctx := context.Background()
-					executor := NewExecutor()
-					_, err := executor.Execute(ctx, dag, data)
-					if err != nil {
-						b.Fatalf("Workflow execution failed: %v", err)
-					}
-
-					// Reset arena every few iterations instead of relying on GC
-					if i > 0 && i%5 == 0 {
-						data.ResetArena()
-					}
-				}
-
-				runtime.ReadMemStats(&memStats)
-				b.ReportMetric(float64(memStats.TotalAlloc-beforeAlloc)/float64(b.N), "B/op_total")
-			})
 		})
 	}
 }
@@ -910,38 +703,6 @@ func BenchmarkWorkflowReuse(b *testing.B) {
 
 						// Execute multiple workflows with the same data
 						for j := 0; j < execCount; j++ {
-							// Create a new DAG for each execution
-							dag, _ := createComplexDAGForBenchmark(size)
-
-							// Execute the workflow
-							ctx := context.Background()
-							executor := NewExecutor()
-							_, err := executor.Execute(ctx, dag, data)
-							if err != nil {
-								b.Fatalf("Workflow execution failed: %v", err)
-							}
-						}
-					}
-				})
-
-				// Arena-based implementation
-				b.Run("Arena", func(b *testing.B) {
-					b.ReportAllocs()
-
-					for i := 0; i < b.N; i++ {
-						// Create arena-based workflow data once
-						config := workflow.DefaultWorkflowDataConfig()
-						config.ExpectedNodes = size
-						config.ExpectedData = size * 2
-						data := workflow.NewWorkflowDataWithArena(fmt.Sprintf("test-%d", i), config)
-
-						// Execute multiple workflows with the same data
-						for j := 0; j < execCount; j++ {
-							// Reset arena before each execution
-							if j > 0 {
-								data.ResetArena()
-							}
-
 							// Create a new DAG for each execution
 							dag, _ := createComplexDAGForBenchmark(size)
 

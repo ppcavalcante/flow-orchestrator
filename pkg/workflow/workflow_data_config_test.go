@@ -23,42 +23,6 @@ func TestDefaultWorkflowDataConfig(t *testing.T) {
 	}
 }
 
-func TestReadOptimizedWorkflowDataConfig(t *testing.T) {
-	expectedNodes := 100
-	config := ReadOptimizedWorkflowDataConfig(expectedNodes)
-
-	// Check values
-	if config.ExpectedNodes != expectedNodes {
-		t.Errorf("Expected ExpectedNodes to be %d, got %d", expectedNodes, config.ExpectedNodes)
-	}
-
-	if config.ExpectedData != expectedNodes*2 {
-		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes*2, config.ExpectedData)
-	}
-
-	if config.MetricsConfig == nil {
-		t.Error("Expected MetricsConfig to be non-nil")
-	}
-}
-
-func TestHighConcurrencyWorkflowDataConfig(t *testing.T) {
-	expectedNodes := 200
-	config := HighConcurrencyWorkflowDataConfig(expectedNodes)
-
-	// Check values
-	if config.ExpectedNodes != expectedNodes {
-		t.Errorf("Expected ExpectedNodes to be %d, got %d", expectedNodes, config.ExpectedNodes)
-	}
-
-	if config.ExpectedData != expectedNodes*2 {
-		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes*2, config.ExpectedData)
-	}
-
-	if config.MetricsConfig == nil {
-		t.Error("Expected MetricsConfig to be non-nil")
-	}
-}
-
 func TestLowMemoryWorkflowDataConfig(t *testing.T) {
 	expectedNodes := 50
 	config := LowMemoryWorkflowDataConfig(expectedNodes)
@@ -70,24 +34,6 @@ func TestLowMemoryWorkflowDataConfig(t *testing.T) {
 
 	if config.ExpectedData != expectedNodes {
 		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes, config.ExpectedData)
-	}
-
-	if config.MetricsConfig == nil {
-		t.Error("Expected MetricsConfig to be non-nil")
-	}
-}
-
-func TestProductionWorkflowDataConfig(t *testing.T) {
-	expectedNodes := 1000
-	config := ProductionWorkflowDataConfig(expectedNodes)
-
-	// Check values
-	if config.ExpectedNodes != expectedNodes {
-		t.Errorf("Expected ExpectedNodes to be %d, got %d", expectedNodes, config.ExpectedNodes)
-	}
-
-	if config.ExpectedData != expectedNodes*2 {
-		t.Errorf("Expected ExpectedData to be %d, got %d", expectedNodes*2, config.ExpectedData)
 	}
 
 	if config.MetricsConfig == nil {

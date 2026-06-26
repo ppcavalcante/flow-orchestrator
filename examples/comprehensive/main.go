@@ -26,8 +26,6 @@ const (
 
 // Configuration options
 type Config struct {
-	UseArena         bool
-	ArenaBlockSize   int
 	EnableMetrics    bool
 	SamplingRate     float64
 	WorkerCount      int
@@ -35,11 +33,14 @@ type Config struct {
 	ProfileOutputDir string
 }
 
+// exampleMetrics is this example's own metrics collector. Metrics are
+// per-instance (there is no process-global facade), so the example owns a
+// single collector and reuses it across the workflows it runs.
+var exampleMetrics = metrics.NewMetricsCollector()
+
 func main() {
 	// Define configuration
 	config := Config{
-		UseArena:         true,
-		ArenaBlockSize:   8192,
 		EnableMetrics:    true,
 		SamplingRate:     1.0,
 		WorkerCount:      runtime.NumCPU(),
@@ -56,14 +57,11 @@ func main() {
 	if config.EnableMetrics {
 		metricsConfig := metrics.DefaultConfig()
 		metricsConfig.WithEnabled(true).WithSamplingRate(config.SamplingRate)
-		metrics.ApplyConfig(metricsConfig)
-		metrics.Reset() // Clear any previous metrics
+		exampleMetrics = metrics.NewMetricsCollectorWithConfig(metricsConfig.GetInternalConfig())
 	}
 
 	fmt.Println("=== Comprehensive Workflow Example ===")
 	fmt.Printf("Configuration:\n")
-	fmt.Printf("- Arena-based memory: %v\n", config.UseArena)
-	fmt.Printf("- Arena block size: %d bytes\n", config.ArenaBlockSize)
 	fmt.Printf("- Metrics enabled: %v\n", config.EnableMetrics)
 	fmt.Printf("- Metrics sampling rate: %.2f\n", config.SamplingRate)
 	fmt.Printf("- Worker count: %d\n", config.WorkerCount)
@@ -140,14 +138,6 @@ func createWorkflowData(config Config, id string) *workflow.WorkflowData {
 	dataConfig.ExpectedNodes = 50
 	dataConfig.ExpectedData = 100
 
-	// Create workflow data based on configuration
-	if config.UseArena {
-		if config.ArenaBlockSize > 0 {
-			return workflow.NewWorkflowDataWithArena(id, dataConfig, config.ArenaBlockSize)
-		}
-		return workflow.NewWorkflowDataWithArena(id, dataConfig)
-	}
-
 	return workflow.NewWorkflowDataWithConfig(id, dataConfig)
 }
 
@@ -157,7 +147,7 @@ func runECommerceWorkflow(config Config, store workflow.WorkflowStore) {
 
 	// Track workflow execution time
 	ecommerceOp := metrics.OperationType("ECommerceWorkflow")
-	metrics.TrackOperation(ecommerceOp, func() {
+	exampleMetrics.TrackOperation(ecommerceOp, func() {
 		// Create a workflow builder
 		builder := workflow.NewWorkflowBuilder().
 			WithWorkflowID("ecommerce-workflow").
@@ -336,11 +326,6 @@ func runECommerceWorkflow(config Config, store workflow.WorkflowStore) {
 		fmt.Printf("Order ID: %s\n", orderId)
 		fmt.Printf("Payment ID: %s\n", paymentId)
 		fmt.Printf("Final Amount: $%.2f\n", finalAmount)
-
-		// Display arena stats if used
-		if config.UseArena {
-			displayArenaStats(data)
-		}
 	})
 }
 
@@ -350,7 +335,7 @@ func runDataProcessingWorkflow(config Config, store workflow.WorkflowStore) {
 
 	// Track workflow execution time
 	dataProcessingOp := metrics.OperationType("DataProcessingWorkflow")
-	metrics.TrackOperation(dataProcessingOp, func() {
+	exampleMetrics.TrackOperation(dataProcessingOp, func() {
 		// Create a workflow builder
 		builder := workflow.NewWorkflowBuilder().
 			WithWorkflowID("data-processing").
@@ -516,11 +501,6 @@ func runDataProcessingWorkflow(config Config, store workflow.WorkflowStore) {
 			fmt.Printf("Min: %.2f\n", agg["min"])
 			fmt.Printf("Max: %.2f\n", agg["max"])
 		}
-
-		// Display arena stats if used
-		if config.UseArena {
-			displayArenaStats(data)
-		}
 	})
 }
 
@@ -530,7 +510,7 @@ func runErrorHandlingWorkflow(config Config, store workflow.WorkflowStore) {
 
 	// Track workflow execution time
 	errorHandlingOp := metrics.OperationType("ErrorHandlingWorkflow")
-	metrics.TrackOperation(errorHandlingOp, func() {
+	exampleMetrics.TrackOperation(errorHandlingOp, func() {
 		// Create a workflow builder
 		builder := workflow.NewWorkflowBuilder().
 			WithWorkflowID("error-handling").
@@ -655,32 +635,7 @@ func runErrorHandlingWorkflow(config Config, store workflow.WorkflowStore) {
 		fmt.Printf("Flaky task status: %s\n", flakyStatus)
 		fmt.Printf("Timeout task status: %s\n", timeoutStatus)
 		fmt.Printf("Retry count: %d\n", retryCount)
-
-		// Display arena stats if used
-		if config.UseArena {
-			displayArenaStats(data)
-		}
 	})
-}
-
-// displayArenaStats shows memory usage statistics for arena-based workflow data
-func displayArenaStats(data *workflow.WorkflowData) {
-	stats := data.GetArenaStats()
-
-	fmt.Println("\nArena Memory Statistics:")
-
-	if arenaStats, ok := stats["arena"]; ok {
-		fmt.Printf("- Total allocated: %d bytes\n", arenaStats["totalAllocated"])
-		fmt.Printf("- Current used: %d bytes\n", arenaStats["currentUsed"])
-		fmt.Printf("- Block size: %d bytes\n", arenaStats["blockSize"])
-		fmt.Printf("- Block count: %d\n", arenaStats["blockCount"])
-	}
-
-	if poolStats, ok := stats["stringPool"]; ok {
-		fmt.Printf("- String pool size: %d strings\n", poolStats["size"])
-		fmt.Printf("- String pool hits: %d\n", poolStats["hits"])
-		fmt.Printf("- String pool misses: %d\n", poolStats["misses"])
-	}
 }
 
 // randomString generates a random string of the specified length
@@ -695,7 +650,7 @@ func randomString(length int) string {
 
 // displayMetrics shows performance metrics for the workflow system
 func displayMetrics() {
-	allStats := metrics.GetAllOperationStats()
+	allStats := exampleMetrics.GetAllOperationStats()
 
 	fmt.Println("\n=== Performance Metrics ===")
 

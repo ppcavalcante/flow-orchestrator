@@ -106,10 +106,10 @@ func benchmarkECommerceCheckout(b *testing.B) {
 	// Start actual benchmark
 	b.StartTimer()
 
-	// Use arena-based WorkflowData to avoid concurrent map access issues
+	// Use a single WorkflowData with metrics disabled to avoid concurrent map access issues
 	config := workflow.DefaultWorkflowDataConfig()
 	config.MetricsConfig = metrics.NewConfig().WithEnabled(false) // Disable metrics to avoid concurrent map access
-	data := workflow.NewWorkflowDataWithArena("checkout-123", config)
+	data := workflow.NewWorkflowDataWithConfig("checkout-123", config)
 
 	ctx := context.Background()
 	err = dag.Execute(ctx, data)
@@ -183,10 +183,10 @@ func benchmarkETLProcessing(b *testing.B) {
 	// Start actual benchmark
 	b.StartTimer()
 
-	// Use arena-based WorkflowData to avoid concurrent map access issues
+	// Use a single WorkflowData with metrics disabled to avoid concurrent map access issues
 	config := workflow.DefaultWorkflowDataConfig()
 	config.MetricsConfig = metrics.NewConfig().WithEnabled(false) // Disable metrics for benchmark
-	data := workflow.NewWorkflowDataWithArena("etl-process", config)
+	data := workflow.NewWorkflowDataWithConfig("etl-process", config)
 
 	ctx := context.Background()
 	err = dag.Execute(ctx, data)
@@ -263,10 +263,10 @@ func benchmarkAPIOrchestration(b *testing.B) {
 	// Start actual benchmark
 	b.StartTimer()
 
-	// Use arena-based WorkflowData to avoid concurrent map access issues
+	// Use a single WorkflowData with metrics disabled to avoid concurrent map access issues
 	config := workflow.DefaultWorkflowDataConfig()
 	config.MetricsConfig = metrics.NewConfig().WithEnabled(false) // Disable metrics for benchmark
-	data := workflow.NewWorkflowDataWithArena("api-orchestration", config)
+	data := workflow.NewWorkflowDataWithConfig("api-orchestration", config)
 
 	ctx := context.Background()
 	err = dag.Execute(ctx, data)
@@ -361,10 +361,10 @@ func benchmarkApprovalProcess(b *testing.B) {
 	// Start actual benchmark
 	b.StartTimer()
 
-	// Use arena-based WorkflowData to avoid concurrent map access issues
+	// Use a single WorkflowData with metrics disabled to avoid concurrent map access issues
 	config := workflow.DefaultWorkflowDataConfig()
 	config.MetricsConfig = metrics.NewConfig().WithEnabled(false) // Disable metrics for benchmark
-	data := workflow.NewWorkflowDataWithArena("approval-process", config)
+	data := workflow.NewWorkflowDataWithConfig("approval-process", config)
 
 	ctx := context.Background()
 	err = dag.Execute(ctx, data)

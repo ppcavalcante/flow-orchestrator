@@ -127,7 +127,6 @@ The codebase is organized into a public package and an internal tree:
   `builder`/`dag`/`action`/`store` subpackages; those concerns are all files
   within `pkg/workflow`. Its only subpackages are:
   - `pkg/workflow/metrics`: public metrics facade (incl. the OTel bridge)
-  - `pkg/workflow/arena`: thin public wrapper over the internal arena allocator
   - `pkg/workflow/schema`: the FlatBuffers schema (`.fbs`)
 
 - `internal/workflow`: implementation details, not importable by consumers:

@@ -225,9 +225,6 @@ func (b *WorkflowBuilder) WithWorkflowID(id string) *WorkflowBuilder
 // WithStore sets the persistence store
 func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder
 
-// WithStateStore is an alias for WithStore, retained for backward compatibility
-func (b *WorkflowBuilder) WithStateStore(store WorkflowStore) *WorkflowBuilder
-
 // AddStartNode adds a start node (no dependencies)
 func (b *WorkflowBuilder) AddStartNode(name string) *NodeBuilder
 
@@ -340,7 +337,8 @@ type WorkflowStore interface {
 // NewInMemoryStore creates an in-memory store
 func NewInMemoryStore() *InMemoryStore
 
-// NewJSONFileStore creates a JSON file-based store (prefer FlatBuffersStore for production)
+// NewJSONFileStore creates a JSON file-based store (human-readable, recovery-friendly;
+// use FlatBuffersStore for the faster binary format)
 func NewJSONFileStore(baseDir string) (*JSONFileStore, error)
 
 // NewFlatBuffersStore creates a FlatBuffers-based store
@@ -353,12 +351,11 @@ func NewFlatBuffersStore(baseDir string) (*FlatBuffersStore, error)
 type NodeStatus string
 
 const (
-    Pending    NodeStatus = "pending"
-    Running    NodeStatus = "running"
-    Completed  NodeStatus = "completed"
-    Failed     NodeStatus = "failed"
-    Skipped    NodeStatus = "skipped"
-    NotStarted NodeStatus = "not_started"
+    Pending   NodeStatus = "pending"   // initial state; also a node never reached
+    Running   NodeStatus = "running"
+    Completed NodeStatus = "completed"
+    Failed    NodeStatus = "failed"     // the node's action returned an error
+    Skipped   NodeStatus = "skipped"    // a non-resolving dependency (Failed non-coe, or Skipped) blocked it
 )
 ```
 
@@ -369,9 +366,9 @@ whether the node is marked continue-on-error:
 
 - **Default (fail-fast).** When a normal node's action returns an error, the
   node is recorded as `Failed`, the executor cancels its in-flight siblings in
-  that level, and `DAG.Execute` returns a wrapped error **without running any
-  later level**. A `Failed` normal node therefore blocks its dependents simply by
-  halting the run.
+  that level, and `DAG.Execute` halts **without running any later level**,
+  returning an [`*ExecutionError`](#aggregate-execution-error) that aggregates the
+  halting level's fail-fast failures. A `Failed` normal node blocks its dependents.
 - **Continue-on-error.** When a node marked with `WithContinueOnError()` fails,
   it is recorded as `Failed` but the failure does **not** cancel siblings and does
   **not** fail the workflow. Execution continues; the node's dependents still run
@@ -380,10 +377,17 @@ whether the node is marked continue-on-error:
   longer blocks dependents); a normal `Failed` dependency, and any
   `Skipped`/`Running`/`Pending` dependency, still blocks.
 
+**Status accounting.** Execute initializes every node to `Pending` at the start,
+so node status is total over the DAG. A node that did **not** run because a
+dependency was in a terminal non-resolving state — a non-continue-on-error
+dependency that `Failed`, or a dependency that was itself `Skipped` — is marked
+`Skipped` (transitively). A node that simply was never reached (the run halted
+before it, and none of its dependencies failed or were skipped) stays `Pending`.
+`Skipped` is **not** a failure: skipped nodes never appear in `ExecutionError`.
+
 `DAG.Execute` returns `nil` if and only if every node that is **not**
-continue-on-error succeeded. No partial-error aggregate type is returned — branch
-on per-node `GetNodeStatus` to inspect continue-on-error outcomes. These semantics
-are machine-checked: see [Verification](#verification).
+continue-on-error succeeded; otherwise it returns an `*ExecutionError`. These
+semantics are machine-checked: see [Verification](#verification).
 
 ```go
 // Marked continue-on-error: a failure here does not halt the workflow.
@@ -477,6 +481,50 @@ case errors.Is(err, workflow.ErrCorruptData): // file present but undecodable
 case errors.Is(err, workflow.ErrIO):          // transient I/O — safe to retry
 }
 ```
+
+## Aggregate Execution Error
+
+When a workflow fails, `DAG.Execute` (and `Workflow.Execute`) return an
+`*ExecutionError` that aggregates **every** fail-fast node failure — not just the
+first. When several nodes in a level fail concurrently, all of them are captured.
+
+```go
+// NodeError pairs a failed node's name with the error its action returned.
+type NodeError struct {
+    NodeName string
+    Err      error
+}
+
+// ExecutionError aggregates the fail-fast failures of one execution.
+type ExecutionError struct {
+    FailedNodes []NodeError // sorted by NodeName, deterministic
+}
+```
+
+- `Error()` is a **summary only**: the failure count, each failed node's name, and
+  each node's own error string. It never includes `WorkflowData` values, inputs,
+  file paths, or internal engine state — only what the action itself returned.
+- `Unwrap() []error` exposes the per-node errors, so `errors.Is` reaches a sentinel
+  an action wrapped (e.g. `ErrExecutionFailed`) and `errors.As` extracts the aggregate.
+
+```go
+err := dag.Execute(ctx, data)
+
+var execErr *workflow.ExecutionError
+if errors.As(err, &execErr) {
+    for _, ne := range execErr.FailedNodes {
+        log.Printf("node %q failed: %v", ne.NodeName, ne.Err)
+    }
+}
+if errors.Is(err, workflow.ErrExecutionFailed) {
+    // a failed node's action wrapped the ErrExecutionFailed sentinel
+}
+```
+
+**Continue-on-error interaction:** a node marked `WithContinueOnError()` whose
+action fails is **tolerated** — it is recorded `Failed` (observe via
+`GetNodeStatus`) and does **not** appear in `ExecutionError`. A run whose only
+failures are continue-on-error nodes returns `nil` from `Execute`.
 
 ## Usage Examples
 

@@ -166,7 +166,7 @@ The Workflow Engine provides observability through:
      see the [Observability guide](../guides/observability.md)
 
 2. **Node status**:
-   - Per-node status (Pending/Running/Completed/Failed/Skipped/NotStarted) tracked
+   - Per-node status (Pending/Running/Completed/Failed/Skipped) tracked
      on the `WorkflowData`
 
 3. **Logging**:

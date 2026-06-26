@@ -108,12 +108,9 @@ func TestLoadSnapshot_ElementCountCap(t *testing.T) {
 	require.Error(t, err, "over-count section must be rejected")
 	assert.ErrorIs(t, err, ErrCorruptData, "element-count rejection must be ErrCorruptData")
 
-	// And a section AT the cap (defaultMaxElements entries) must be accepted — the
-	// guard is strictly greater-than. Build a smaller doc to prove the boundary.
-	t.Run("at-count-boundary-accepted", func(t *testing.T) {
-		// Use a modest count well under the cap to prove the success path of the
-		// same code; building exactly defaultMaxElements entries is wasteful and the
-		// strictly-greater boundary is already pinned by len(m) > cap in source.
+	// A section comfortably UNDER the cap must be accepted (the success path of
+	// the same code).
+	t.Run("under-cap-accepted", func(t *testing.T) {
 		var ok strings.Builder
 		ok.WriteString(`{"id":"ok","data":{"a":1,"b":2}}`)
 		wd2 := NewWorkflowData("ok")
@@ -121,5 +118,42 @@ func TestLoadSnapshot_ElementCountCap(t *testing.T) {
 		v, found := wd2.GetInt64("a")
 		require.True(t, found)
 		assert.Equal(t, int64(1), v)
+	})
+
+	// A section of EXACTLY defaultMaxElements entries must be ACCEPTED — the guard
+	// is strictly greater-than (len(m) > cap), so the cap value itself is allowed.
+	// This is the discriminating boundary the over-count (cap+1) case alone does
+	// NOT cover: mutation testing showed the CONDITIONALS_BOUNDARY mutant
+	// `> cap` -> `>= cap` (workflow_store.go:394 / loadSnapshotInternal) SURVIVED,
+	// because nothing exercised the exact-cap point. With `>= cap` a snapshot of
+	// exactly defaultMaxElements entries would be wrongly rejected as ErrCorruptData
+	// — so this assertion kills that mutant. (It builds ~1M short entries once;
+	// kept to a single section + skipped under -short to stay fast in quick runs.)
+	t.Run("at-exact-cap-accepted", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("builds defaultMaxElements (~1M) entries; skipped under -short")
+		}
+		n := defaultMaxElements
+		var b strings.Builder
+		b.Grow(n * 14)
+		b.WriteString(`{"id":"atcap","data":{`)
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteByte('"')
+			b.WriteByte('k')
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString(`":`)
+			b.WriteString(strconv.Itoa(i))
+		}
+		b.WriteString(`}}`)
+		payload := []byte(b.String())
+		require.LessOrEqual(t, int64(len(payload)), defaultMaxFileSize,
+			"at-cap payload must stay under the byte cap to isolate the count guard")
+
+		wd3 := NewWorkflowData("atcap")
+		require.NoError(t, wd3.LoadSnapshot(payload),
+			"a section of exactly defaultMaxElements entries must be accepted (guard is strictly >)")
 	})
 }

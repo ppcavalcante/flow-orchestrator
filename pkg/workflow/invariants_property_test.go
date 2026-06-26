@@ -463,16 +463,129 @@ func TestEngineInvariants(t *testing.T) {
 			} else {
 				data.SetNodeStatus("dep", Completed)
 			}
-			err := executeNodesInLevel(context.Background(), []*Node{child}, data, DefaultMaxConcurrency)
+			failures := executeNodesInLevel(context.Background(), []*Node{child}, data, DefaultMaxConcurrency, resolveTracer(nil))
 			if depFailed {
-				// normal Failed dep -> child must be blocked: it did not run and the
-				// level reports the unmet-dependency error.
-				return atomic.LoadInt32(&ran) == 0 && err != nil
+				// normal Failed dep -> child must be blocked: it did not run, it is
+				// marked Skipped (DEC-CHUNK3-status, S1), and Skipped is NOT a
+				// failure so the level reports no NodeError for it.
+				childStatus, _ := data.GetNodeStatus("child")
+				return atomic.LoadInt32(&ran) == 0 && childStatus == Skipped && len(failures) == 0
 			}
-			// Completed dep -> child runs, no error.
-			return atomic.LoadInt32(&ran) == 1 && err == nil
+			// Completed dep -> child runs, no failures.
+			return atomic.LoadInt32(&ran) == 1 && len(failures) == 0
 		},
 		gen.Bool(),
+	))
+
+	// --- 5c. Skipped-status soundness (DEC-CHUNK3-status, S1) ------------------
+	// Over a random DAG with random coe/fail flags, after Execute every node's
+	// final status is well-formed:
+	//   (a) totality: every node is present in the status map (no absent node);
+	//   (b) a node that RAN ends Completed or Failed (never Pending/Skipped);
+	//   (c) Skipped soundness: a Skipped node did NOT run AND has >=1 dep that is
+	//       terminal non-resolving (a non-coe Failed dep, or a Skipped dep);
+	//   (d) Skipped completeness: a node that did NOT run and HAS a terminal
+	//       non-resolving dep is NOT left Pending — it must be Skipped;
+	//   (e) a node whose deps all RESOLVED is never Skipped.
+	// RED if: the skip sweep is dropped (blocked nodes wrongly stay Pending — (d)),
+	// or skip is broadened to independent unreached nodes (a node with no
+	// non-resolving dep wrongly becomes Skipped — (e)), or coe resolution drifts
+	// (a coe-Failed dep wrongly causes a skip — (c)/(e)).
+	properties.Property("Skipped status is sound and complete (S1)", prop.ForAll(
+		func(n int, seed int64, edgePermille int, coeSeed, failSeed int64) bool {
+			s := buildDAGSpec(n, seed, edgePermille, coeSeed, failSeed)
+			ran := make([]int32, s.n)
+			actionFor := func(i int) func(context.Context, *WorkflowData) error {
+				shouldFail := s.fails[i]
+				return func(_ context.Context, _ *WorkflowData) error {
+					atomic.AddInt32(&ran[i], 1)
+					if shouldFail {
+						return fmt.Errorf("node %d intentional failure", i)
+					}
+					return nil
+				}
+			}
+			dag, ok := s.buildDAG(t, true, actionFor) // applyFlags: wire coe
+			if !ok {
+				return false
+			}
+			data := NewWorkflowData("inv")
+			execErr := dag.Execute(context.Background(), data)
+			// Cross-check with the chunk-2 contract: Execute errors iff a hard
+			// (non-coe) node actually failed. This both consumes execErr and ties
+			// the status accounting to the error-return contract.
+			anyHardFail := false
+			for i := 0; i < s.n; i++ {
+				if s.fails[i] && !s.continueOnError[i] {
+					anyHardFail = true
+					break
+				}
+			}
+			if anyHardFail && execErr == nil {
+				return false
+			}
+			if !anyHardFail && execErr != nil {
+				return false
+			}
+
+			status := make([]NodeStatus, s.n)
+			for i := 0; i < s.n; i++ {
+				st, present := data.GetNodeStatus(invNodeName(i))
+				if !present {
+					return false // (a) totality
+				}
+				status[i] = st
+			}
+
+			// depIsSkipCause mirrors the production rule: a dep is a terminal
+			// non-resolving skip cause iff it is Skipped, or Failed AND not
+			// continue-on-error (a coe-Failed dep RESOLVES, never a skip cause).
+			depIsSkipCause := func(j int) bool {
+				if status[j] == Skipped {
+					return true
+				}
+				return status[j] == Failed && !s.continueOnError[j]
+			}
+
+			for i := 0; i < s.n; i++ {
+				didRun := atomic.LoadInt32(&ran[i]) > 0
+				switch status[i] {
+				case Completed, Failed:
+					if !didRun {
+						return false // (b) a terminal run-state implies it ran
+					}
+				case Skipped:
+					if didRun {
+						return false // (c) skipped nodes did not run
+					}
+					hasSkipCause := false
+					for _, j := range s.deps[i] {
+						if depIsSkipCause(j) {
+							hasSkipCause = true
+							break
+						}
+					}
+					if !hasSkipCause {
+						return false // (c) skipped requires a non-resolving terminal dep
+					}
+				case Pending:
+					if didRun {
+						return false // a node that ran is never Pending
+					}
+					// (d) completeness: a not-run node with a skip-cause dep must
+					// NOT be left Pending.
+					for _, j := range s.deps[i] {
+						if depIsSkipCause(j) {
+							return false
+						}
+					}
+				default:
+					return false // Running must be transient; no other state at rest
+				}
+			}
+			return true
+		},
+		dagSpecGens()...,
 	))
 
 	// --- 6. Cycle-rejection THROUGH Execute -----------------------------------

@@ -4,5 +4,5 @@
 github.com/ppcavalcante/flow-orchestrator/pkg/workflow 93.4
 github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena 100.0
 github.com/ppcavalcante/flow-orchestrator/internal/workflow/memory 91.7
-github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics 86.9
+github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics 82.3
 github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils 100.0

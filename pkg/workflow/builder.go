@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // NodeBuilder provides a fluent API for configuring workflow nodes.
@@ -26,7 +28,8 @@ type WorkflowBuilder struct {
 	startNodes      []string
 	workflowID      string
 	store           WorkflowStore
-	executionConfig *ExecutionConfig // nil => DAG uses DefaultConfig()
+	executionConfig *ExecutionConfig     // nil => DAG uses DefaultConfig()
+	tracerProvider  trace.TracerProvider // nil => tracing off
 }
 
 // NewWorkflowBuilder creates a new workflow builder.
@@ -52,18 +55,21 @@ func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder {
 	return b
 }
 
-// WithStateStore is an alias for WithStore for backward compatibility.
-// Returns the builder for method chaining.
-func (b *WorkflowBuilder) WithStateStore(store WorkflowStore) *WorkflowBuilder {
-	b.store = store
-	return b
-}
-
 // WithExecutionConfig sets the execution configuration (e.g. per-level
 // concurrency) applied to the DAG produced by Build.
 // Returns the builder for method chaining.
 func (b *WorkflowBuilder) WithExecutionConfig(config ExecutionConfig) *WorkflowBuilder {
 	b.executionConfig = &config
+	return b
+}
+
+// WithTracerProvider sets the OpenTelemetry trace provider used to emit a span
+// per executed node (with a parent span per workflow run) on the DAG produced
+// by Build. Passing nil disables tracing (the default). API-only: the host
+// owns the SDK/exporter (DEC-CHUNK5).
+// Returns the builder for method chaining.
+func (b *WorkflowBuilder) WithTracerProvider(tp trace.TracerProvider) *WorkflowBuilder {
+	b.tracerProvider = tp
 	return b
 }
 
@@ -118,12 +124,6 @@ func (n *NodeBuilder) WithAction(action interface{}) *NodeBuilder {
 	return n
 }
 
-// WithRetry sets the number of retries for the node.
-// Returns the builder for method chaining.
-func (n *NodeBuilder) WithRetry(count int) *NodeBuilder {
-	return n.WithRetries(count)
-}
-
 // DependsOn specifies dependencies for this node by name.
 // Returns the builder for method chaining.
 func (n *NodeBuilder) DependsOn(deps ...string) *NodeBuilder {
@@ -166,6 +166,13 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 	// keeps its DefaultConfig().
 	if b.executionConfig != nil {
 		dag.WithExecutionConfig(*b.executionConfig)
+	}
+
+	// Apply a tracer provider if one was set. Done after WithExecutionConfig so
+	// it survives a custom config (which would otherwise reset the field) — the
+	// builder's WithTracerProvider is the source of truth for tracing here.
+	if b.tracerProvider != nil {
+		dag.WithTracerProvider(b.tracerProvider)
 	}
 
 	// Map to track node dependency counts for capacity hints

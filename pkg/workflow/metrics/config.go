@@ -76,15 +76,6 @@ func (c *Config) WithHighContentionThreshold(threshold int) *Config {
 	return c
 }
 
-// Apply applies this configuration to the default metrics collector
-func (c *Config) Apply() {
-	if c != nil && c.internalConfig != nil {
-		defaultCollector.mu.Lock()
-		defer defaultCollector.mu.Unlock()
-		defaultCollector.collector.UpdateConfig(c.internalConfig)
-	}
-}
-
 // GetInternalConfig returns the internal metrics configuration
 func (c *Config) GetInternalConfig() *internal.MetricsConfig {
 	return c.internalConfig

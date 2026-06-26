@@ -67,9 +67,9 @@ type OTelBridge struct {
 //   - flow_orchestrator.operation.duration.max   Float64ObservableGauge        s
 //   - flow_orchestrator.operation.duration.min   Float64ObservableGauge        s
 //
-// Lock-contention export is deferred for v1 (the data-operation stats live on
-// the per-instance collector, but lock-contention stats are recorded to the
-// global collector — exporting near-zero per-instance lock data would mislead).
+// Lock-contention is not exported: the lock-contention recording apparatus
+// (the instrumented mutex) was removed as dead code, so no lock-contention
+// metrics are collected.
 func NewOTelBridge(c *MetricsCollector, mp metric.MeterProvider) (*OTelBridge, error) {
 	if c == nil {
 		return nil, fmt.Errorf("metrics: NewOTelBridge requires a non-nil *MetricsCollector")

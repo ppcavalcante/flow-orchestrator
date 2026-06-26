@@ -129,27 +129,6 @@ func TestWorkflowBuilderWithStore(t *testing.T) {
 	}
 }
 
-func TestWorkflowBuilderWithStateStore(t *testing.T) {
-	// Create a new workflow builder
-	builder := NewWorkflowBuilder()
-
-	// Create a mock store
-	store := &mockStoreForBuilder{}
-
-	// Set the store using the alias method
-	returnedBuilder := builder.WithStateStore(store)
-
-	// Check that the store was set correctly
-	if builder.store != store {
-		t.Error("Expected store to be set")
-	}
-
-	// Check that the method returns the builder for chaining
-	if returnedBuilder != builder {
-		t.Error("WithStateStore did not return the builder for chaining")
-	}
-}
-
 func TestWorkflowBuilderAddNode(t *testing.T) {
 	// Create a new workflow builder
 	builder := NewWorkflowBuilder()
@@ -331,26 +310,6 @@ func TestNodeBuilderWithAction(t *testing.T) {
 	err = nodeBuilder.action.Execute(context.Background(), NewWorkflowData("test"))
 	if err == nil {
 		t.Error("Expected default action to return an error")
-	}
-}
-
-func TestNodeBuilderWithRetry(t *testing.T) {
-	// Create a new workflow builder and node
-	builder := NewWorkflowBuilder()
-	nodeBuilder := builder.AddNode("test-node")
-
-	// Set retry count
-	retryCount := 3
-	returnedBuilder := nodeBuilder.WithRetry(retryCount)
-
-	// Check that the retry count was set correctly
-	if nodeBuilder.retryCount != retryCount {
-		t.Errorf("Expected retryCount to be %d, got %d", retryCount, nodeBuilder.retryCount)
-	}
-
-	// Check that the method returns the builder for chaining
-	if returnedBuilder != nodeBuilder {
-		t.Error("WithRetry did not return the builder for chaining")
 	}
 }
 

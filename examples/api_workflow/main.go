@@ -616,7 +616,7 @@ func main() {
 
 	// Create workflow using the builder API
 	builder := workflow.NewWorkflowBuilder().
-		WithStateStore(workflowStore)
+		WithStore(workflowStore)
 
 	// Build workflow DAG with fluent API
 	builder.AddStartNode("fetch").

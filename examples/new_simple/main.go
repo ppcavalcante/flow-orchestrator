@@ -29,7 +29,7 @@ func main() {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("simple-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add a fetch data node - start of the workflow
 	builder.AddStartNode("fetch").

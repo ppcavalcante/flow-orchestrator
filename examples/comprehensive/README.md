@@ -31,8 +31,6 @@ The example includes three different workflow scenarios:
 
 The example allows you to configure various aspects of the workflow system:
 
-- `UseArena`: Enable/disable arena-based memory management
-- `ArenaBlockSize`: Configure the size of memory blocks in the arena
 - `EnableMetrics`: Enable/disable metrics collection
 - `MetricsSamplingRate`: Set the sampling rate for metrics
 - `WorkerCount`: Configure the number of worker goroutines
@@ -55,8 +53,7 @@ The example will run all three workflows in sequence and display:
 1. Configuration settings
 2. Execution progress for each workflow
 3. Results from each workflow
-4. Memory usage statistics (if arena is enabled)
-5. Performance metrics (if metrics are enabled)
+4. Performance metrics (if metrics are enabled)
 
 ## Modifying the Example
 

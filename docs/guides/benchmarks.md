@@ -182,10 +182,15 @@ Based on the benchmark results, the following optimization strategies are recomm
 
 ### 2. Memory Optimization
 
-- Use arena allocation for medium-sized objects (256-1024 bytes)
-- Employ string interning for workflows with many repeated strings
-- Buffer pooling for serialization is applied internally by the engine (not a user-facing knob)
-- Reset arenas instead of creating new ones for repeated operations
+The engine's memory optimizations — arena allocation, string interning, and
+buffer/node pooling — are internal implementation details (under
+`internal/workflow/`) applied automatically; there is no public API to construct
+or tune them. The benchmark numbers above characterize how they behave, not knobs
+you set. To keep allocation low in your own code:
+
+- Reuse a single `WorkflowData` across a run rather than reconstructing it
+- Prefer the typed `Key[T]` / string accessors over re-marshalling values
+- Break very large workflows into smaller sub-workflows
 
 ### 3. Concurrency Optimization
 
@@ -199,7 +204,7 @@ Based on the benchmark results, the following optimization strategies are recomm
 - Keep workflow data compact and focused
 - Clean up temporary data when no longer needed
 - Use appropriate data types (avoid interface{} when possible)
-- Consider `ReadOptimizedWorkflowDataConfig` for read-heavy workflows
+- Size the data maps for your workload via `WorkflowDataConfig.ExpectedNodes` / `ExpectedData`
 
 ## Running Your Own Benchmarks
 

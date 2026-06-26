@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils"
-	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 )
 
@@ -29,10 +28,6 @@ type WorkflowData struct {
 
 	// String interning for efficiency
 	stringInterner *stringInterner
-
-	// Add arena field to the WorkflowData struct
-	arena      *arena.Arena      // Arena for memory management
-	stringPool *arena.StringPool // String pool for string interning
 }
 
 // NewWorkflowData creates a new workflow data instance with the given ID.
@@ -63,47 +58,6 @@ func NewWorkflowDataWithConfig(id string, config WorkflowDataConfig) *WorkflowDa
 		metrics:        metricsCollector,
 		stringInterner: stringInterner,
 	}
-}
-
-// NewWorkflowDataWithArena creates a new workflow data instance with an arena allocator.
-// If blockSize is not provided, a default block size will be used.
-func NewWorkflowDataWithArena(id string, config WorkflowDataConfig, blockSize ...int) *WorkflowData {
-	// Create a metrics collector with the specified configuration
-	var metricsCollector *metrics.MetricsCollector
-	if config.MetricsConfig != nil {
-		metricsCollector = metrics.NewMetricsCollectorWithConfig(config.MetricsConfig.GetInternalConfig())
-	} else {
-		metricsCollector = metrics.NewMetricsCollector()
-	}
-
-	// Create an arena allocator with the specified block size
-	var a *arena.Arena
-	if len(blockSize) > 0 && blockSize[0] > 0 {
-		a = arena.NewArenaWithBlockSize(blockSize[0])
-	} else {
-		a = arena.NewArena()
-	}
-
-	// Create a string pool for interning strings
-	stringPool := arena.NewStringPool(a)
-
-	// Create the workflow data with arena-backed maps
-	return &WorkflowData{
-		ID:             id,
-		data:           make(map[string]interface{}, config.ExpectedData),
-		nodeStatus:     make(map[string]NodeStatus, config.ExpectedNodes),
-		outputs:        make(map[string]interface{}, config.ExpectedNodes),
-		metrics:        metricsCollector,
-		stringInterner: nil, // Not used with arena
-		arena:          a,
-		stringPool:     stringPool,
-	}
-}
-
-// NewWorkflowDataWithArenaBlockSize creates a new workflow data instance with arena allocation and a specific block size.
-// This function is maintained for backward compatibility.
-func NewWorkflowDataWithArenaBlockSize(id string, config WorkflowDataConfig, blockSize int) *WorkflowData {
-	return NewWorkflowDataWithArena(id, config, blockSize)
 }
 
 // Set stores a value in the workflow data.
@@ -289,12 +243,7 @@ func (w *WorkflowData) metricsDisabled() bool {
 // internKey interns a string key to reduce memory usage.
 // This is an internal helper method.
 func (w *WorkflowData) internKey(key string) string {
-	// If we're using an arena, use the string pool
-	if w.stringPool != nil {
-		return w.stringPool.Intern(key)
-	}
-
-	// Otherwise use the global string interner
+	// Use the global string interner when present.
 	if w.stringInterner != nil {
 		return w.stringInterner.Intern(key)
 	}
@@ -521,11 +470,6 @@ func (w *WorkflowData) GetAllNodeStatuses() map[string]NodeStatus {
 	return result
 }
 
-// ListNodeStatuses is an alias for GetAllNodeStatuses for backward compatibility
-func (w *WorkflowData) ListNodeStatuses() map[string]NodeStatus {
-	return w.GetAllNodeStatuses()
-}
-
 // ForEach iterates over all key-value pairs in the data map
 func (w *WorkflowData) ForEach(fn func(key string, value interface{})) {
 	w.mu.RLock()
@@ -563,7 +507,6 @@ func (w *WorkflowData) ForEachOutput(fn func(nodeName string, output interface{}
 
 // Clone creates a deep copy of the WorkflowData.
 // The clone gets its own metrics collector and string interner to avoid shared mutable state.
-// Arena and string pool are not shared — the clone uses a standard string interner instead.
 func (w *WorkflowData) Clone() *WorkflowData {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -825,49 +768,6 @@ func (w *WorkflowData) LoadFromJSON(filePath string) error {
 	return nil
 }
 
-// SaveToFlatBuffer saves the workflow data to a file.
-// NOTE: Currently uses JSON serialization internally. For true FlatBuffer persistence,
-// use FlatBuffersStore.Save() instead.
-//
-// Deprecated: Use FlatBuffersStore for actual FlatBuffer serialization.
-func (w *WorkflowData) SaveToFlatBuffer(filePath string) error {
-	// Create a snapshot of the data (JSON format)
-	data, err := w.createSnapshot()
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
-	// Write the file
-	err = os.WriteFile(filePath, data, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
-	}
-
-	return nil
-}
-
-// LoadFromFlatBuffer loads the workflow data from a file.
-// NOTE: Currently uses JSON deserialization internally. For true FlatBuffer persistence,
-// use FlatBuffersStore.Load() instead.
-//
-// Deprecated: Use FlatBuffersStore for actual FlatBuffer deserialization.
-func (w *WorkflowData) LoadFromFlatBuffer(filePath string) error {
-	// Bounds guard: same bounded read as LoadFromJSON (this method also decodes a
-	// JSON snapshot internally). Reject over-cap input as ErrCorruptData.
-	data, err := readBoundedFile(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-
-	// Load snapshot (JSON format)
-	err = w.LoadSnapshot(data)
-	if err != nil {
-		return fmt.Errorf("failed to load snapshot: %w", err)
-	}
-
-	return nil
-}
-
 // Keys returns all keys in the data map
 func (w *WorkflowData) Keys() []string {
 	w.mu.RLock()
@@ -888,42 +788,6 @@ func (w *WorkflowData) HasKey(key string) bool {
 	// No interning on the read path (see Get).
 	_, exists := w.data[key]
 	return exists
-}
-
-// ResetArena resets the arena and clears all data
-func (w *WorkflowData) ResetArena() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.arena != nil {
-		w.arena.Reset()
-	}
-	if w.stringPool != nil {
-		w.stringPool.Reset()
-	}
-
-	// Clear all maps
-	w.data = make(map[string]interface{})
-	w.nodeStatus = make(map[string]NodeStatus)
-	w.outputs = make(map[string]interface{})
-}
-
-// GetArenaStats returns statistics about the arena and string pool if they are being used
-func (w *WorkflowData) GetArenaStats() map[string]map[string]int64 {
-	stats := make(map[string]map[string]int64)
-
-	if w.arena != nil {
-		w.mu.RLock()
-		defer w.mu.RUnlock()
-
-		// Get arena stats
-		stats["arena"] = w.arena.Stats()
-
-		// Get string pool stats
-		stats["stringPool"] = w.stringPool.Stats()
-	}
-
-	return stats
 }
 
 // WorkflowDataConfig represents the configuration for workflow data

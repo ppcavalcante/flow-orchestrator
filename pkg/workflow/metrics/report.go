@@ -22,11 +22,6 @@ func NewReporter(collector *MetricsCollector) *Reporter {
 	}
 }
 
-// DefaultReporter returns a reporter for the default metrics collector
-func DefaultReporter() *Reporter {
-	return NewReporter(defaultCollector)
-}
-
 // WriteReport writes a human-readable report of the collected metrics to the given writer
 func (r *Reporter) WriteReport(w io.Writer) error {
 	report := r.generateReport()
@@ -187,19 +182,4 @@ func (r *Reporter) formatOperationStats(sb *strings.Builder, ops []OperationType
 			fmt.Fprintf(sb, "  Avg Time: %s\n", FormatDuration(stats.AvgTimeNs))
 		}
 	}
-}
-
-// WriteReport writes a report using the default reporter
-func WriteReport(w io.Writer) error {
-	return DefaultReporter().WriteReport(w)
-}
-
-// WriteOperationTimingReport writes an operation timing report using the default reporter
-func WriteOperationTimingReport(w io.Writer) error {
-	return DefaultReporter().WriteOperationTimingReport(w)
-}
-
-// WriteSlowOperationsReport writes a slow operations report using the default reporter
-func WriteSlowOperationsReport(w io.Writer, threshold time.Duration) error {
-	return DefaultReporter().WriteSlowOperationsReport(w, threshold)
 }

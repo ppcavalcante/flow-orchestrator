@@ -12,10 +12,8 @@ import (
 
 // Configuration options
 type Config struct {
-	UseArena       bool
-	ArenaBlockSize int
-	WorkerCount    int
-	Pattern        string // "linear", "fan_out", "fan_in", "diamond", "complex"
+	WorkerCount int
+	Pattern     string // "linear", "fan_out", "fan_in", "diamond", "complex"
 }
 
 func main() {
@@ -27,16 +25,12 @@ func main() {
 
 	// Define configuration
 	config := Config{
-		UseArena:       true,
-		ArenaBlockSize: 8192,
-		WorkerCount:    runtime.NumCPU(),
-		Pattern:        pattern,
+		WorkerCount: runtime.NumCPU(),
+		Pattern:     pattern,
 	}
 
 	fmt.Printf("=== DAG Pattern Example: %s ===\n", config.Pattern)
 	fmt.Printf("Configuration:\n")
-	fmt.Printf("- Arena-based memory: %v\n", config.UseArena)
-	fmt.Printf("- Arena block size: %d bytes\n", config.ArenaBlockSize)
 	fmt.Printf("- Worker count: %d\n", config.WorkerCount)
 	fmt.Println()
 
@@ -72,14 +66,6 @@ func createWorkflowData(config Config, id string) *workflow.WorkflowData {
 	dataConfig.ExpectedNodes = 20
 	dataConfig.ExpectedData = 50
 
-	// Create workflow data based on configuration
-	if config.UseArena {
-		if config.ArenaBlockSize > 0 {
-			return workflow.NewWorkflowDataWithArenaBlockSize(id, dataConfig, config.ArenaBlockSize)
-		}
-		return workflow.NewWorkflowDataWithArena(id, dataConfig)
-	}
-
 	return workflow.NewWorkflowDataWithConfig(id, dataConfig)
 }
 
@@ -113,7 +99,7 @@ func runLinearWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("linear-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes in a linear pattern
 	builder.AddStartNode("node-a").
@@ -167,7 +153,7 @@ func runFanOutWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("fan-out-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes in a fan-out pattern
 	builder.AddStartNode("source").
@@ -221,7 +207,7 @@ func runFanInWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("fan-in-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes in a fan-in pattern
 	builder.AddStartNode("source-1").
@@ -273,7 +259,7 @@ func runDiamondWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("diamond-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes in a diamond pattern
 	builder.AddStartNode("source").
@@ -327,7 +313,7 @@ func runComplexWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("complex-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes in a complex pattern
 	builder.AddStartNode("init").
@@ -417,25 +403,6 @@ func printWorkflowResults(data *workflow.WorkflowData) {
 		timestamp, ok := data.GetString(nodeName + "_timestamp")
 		if ok {
 			fmt.Printf("- %s: %s\n", nodeName, timestamp)
-		}
-	}
-
-	// Print arena stats if available
-	stats := data.GetArenaStats()
-	if len(stats) > 0 {
-		fmt.Println("\nArena Memory Statistics:")
-
-		if arenaStats, ok := stats["arena"]; ok {
-			fmt.Printf("- Total allocated: %d bytes\n", arenaStats["totalAllocated"])
-			fmt.Printf("- Current used: %d bytes\n", arenaStats["currentUsed"])
-			fmt.Printf("- Block size: %d bytes\n", arenaStats["blockSize"])
-			fmt.Printf("- Block count: %d\n", arenaStats["blockCount"])
-		}
-
-		if poolStats, ok := stats["stringPool"]; ok {
-			fmt.Printf("- String pool size: %d strings\n", poolStats["size"])
-			fmt.Printf("- String pool hits: %d\n", poolStats["hits"])
-			fmt.Printf("- String pool misses: %d\n", poolStats["misses"])
 		}
 	}
 }

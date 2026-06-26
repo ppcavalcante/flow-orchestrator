@@ -1,7 +1,7 @@
 package workflow
 
 // Version is the current version of Flow Orchestrator
-const Version = "0.7.4-alpha"
+const Version = "0.8.0-alpha"
 
 // VersionInfo contains detailed version information about the Flow Orchestrator library.
 // This can be used by applications to check compatibility and report issues.
@@ -13,8 +13,8 @@ var VersionInfo = struct {
 	BuildMeta  string
 }{
 	Major:      0,
-	Minor:      7,
-	Patch:      4,
+	Minor:      8,
+	Patch:      0,
 	PreRelease: "alpha",
 	BuildMeta:  "",
 }

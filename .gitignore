@@ -34,3 +34,6 @@ ANVIL-TEAM.md
 # Local experiment sandbox (not part of the library)
 playground/
 .claude/
+
+# TLC model-checker scratch output (timestamped run dirs under specs/)
+specs/states/

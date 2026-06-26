@@ -10,18 +10,22 @@ import (
 type NodeStatus string
 
 const (
-	// Pending indicates the node has not started execution
+	// Pending is the initial state: the node has not started execution. Every
+	// node in a DAG is set to Pending when Execute begins, so a node that is
+	// never reached (e.g. a run that halted before it, with no failed/skipped
+	// dependency of its own) remains observably Pending rather than absent.
 	Pending NodeStatus = "pending"
 	// Running indicates the node is currently executing
 	Running NodeStatus = "running"
 	// Completed indicates the node has completed successfully
 	Completed NodeStatus = "completed"
-	// Failed indicates the node has failed
+	// Failed indicates the node's action returned an error
 	Failed NodeStatus = "failed"
-	// Skipped indicates the node was skipped due to a dependency failure
+	// Skipped indicates the node did not run because at least one dependency was
+	// in a terminal non-resolving state — a non-continue-on-error dependency
+	// that Failed, or a dependency that was itself Skipped. Skipped is
+	// transitive and is NOT a failure (it never appears in ExecutionError).
 	Skipped NodeStatus = "skipped"
-	// NotStarted is used for workflow orchestration optimization
-	NotStarted NodeStatus = "not_started"
 )
 
 // Node represents a unit of work in a workflow.

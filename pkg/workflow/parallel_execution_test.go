@@ -177,10 +177,11 @@ func TestParallelExecutionWithDefaultConfig(t *testing.T) {
 	node2 := NewNode("node2", action2)
 	node3 := NewNode("node3", action3)
 
-	// Test parallel execution via the live level-executor.
+	// Test parallel execution via the live level-executor; no failures on the
+	// happy path.
 	nodes := []*Node{node1, node2, node3}
-	err := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency)
-	require.NoError(t, err)
+	failures := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
+	require.Empty(t, failures)
 
 	// Verify all nodes were executed
 	assert.True(t, action1.executed)
@@ -210,10 +211,18 @@ func TestParallelExecutionWithError(t *testing.T) {
 	node2 := NewNode("node2", action2)
 	node3 := NewNode("node3", action3)
 
-	// Test parallel execution via the live level-executor.
+	// Test parallel execution via the live level-executor. The failing node is
+	// returned as a NodeError; the slice is non-empty.
 	nodes := []*Node{node1, node2, node3}
-	err := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency)
-	require.Error(t, err)
+	failures := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
+	require.NotEmpty(t, failures)
+	var sawNode2 bool
+	for _, ne := range failures {
+		if ne.NodeName == "node2" {
+			sawNode2 = true
+		}
+	}
+	assert.True(t, sawNode2, "expected node2 among the reported failures, got %+v", failures)
 
 	// Verify node statuses
 	status2, _ := data.GetNodeStatus("node2")
@@ -235,11 +244,18 @@ func TestParallelExecutionWithContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	// Test parallel execution with timeout via the live level-executor.
+	// Test parallel execution with timeout via the live level-executor. The
+	// timed-out nodes are reported as NodeErrors carrying the deadline error.
 	nodes := []*Node{node1, node2}
-	err := executeNodesInLevel(ctx, nodes, data, DefaultConfig().MaxConcurrency)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "context deadline exceeded")
+	failures := executeNodesInLevel(ctx, nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
+	require.NotEmpty(t, failures)
+	var sawDeadline bool
+	for _, ne := range failures {
+		if strings.Contains(ne.Error(), "context deadline exceeded") {
+			sawDeadline = true
+		}
+	}
+	assert.True(t, sawDeadline, "expected a context-deadline failure, got %+v", failures)
 
 	// Verify that actions were not completed
 	assert.False(t, action1.executed)

@@ -22,10 +22,8 @@ const (
 
 // Configuration options
 type Config struct {
-	UseArena       bool
-	ArenaBlockSize int
-	WorkerCount    int
-	ErrorType      string // "retry", "timeout", "conditional", "fallback", "circuit_breaker"
+	WorkerCount int
+	ErrorType   string // "retry", "timeout", "conditional", "fallback", "circuit_breaker"
 }
 
 func main() {
@@ -37,16 +35,12 @@ func main() {
 
 	// Define configuration
 	config := Config{
-		UseArena:       true,
-		ArenaBlockSize: 8192,
-		WorkerCount:    runtime.NumCPU(),
-		ErrorType:      errorType,
+		WorkerCount: runtime.NumCPU(),
+		ErrorType:   errorType,
 	}
 
 	fmt.Printf("=== Error Handling Example: %s ===\n", config.ErrorType)
 	fmt.Printf("Configuration:\n")
-	fmt.Printf("- Arena-based memory: %v\n", config.UseArena)
-	fmt.Printf("- Arena block size: %d bytes\n", config.ArenaBlockSize)
 	fmt.Printf("- Worker count: %d\n", config.WorkerCount)
 	fmt.Println()
 
@@ -81,14 +75,6 @@ func createWorkflowData(config Config, id string) *workflow.WorkflowData {
 	dataConfig := workflow.DefaultWorkflowDataConfig()
 	dataConfig.ExpectedNodes = 20
 	dataConfig.ExpectedData = 50
-
-	// Create workflow data based on configuration
-	if config.UseArena {
-		if config.ArenaBlockSize > 0 {
-			return workflow.NewWorkflowDataWithArenaBlockSize(id, dataConfig, config.ArenaBlockSize)
-		}
-		return workflow.NewWorkflowDataWithArena(id, dataConfig)
-	}
 
 	return workflow.NewWorkflowDataWithConfig(id, dataConfig)
 }
@@ -261,7 +247,7 @@ func runRetryWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("retry-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes
 	builder.AddStartNode("init").
@@ -346,7 +332,7 @@ func runTimeoutWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("timeout-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes
 	builder.AddStartNode("init").
@@ -432,7 +418,7 @@ func runConditionalErrorWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("conditional-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes
 	builder.AddStartNode("init").
@@ -521,7 +507,7 @@ func runFallbackWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("fallback-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes
 	builder.AddStartNode("init").
@@ -602,7 +588,7 @@ func runCircuitBreakerWorkflow(config Config, store workflow.WorkflowStore) {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("circuit-breaker-workflow").
-		WithStateStore(store)
+		WithStore(store)
 
 	// Add workflow nodes
 	builder.AddStartNode("init").
@@ -687,25 +673,6 @@ func runCircuitBreakerWorkflow(config Config, store workflow.WorkflowStore) {
 }
 
 // printWorkflowResults prints the results of the workflow execution
-func printWorkflowResults(data *workflow.WorkflowData) {
+func printWorkflowResults(_ *workflow.WorkflowData) {
 	fmt.Println("\nWorkflow Results:")
-
-	// Print arena stats if available
-	stats := data.GetArenaStats()
-	if len(stats) > 0 {
-		fmt.Println("\nArena Memory Statistics:")
-
-		if arenaStats, ok := stats["arena"]; ok {
-			fmt.Printf("- Total allocated: %d bytes\n", arenaStats["totalAllocated"])
-			fmt.Printf("- Current used: %d bytes\n", arenaStats["currentUsed"])
-			fmt.Printf("- Block size: %d bytes\n", arenaStats["blockSize"])
-			fmt.Printf("- Block count: %d\n", arenaStats["blockCount"])
-		}
-
-		if poolStats, ok := stats["stringPool"]; ok {
-			fmt.Printf("- String pool size: %d strings\n", poolStats["size"])
-			fmt.Printf("- String pool hits: %d\n", poolStats["hits"])
-			fmt.Printf("- String pool misses: %d\n", poolStats["misses"])
-		}
-	}
 }

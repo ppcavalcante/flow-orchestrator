@@ -30,7 +30,6 @@ package** and its intended-public subpackages:
   the `*WorkflowDataConfig` constructors, `ExecutionConfig`, the error sentinels, and
   `Version`/`VersionInfo`.
 - `pkg/workflow/metrics` — the metrics collector and its configuration.
-- `pkg/workflow/arena` — the arena allocator perf knob.
 
 **`internal/**` is NOT public API.** The Go toolchain forbids importing it from outside this
 module, and we make no compatibility promise about it. As of `v0.3.0` this includes the
@@ -88,7 +87,7 @@ FlatBuffers path — see the `v0.7.x` change closing M5-SEC-01):
     checking, this is a layered bounds guard *ahead of* the decode (size cap, root-offset and
     minimum-length sanity check, per-element count caps), with the M1 `recover()` left only as
     a residual backstop for deep-offset cases the cheap pre-walk cannot reach.
-  - For the JSON paths (`JSONFileStore.Load`, `WorkflowData.LoadFromJSON`/`LoadFromFlatBuffer`),
+  - For the JSON paths (`JSONFileStore.Load`, `WorkflowData.LoadFromJSON`),
     the `encoding/json` decoder returns an error rather than panicking by construction; the
     added guards are the size and element-count caps below.
 - **Oversized input is rejected, not loaded.** Every load path reads through an

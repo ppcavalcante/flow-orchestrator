@@ -166,3 +166,39 @@ jobs:
             echo "Running example: $dir"
             cd $dir && go build -v && cd -
           done
+
+  mutation:
+    name: Mutation testing (informational, non-blocking)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING by design: mutation testing is the rung above coverage% but is
+    # too slow and too sensitive to equivalent-mutant churn to gate the build on.
+    # continue-on-error makes the job report its result without ever failing CI —
+    # it exists to surface NEW real test gaps over time (read the log, don't trust
+    # the exit code). See docs/development/mutation_testing.md for the accepted-
+    # survivor baseline + how to triage.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.11'
+          cache: true
+      - name: Install FlatBuffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatbuffers-compiler
+      - name: Generate FlatBuffers code
+        run: make generate-fb
+      - name: Run go-gremlins (scoped to .gremlins.yaml)
+        # gremlins is a DEV tool — pinned via `go run @v0.6.0`, NOT added to go.mod.
+        # Two flags are load-bearing (see docs/development/mutation_testing.md):
+        #   * config .gremlins.yaml scopes mutation to the 6 core files. Its
+        #     exclude-files patterns are RELATIVE TO THE RUN TARGET (./pkg/workflow),
+        #     e.g. "action.go" / "metrics/.*\.go" — NOT "pkg/workflow/action.go".
+        #   * --timeout-coefficient 60: gremlins derives the per-mutant timeout
+        #     from its ~1s coverage run, not the ~13s real suite (gopter property
+        #     suites dominate). The default 3x times out EVERY mutant (false 0%);
+        #     60x (~69s budget) clears the real suite.
+        run: |
+          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 \
+            unleash --config .gremlins.yaml --timeout-coefficient 60 ./pkg/workflow

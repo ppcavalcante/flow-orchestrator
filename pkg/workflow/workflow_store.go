@@ -56,10 +56,11 @@ func validateWorkflowID(workflowID string) error {
 	return nil
 }
 
-// JSONFileStore is a file-based implementation of WorkflowStore that uses JSON serialization.
-// This is a temporary implementation until we fully integrate FlatBuffers
-//
-// Deprecated: Use FlatBuffersStore for better performance
+// JSONFileStore is a file-based implementation of WorkflowStore that uses JSON
+// serialization. It is a first-class, supported store: JSON is the human-readable,
+// recovery-friendly persistence format. Use FlatBuffersStore instead when you want
+// the faster binary format; the two are interchangeable behind the WorkflowStore
+// interface. Both Load paths are bounded (io.LimitReader) against oversized input.
 type JSONFileStore struct {
 	baseDir string
 	mu      sync.RWMutex
@@ -263,10 +264,11 @@ func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStor
 		workflowID := filename[:len(filename)-5] // Remove ".json"
 
 		// Load the workflow data from JSON (note: Load also takes RLock, so
-		// we need to read the file directly here to avoid double-locking)
+		// we read the file directly here to avoid double-locking). Use the same
+		// bounded read (io.LimitReader(cap+1)) as Load so a migration cannot be
+		// driven to unbounded allocation by an oversized .json file.
 		filePath := filepath.Join(s.baseDir, workflowID+".json")
-		// nolint:gosec // This is an internal function with controlled file paths
-		jsonData, err := os.ReadFile(filePath)
+		jsonData, err := readBoundedFile(filePath)
 		if err != nil {
 			s.mu.RUnlock()
 			return nil, fmt.Errorf("failed to read workflow %s: %w", workflowID, err)
@@ -331,8 +333,8 @@ const defaultMaxElements int = 1 << 20 // 1,048,576 entries per vector
 var openForRead = func(path string) (io.ReadCloser, error) { return os.Open(path) }
 
 // readBoundedFile reads an entire file through io.LimitReader(cap+1) — the same
-// bounded-read discipline as JSONFileStore.Load / FlatBuffersStore.Load — so the
-// WorkflowData JSON load helpers (LoadFromJSON / LoadFromFlatBuffer) share one
+// bounded-read discipline as JSONFileStore.Load / FlatBuffersStore.Load — so
+// WorkflowData.LoadFromJSON and JSONFileStore.MigrateToFlatBuffers share one
 // symmetric size bound. It bounds memory regardless of on-disk size and rejects
 // over-cap input as ErrCorruptData (cap+1 distinguishes at-cap from over-cap).
 // openForRead is the same test seam used by Load; the open error (incl.
@@ -952,8 +954,6 @@ func statusToFBStatus(status NodeStatus) fb.NodeStatus {
 		return fb.NodeStatusFailed
 	case Skipped:
 		return fb.NodeStatusSkipped
-	case NotStarted:
-		return fb.NodeStatusPending // Map NotStarted to Pending for FB compatibility
 	default:
 		return fb.NodeStatusPending
 	}

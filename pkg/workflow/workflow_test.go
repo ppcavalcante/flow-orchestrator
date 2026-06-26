@@ -262,9 +262,9 @@ func TestWorkflowBuilderOperations(t *testing.T) {
 		require.Contains(t, err.Error(), "has no action defined")
 	})
 
-	t.Run("NewWorkflowFromBuilder", func(t *testing.T) {
-		// Test that NewWorkflowFromBuilder returns a new builder
-		builder := NewWorkflowFromBuilder()
+	t.Run("FromBuilder_freshBuilder", func(t *testing.T) {
+		// Test that a fresh builder can drive FromBuilder end to end
+		builder := NewWorkflowBuilder()
 		require.NotNil(t, builder)
 		require.Empty(t, builder.nodes)
 		require.Empty(t, builder.startNodes)

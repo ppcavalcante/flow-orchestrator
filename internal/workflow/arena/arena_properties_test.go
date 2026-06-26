@@ -11,7 +11,13 @@ import (
 
 // TestArenaProperties contains property-based tests for the arena memory management system
 func TestArenaProperties(t *testing.T) {
-	parameters := gopter.DefaultTestParameters()
+	// Pin the RNG seed for reproducibility (uses gopter's locked, goroutine-safe
+	// source — these properties spawn workers). With a correct (true-for-all-
+	// inputs) bound this only removes run-to-run noise; it does NOT mask a wrong
+	// property. The default time-based seed previously made the broken
+	// `wasted <= total` bound flaky, surfacing only under -count=1; correctness
+	// of the bound is the primary fix, this pin is just determinism on top.
+	parameters := gopter.DefaultTestParametersWithSeed(0x5EEDA4E4)
 	parameters.MinSuccessfulTests = 100
 	parameters.MaxShrinkCount = 10
 
@@ -169,32 +175,48 @@ func TestArenaProperties(t *testing.T) {
 		gen.IntRange(2, 8), // Number of concurrent workers
 	))
 
-	// Property: Block allocation strategy is efficient
-	properties.Property("efficient block allocation", prop.ForAll(
+	// Property: per-allocation alignment overhead is bounded.
+	//
+	// Alloc rounds each request up to an 8-byte boundary
+	// (alignedSize = (size+7) & ^7) and records the padding (alignedSize - size)
+	// as wastedBytes. The TRUE invariant is therefore per-allocation, not
+	// relative to the total bytes requested: every allocation wastes AT MOST 7
+	// bytes (the maximum 8-byte-alignment padding, hit when size % 8 == 1), so
+	//
+	//	wastedBytes <= 7 * numAllocations.
+	//
+	// The previous bound (`wastedBytes <= totalAllocated`) was mathematically
+	// wrong: for a single 1-byte allocation, wasted=7 and totalAllocated=1, so
+	// 7 <= 1 is false. It only passed at lucky seeds where large allocations
+	// dominated; -count=1 on the full suite surfaced the flake. This bound is
+	// true for ALL inputs by construction yet still bites: if the arena ever
+	// padded to a coarser boundary (e.g. 16 bytes), a size%8==1 allocation would
+	// waste up to 15 > 7 and falsify it (mutation-verified). Equality is
+	// achievable (all sizes % 8 == 1), so the bound is tight, not slack.
+	properties.Property("per-allocation alignment overhead is bounded", prop.ForAll(
 		func(allocSizes []int) bool {
 			if len(allocSizes) == 0 {
 				return true
 			}
 
 			a := NewArena()
-			totalAllocated := 0
+			numAllocations := 0
 
-			// Perform allocations
+			// Perform allocations. Alloc records waste only for size > 0
+			// (size <= 0 is skipped here; size == 0 returns nil without recording),
+			// so the allocation count must match the recorded-waste population.
 			for _, size := range allocSizes {
 				if size <= 0 {
 					continue
 				}
 				_ = a.Alloc(size)
-				totalAllocated += size
+				numAllocations++
 			}
 
-			// Get stats
+			// Each allocation contributes at most 7 bytes of alignment padding.
 			stats := a.Stats()
-
-			// Verify that wasted bytes are reasonable (less than 50% of total)
-			// This is a heuristic - the actual threshold depends on the allocation pattern
 			wastedBytes := stats["wastedBytes"]
-			return wastedBytes <= int64(totalAllocated)
+			return wastedBytes <= int64(7*numAllocations)
 		},
 		gen.SliceOf(gen.IntRange(1, 1024)).Map(func(sizes []int) []int {
 			if len(sizes) > 50 {

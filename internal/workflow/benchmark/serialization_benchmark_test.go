@@ -49,36 +49,6 @@ func BenchmarkSerialization(b *testing.B) {
 					}
 				}
 			})
-
-			// FlatBuffer Serialization
-			b.Run("FlatBuffer_Save", func(b *testing.B) {
-				fbPath := fmt.Sprintf("%s/workflow_%d.fb", tempDir, nodeCount)
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					err := workflowData.SaveToFlatBuffer(fbPath)
-					if err != nil {
-						b.Fatalf("Failed to save FlatBuffer: %v", err)
-					}
-				}
-			})
-
-			// FlatBuffer Deserialization
-			fbPath := fmt.Sprintf("%s/workflow_%d.fb", tempDir, nodeCount)
-			err = workflowData.SaveToFlatBuffer(fbPath)
-			if err != nil {
-				b.Fatalf("Failed to create FlatBuffer file for load test: %v", err)
-			}
-
-			b.Run("FlatBuffer_Load", func(b *testing.B) {
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					data := workflow.NewWorkflowData(fmt.Sprintf("benchmark_%d", i))
-					err := data.LoadFromFlatBuffer(fbPath)
-					if err != nil {
-						b.Fatalf("Failed to load FlatBuffer: %v", err)
-					}
-				}
-			})
 		})
 	}
 }

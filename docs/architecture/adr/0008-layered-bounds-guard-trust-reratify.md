@@ -16,7 +16,7 @@ decisions: `DEC-M4-mechanism` (the guard) and `DEC-M4-trust-reratify` (the contr
 ## Context
 
 `FlatBuffersStore.Load` is the single FlatBuffers root-deserialize in the repository
-(`pkg/workflow/workflow_store.go`; the `LoadSnapshot` / `LoadFromFlatBuffer` paths decode JSON,
+(`pkg/workflow/workflow_store.go`; the `LoadSnapshot` / `LoadFromJSON` paths decode JSON,
 a separate bounds-safe trust domain). After M1 it was protected only by a `recover()` that
 converted an accessor panic into an error. That is crash-stop, not rejection: a malformed,
 truncated, or absurd-count file still entered the decode and relied on a panic to be caught.

@@ -1,14 +1,23 @@
-# Observability (OpenTelemetry Metrics)
+# Observability (OpenTelemetry Metrics & Tracing)
 
 Flow Orchestrator records per-operation performance metrics internally (counts,
 durations, in-flight gauges). As of **v0.6 (M6)** those existing metrics can be
 exported to any OpenTelemetry-compatible backend through a small, **API-only**
-bridge.
+bridge. As of **v0.8 (M8)** the executor can additionally emit a **distributed
+trace** — one span per executed node under a parent workflow span — through the
+same API-only contract.
 
-This guide documents the bridge, the exported instruments, how a host wires it
-up, and the cardinality/availability guarantees. Every instrument name, type, and
-unit below is taken directly from the source — see
-[`pkg/workflow/metrics/otel.go`](../../pkg/workflow/metrics/otel.go).
+This guide documents both: the **metrics bridge** (its exported instruments,
+host wiring, and cardinality/availability guarantees) and the **tracing**
+integration. Every instrument name, type, and unit below is taken directly from
+the source — see [`pkg/workflow/metrics/otel.go`](../../pkg/workflow/metrics/otel.go)
+for metrics and [`pkg/workflow/tracing.go`](../../pkg/workflow/tracing.go) for
+tracing.
+
+The two are independent: a host can wire metrics, tracing, both, or neither.
+Each is off until the host opts in, and each follows the same rule — the library
+depends only on the OpenTelemetry **API**, never the SDK; the host owns the SDK,
+exporter, and endpoint.
 
 ---
 
@@ -84,11 +93,12 @@ Source of truth: `NewOTelBridge` in
 | `flow_orchestrator.operation.duration.max` | `Float64ObservableGauge` | `s` | `operation` | Maximum observed operation duration, in seconds. |
 | `flow_orchestrator.operation.duration.min` | `Float64ObservableGauge` | `s` | `operation` | Minimum observed operation duration, in seconds. |
 
-> **Lock-contention metrics are not exported in v1.** The engine also records
-> lock-contention statistics, but those are recorded to a *global* collector
-> while data-operation stats live on a *per-instance* collector. Exporting the
-> near-zero per-instance lock data would mislead, so lock-contention export is
-> intentionally deferred. See the note in `NewOTelBridge`.
+> **Lock-contention metrics are not exported.** The per-instance collector still
+> defines `RecordLockContention`/`GetLockContentionStats`, but the recording
+> apparatus that drove them (the instrumented mutex) was removed as dead code
+> (`DEC-CHUNK4`), so no lock-contention statistics are actually collected and
+> there is nothing to export. There is no longer any process-global metrics state.
+> See the note on `NewOTelBridge`.
 
 ---
 
@@ -131,9 +141,10 @@ verified against the real enum by `TestOTelBridge_OBS03_Cardinality`.
 
 > **Host guidance (cardinality safety).** The set above is closed only for the
 > operations the engine records itself. The metrics API is public, so a host
-> *can* record its own operations via
-> `metrics.TrackOperation(metrics.OperationType("…"), fn)` — and any value it
-> passes becomes an `operation=` label, which the bridge will export. The library
+> *can* record its own operations via the per-instance collector —
+> `data.GetMetrics().TrackOperation(metrics.OperationType("…"), fn)` — and any
+> value it passes becomes an `operation=` label, which the bridge will export. The
+> library
 > cannot bound a host-supplied string (consistent with the caller-controlled
 > contract, `DEC-M1`). **Record only a small, fixed set of library-defined or
 > well-known operation types — never a per-request or user-derived string** — or
@@ -205,8 +216,11 @@ defer bridge.Shutdown(context.Background())
 
 The collector you pass to `NewOTelBridge` is the instance collector returned by
 `WorkflowData.GetMetrics()`
-([`pkg/workflow/workflow_data.go:405`](../../pkg/workflow/workflow_data.go)) —
-the same collector the engine records into. Metrics collection must be enabled
+([`pkg/workflow/workflow_data.go:455`](../../pkg/workflow/workflow_data.go)) —
+the same collector the engine records into. Metrics are **per-instance**: each
+`WorkflowData` owns its own `MetricsCollector` and there is no process-global
+metrics state (`DEC-CHUNK4`). The collector's `Enable`/`Disable`/`Reset`/
+`TrackOperation` are methods on that instance, not package-level functions. Metrics collection must be enabled
 (via `WithMetricsConfig`); when the collector is disabled, the callback reports
 nothing.
 
@@ -240,10 +254,129 @@ go run .
 
 ---
 
+# Tracing (OpenTelemetry spans)
+
+When a host supplies an OpenTelemetry `TracerProvider`, the executor emits a
+**span per executed node** under a single **parent span per workflow run**. This
+gives you a trace waterfall of a `DAG.Execute` call — which nodes ran, in what
+order across levels, how long each took, and which failed — in any
+OTLP-compatible tracing backend (Jaeger, Tempo, etc.).
+
+Tracing is **off by default** and follows the same **API-only** contract as the
+metrics bridge: the library imports only `go.opentelemetry.io/otel/trace` (now a
+direct dependency), never the SDK. The host owns the SDK, exporter, and endpoint.
+Source of truth: [`pkg/workflow/tracing.go`](../../pkg/workflow/tracing.go).
+
+## Wiring it up
+
+Tracing is enabled by handing a `trace.TracerProvider` to the workflow. There are
+three equivalent injection points; pick the one that fits how you build:
+
+```go
+import "go.opentelemetry.io/otel/trace"
+
+// On the builder (applied to the DAG that Build produces):
+dag, _ := workflow.NewWorkflowBuilder("my-workflow").
+    // ...AddNode(...)...
+    WithTracerProvider(tp). // tp is your *sdktrace.TracerProvider (a trace.TracerProvider)
+    Build()
+
+// Or directly on a DAG:
+dag.WithTracerProvider(tp)
+
+// Or via ExecutionConfig (e.g. when you set MaxConcurrency too):
+cfg := workflow.DefaultConfig()
+cfg.TracerProvider = tp
+dag.WithExecutionConfig(cfg)
+```
+
+- All three set the same underlying `ExecutionConfig.TracerProvider`. On the
+  builder, `WithTracerProvider` is applied **after** `WithExecutionConfig`, so a
+  custom config passed to the builder will not clobber a tracer provider you also
+  set there — the builder's `WithTracerProvider` is the source of truth.
+- **Passing `nil` (the default/zero value) disables tracing.** A nil provider
+  resolves once, up front, to a no-op tracer, so the run is byte-identical and
+  zero-alloc versus not tracing at all (measured: identical allocations). There
+  is no global provider read and no panic when unwired.
+
+The host builds the SDK `TracerProvider` exactly as it would for any OTel app
+(the library never does this):
+
+```go
+import (
+    "context"
+
+    sdktrace "go.opentelemetry.io/otel/sdk/trace"
+    // ...plus an exporter, e.g. stdouttrace or otlptracegrpc
+)
+
+exporter, _ := stdouttrace.New() // or an OTLP exporter
+tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))
+defer tp.Shutdown(context.Background())
+
+dag.WithTracerProvider(tp)
+// ...run dag.Execute(ctx, data); spans flow to your exporter.
+```
+
+## Span model
+
+- **Parent span: `workflow.execute`.** Opened once at the start of
+  `DAG.Execute` and closed when the run returns. Its context flows down so every
+  node span is a child of it.
+- **One child span per executed node, named after the node** (span name = the
+  node's name — a readable waterfall, e.g. `fetch-user`, not a generic verb). The
+  span opens when the node's goroutine starts in the level executor and closes
+  when the node finishes (after retries).
+- **Skipped nodes get no span.** A span implies execution; a node marked
+  `Skipped` (transitively blocked by a failed dependency, `DEC-CHUNK3-status`)
+  never ran, so it emits no span. The count of skipped nodes is surfaced on the
+  **parent** span instead, via the `workflow.skipped_count` attribute (computed at
+  span close, after the final status sweep).
+
+## Span attributes (closed set, no-leak)
+
+Attribute keys are a **closed, code-defined set** — never workflow-controlled
+strings — so a trace backend sees bounded key cardinality (`DEC-CHUNK5`):
+
+| Span | Attribute | Type | Set when |
+|---|---|---|---|
+| node | `node.status` | string | always (final `NodeStatus`: `completed`/`failed`) |
+| node | `node.retry_count` | int | only when the node's configured retry count > 0 |
+| `workflow.execute` (parent) | `workflow.skipped_count` | int | always (count of nodes that ended `Skipped`) |
+
+The **no-leak discipline from chunk 2 extends to traces**: span attributes read
+only engine-controlled values (the node name, its final status, its configured
+retry count). No `WorkflowData` values, keys, paths, or arbitrary state are ever
+attached. The one host-influenced string that reaches a span is the **action's
+own error**, recorded via `span.RecordError` at the call site — that is the
+action's own contract, exactly as it is for the returned error. Nothing more from
+the library's side. (See `nodeSpanAttributes` in
+[`pkg/workflow/tracing.go`](../../pkg/workflow/tracing.go).)
+
+## Cancellation and tracing
+
+If the run is cancelled, the parent `workflow.execute` span still closes
+normally and the spans of nodes that already ran are emitted as usual. Nodes that
+never started emit no span (consistent with the cancellation contract: unreached
+and downstream nodes stay `Pending`, not `Skipped` — see
+[Error Handling → Context cancellation](./error-handling.md#context-cancellation-and-timeouts)).
+
+## Instrumentation scope
+
+The tracer's instrumentation scope is the module path
+`github.com/ppcavalcante/flow-orchestrator` — the **same scope as the metrics
+bridge**, so traces and metrics from this library carry a consistent
+instrumentation identity in your backend.
+
+---
+
 ## See also
 
 - [Performance Optimization](./performance-optimization.md) — the metrics the
   engine records and how to tune collection.
 - [`pkg/workflow/metrics/otel.go`](../../pkg/workflow/metrics/otel.go) — the
-  bridge source (the authoritative instrument definitions).
-- `DEC-M6-otel-api-only` — the locked decision behind the API-only shape.
+  metrics bridge source (the authoritative instrument definitions).
+- [`pkg/workflow/tracing.go`](../../pkg/workflow/tracing.go) — the tracing source
+  (span names, attribute keys, the noop-resolution contract).
+- `DEC-M6-otel-api-only` / `DEC-CHUNK5` — the locked decisions behind the
+  API-only shape (metrics and tracing respectively).

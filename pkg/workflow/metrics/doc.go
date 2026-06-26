@@ -6,28 +6,31 @@ This package offers a simplified public API for the internal metrics system, all
 to track operation performance, generate reports, and configure metrics collection without
 exposing internal implementation details.
 
+Metrics are per-instance: each collector owns its own state, so there is no process-global
+metrics. The workflow data plane uses its own collector internally; create your own collector
+when you want to track operations directly.
+
 Basic usage:
 
-	// Enable metrics collection (enabled by default)
-	metrics.Enable()
+	// Create a collector (enabled, full sampling)
+	collector := metrics.NewMetricsCollector()
 
 	// Track an operation
-	metrics.TrackOperation(metrics.OpGet, func() {
+	collector.TrackOperation(metrics.OpGet, func() {
 		// Your operation code here
 		value := workflow.GetNodeOutput("node1")
 	})
 
 	// Get statistics for a specific operation type
-	stats, exists := metrics.GetOperationStats(metrics.OpGet)
+	stats, exists := collector.GetOperationStats(metrics.OpGet)
 	if exists {
 		fmt.Printf("Get operations: %d, Avg time: %s\n",
 			stats.Count, metrics.FormatDuration(stats.AvgTimeNs))
 	}
 
 	// Generate a report
-	var buf bytes.Buffer
-	metrics.WriteReport(&buf)
-	fmt.Println(buf.String())
+	reporter := metrics.NewReporter(collector)
+	reporter.WriteReport(os.Stdout)
 
 Configuration:
 
@@ -38,22 +41,7 @@ Configuration:
 		WithOperationTiming(true).
 		WithSlowOperationThreshold(time.Millisecond * 100)
 
-	// Apply the configuration to the default collector
-	config.Apply()
-
-For more advanced usage, you can create custom collectors:
-
-	// Create a custom collector
-	collector := metrics.NewMetricsCollector().
-		WithSamplingRate(0.5)  // Sample 50% of operations
-
-	// Use the custom collector
-	collector.TrackOperation(metrics.OpSet, func() {
-		// Your operation code here
-	})
-
-	// Generate a report for the custom collector
-	reporter := metrics.NewReporter(collector)
-	reporter.WriteReport(os.Stdout)
+	// Build a collector with that configuration
+	collector := metrics.NewMetricsCollectorWithConfig(config.GetInternalConfig())
 */
 package metrics

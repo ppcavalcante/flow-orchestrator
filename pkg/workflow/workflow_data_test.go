@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -98,7 +97,7 @@ func TestWorkflowData(t *testing.T) {
 		metrics := data.GetMetrics()
 		require.NotNil(t, metrics)
 
-		// Test GetAllNodeStatuses and ListNodeStatuses
+		// Test GetAllNodeStatuses
 		data.SetNodeStatus("node1", Running)
 		data.SetNodeStatus("node2", Completed)
 
@@ -106,9 +105,6 @@ func TestWorkflowData(t *testing.T) {
 		require.Equal(t, 2, len(allStatuses))
 		require.Equal(t, Running, allStatuses["node1"])
 		require.Equal(t, Completed, allStatuses["node2"])
-
-		listedStatuses := data.ListNodeStatuses()
-		require.Equal(t, allStatuses, listedStatuses)
 	})
 
 	t.Run("JSONPersistence", func(t *testing.T) {
@@ -145,99 +141,6 @@ func TestWorkflowData(t *testing.T) {
 		require.Equal(t, "output1", output)
 	})
 
-	t.Run("ArenaStats", func(t *testing.T) {
-		data := NewWorkflowDataWithArena("test", DefaultWorkflowDataConfig())
-
-		// Test ResetArena
-		data.Set("key1", "value1")
-		data.ResetArena()
-		_, exists := data.Get("key1")
-		require.False(t, exists)
-
-		// Test GetArenaStats
-		stats := data.GetArenaStats()
-		require.NotNil(t, stats)
-		require.NotNil(t, stats["arena"])
-		require.NotNil(t, stats["stringPool"])
-
-		// Test with custom block size
-		customData := NewWorkflowDataWithArenaBlockSize("test", DefaultWorkflowDataConfig(), 512)
-		stats = customData.GetArenaStats()
-		require.Equal(t, int64(512), stats["arena"]["blockSize"])
-	})
-
-	t.Run("FlatBufferOperations", func(t *testing.T) {
-		// Create temporary file
-		tmpFile := filepath.Join(t.TempDir(), "workflow.fb")
-
-		// Create test data
-		data := NewWorkflowData("test-flatbuffer")
-		data.Set("string1", "value1")
-		data.Set("int1", 42)
-		data.SetNodeStatus("node1", Running)
-		data.SetOutput("node1", "output1")
-
-		// Save to FlatBuffer
-		err := data.SaveToFlatBuffer(tmpFile)
-		require.NoError(t, err)
-
-		// Load into new workflow data
-		newData := NewWorkflowData("test-flatbuffer")
-		err = newData.LoadFromFlatBuffer(tmpFile)
-		require.NoError(t, err)
-
-		// Verify loaded data
-		val, exists := newData.Get("string1")
-		require.True(t, exists)
-		require.Equal(t, "value1", val)
-
-		val, exists = newData.Get("int1")
-		require.True(t, exists)
-		require.Equal(t, int64(42), val)
-
-		status, exists := newData.GetNodeStatus("node1")
-		require.True(t, exists)
-		require.Equal(t, Running, status)
-
-		output, exists := newData.GetOutput("node1")
-		require.True(t, exists)
-		require.Equal(t, "output1", output)
-
-		// Test error cases
-		err = data.SaveToFlatBuffer("/invalid/path/workflow.fb")
-		require.Error(t, err)
-
-		err = data.LoadFromFlatBuffer("nonexistent.fb")
-		require.Error(t, err)
-
-		invalidFile := filepath.Join(t.TempDir(), "invalid.fb")
-		err = os.WriteFile(invalidFile, []byte("invalid data"), 0600)
-		require.NoError(t, err)
-		err = data.LoadFromFlatBuffer(invalidFile)
-		require.Error(t, err)
-	})
-
-	t.Run("Arena Operations", func(t *testing.T) {
-		data := NewWorkflowDataWithArena("test-workflow", DefaultWorkflowDataConfig(), 512)
-
-		// Test arena allocation through normal operations
-		data.Set("key1", "value1")
-		data.Set("key2", "value2")
-		data.SetNodeStatus("node1", NodeStatusPending)
-		data.SetOutput("node1", "output1")
-
-		// Get arena stats
-		stats := data.GetArenaStats()
-		assert.NotNil(t, stats)
-		assert.Contains(t, stats, "arena")
-		assert.Contains(t, stats, "stringPool")
-
-		// Test arena reset
-		data.ResetArena()
-		stats = data.GetArenaStats()
-		assert.NotNil(t, stats["arena"])
-		assert.Equal(t, int64(512), stats["arena"]["blockSize"])
-	})
 }
 
 // Helper function to test map cloning
@@ -401,28 +304,6 @@ func TestWorkflowDataCoreOperations(t *testing.T) {
 		})
 		assert.Equal(t, 3, count)
 	})
-
-	t.Run("Arena Operations", func(t *testing.T) {
-		data := NewWorkflowDataWithArena("test-workflow", DefaultWorkflowDataConfig(), 512)
-
-		// Test arena allocation through normal operations
-		data.Set("key1", "value1")
-		data.Set("key2", "value2")
-		data.SetNodeStatus("node1", NodeStatusPending)
-		data.SetOutput("node1", "output1")
-
-		// Get arena stats
-		stats := data.GetArenaStats()
-		assert.NotNil(t, stats)
-		assert.Contains(t, stats, "arena")
-		assert.Contains(t, stats, "stringPool")
-
-		// Test arena reset
-		data.ResetArena()
-		stats = data.GetArenaStats()
-		assert.NotNil(t, stats["arena"])
-		assert.Equal(t, int64(512), stats["arena"]["blockSize"])
-	})
 }
 
 // Add this test to improve coverage of the Clone function
@@ -563,9 +444,6 @@ func TestGetFloat64(t *testing.T) {
 			restore := mockSecureRandomFloat64(tt.mockRandom)
 			defer restore()
 
-			// Reset the default metrics collector before each test
-			metrics.Reset()
-
 			// Create workflow data with the test config
 			data := NewWorkflowDataWithConfig("test", tt.metricsConfig)
 
@@ -693,9 +571,6 @@ func TestGetBool(t *testing.T) {
 			restore := mockSecureRandomFloat64(tt.mockRandom)
 			defer restore()
 
-			// Reset the default metrics collector before each test
-			metrics.Reset()
-
 			// Create workflow data with the test config
 			data := NewWorkflowDataWithConfig("test", tt.metricsConfig)
 
@@ -817,8 +692,6 @@ func TestGetString(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			restore := mockSecureRandomFloat64(tt.mockRandom)
 			defer restore()
-
-			metrics.Reset()
 
 			data := NewWorkflowDataWithConfig("test", tt.metricsConfig)
 
@@ -944,8 +817,6 @@ func TestGetInt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			restore := mockSecureRandomFloat64(tt.mockRandom)
 			defer restore()
-
-			metrics.Reset()
 
 			data := NewWorkflowDataWithConfig("test", tt.metricsConfig)
 

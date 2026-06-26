@@ -240,7 +240,7 @@ func TestDAGBasicOperations(t *testing.T) {
 			t.Errorf("Expected 1 node, got %d nodes", len(dag.Nodes))
 		}
 
-		addedNode, exists := dag.GetNodeByName("test")
+		addedNode, exists := dag.GetNode("test")
 		if !exists {
 			t.Errorf("Node 'test' not found in DAG")
 		}
@@ -729,23 +729,6 @@ func TestGetNode(t *testing.T) {
 
 	t.Run("Non-existent Node", func(t *testing.T) {
 		node, exists := dag.GetNode("B")
-		assert.False(t, exists)
-		assert.Nil(t, node)
-	})
-}
-
-func TestGetNodeByName(t *testing.T) {
-	dag := NewDAG("test")
-	nodeA := NewNode("A", nil)
-	mustAddNode(t, dag, nodeA)
-	t.Run("Existing Node", func(t *testing.T) {
-		node, exists := dag.GetNodeByName("A")
-		assert.True(t, exists)
-		assert.Equal(t, nodeA, node)
-	})
-
-	t.Run("Non-existent Node", func(t *testing.T) {
-		node, exists := dag.GetNodeByName("B")
 		assert.False(t, exists)
 		assert.Nil(t, node)
 	})

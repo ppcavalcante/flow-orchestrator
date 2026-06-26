@@ -6,11 +6,11 @@ This guide describes the memory management and concurrent data structures used i
 
 Flow Orchestrator uses custom memory management components to optimize performance and reduce garbage collection pressure in high-throughput scenarios.
 
-> **API accuracy note:** The arena and string pool shown below are exported from the `pkg/workflow/arena` package — import that package directly (e.g. `arena.NewArena()`), not `workflow.NewArena()`. The buffer pool and node pool live in `internal/workflow/memory`: they are **internal implementation details** used automatically by the engine and are **not** part of the importable public API.
+> **API accuracy note:** The arena allocator, string pool, buffer pool, and node pool are all **internal implementation details** (under `internal/workflow/`). They are applied automatically by the engine and are **not** part of the importable public API — there is nothing to construct or tune from your code. The sections below describe how they work for understanding, not as a usage guide.
 
 ### Arena Memory Allocator
 
-The Arena memory allocator provides efficient memory allocation with minimal overhead. It allocates memory in large blocks and then sub-allocates from these blocks, reducing the number of system allocations and garbage collection pressure.
+The Arena memory allocator provides efficient memory allocation with minimal overhead. It allocates memory in large blocks and then sub-allocates from these blocks, reducing the number of system allocations and garbage collection pressure. It is used internally by the engine; there is no public constructor.
 
 ```mermaid
 graph TD
@@ -58,23 +58,7 @@ graph TD
 - **Thread safety**: Optionally provides thread-safe allocation operations
 - **Memory pooling**: Reuses arena blocks to further reduce allocations
 
-#### Usage
-
-```go
-import "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
-
-// Create a new arena (lives in pkg/workflow/arena, not the root workflow package)
-a := arena.NewArena()
-
-// Allocate memory
-data := a.Alloc(1024)
-
-// Allocate and copy a string
-str := a.AllocString("example string")
-
-// Reset the arena (reuse all memory at once)
-a.Reset()
-```
+The allocator lives in `internal/workflow/arena` and is wired into `WorkflowData` automatically by the engine. There is no public API to construct or reset it directly.
 
 ### String Pool
 
@@ -87,20 +71,7 @@ The String Pool provides string interning capabilities, allowing strings with th
 - **Pre-interned common strings**: Common strings are pre-interned for efficiency
 - **Thread-safe operations**: Safe for concurrent use
 
-#### Usage
-
-```go
-import "github.com/ppcavalcante/flow-orchestrator/pkg/workflow/arena"
-
-// Create a string pool backed by an arena (both live in pkg/workflow/arena)
-a := arena.NewArena()
-pool := arena.NewStringPool(a)
-
-// Intern a string — repeated content shares memory
-str1 := pool.Intern("example")
-str2 := pool.Intern("example")
-// str1 and str2 point to the same backing memory
-```
+The string pool lives in `internal/workflow/arena` and is applied automatically by the engine when interning keys. There is no public API to construct it directly.
 
 ### Buffer Pool
 
@@ -166,20 +137,16 @@ A non-positive `MaxConcurrency` coerces to the bounded default of 16 — concurr
 
 ### 3. Use Memory Optimization Features
 
-Enable arena allocation through the `WorkflowData` constructors (there is no `WorkflowOptions` struct):
+Size the data maps to your workload with `WorkflowDataConfig`:
 
 ```go
-// Arena allocator: use the arena-backed constructor.
-data := workflow.NewWorkflowDataWithArena(
-    "my-workflow",
-    workflow.DefaultWorkflowDataConfig(),
-    64*1024, // optional arena block size in bytes
-)
+cfg := workflow.DefaultWorkflowDataConfig()
+cfg.ExpectedNodes = 64 // pre-size the node/output maps
+cfg.ExpectedData = 128 // pre-size the data map
+data := workflow.NewWorkflowDataWithConfig("my-workflow", cfg)
 ```
 
-String interning is applied automatically by the engine; it is not user-tunable. The previously documented `WorkflowDataConfig.MaxInternStringLength` / `InternStringCapacity` fields were **removed in v0.3.0** — they were inert (written by presets, never read), so removing them is not a behavior change. (Configurable length-gating may return as an honest feature in a future release.)
-
-Buffer pooling and node pooling are internal implementation details applied automatically by the engine; they are not user-configurable toggles.
+Arena allocation, string interning, buffer pooling, and node pooling are internal implementation details applied automatically by the engine; they are not user-configurable. (The arena-backed constructors and arena-stats accessors were removed from the public surface in the pre-1.0 hardening pass — the allocator now lives entirely in `internal/`.)
 
 ### 4. Minimize State Size
 

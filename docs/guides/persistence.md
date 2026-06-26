@@ -87,8 +87,8 @@ the per-store summary, what is guaranteed, and the honest ceiling.
   You own that directory and those IDs — they are in your trust boundary, and the library
   does not authenticate, sign, or structurally verify what it loads.
 - **Both load paths reject oversized input *atomically with the read* — no stat-then-read
-  race.** Every `Load` (both stores) and the `WorkflowData` JSON load helpers
-  (`LoadFromJSON`/`LoadFromFlatBuffer`) read through an `io.LimitReader(cap+1)` and reject
+  race.** Every `Load` (both stores) and the `WorkflowData.LoadFromJSON` escape hatch
+  read through an `io.LimitReader(cap+1)` and reject
   anything over the size cap (64 MiB) as `ErrCorruptData`. There is no separate `os.Stat`, so
   the file cannot grow between a size check and the read — the reader simply never consumes
   more than `cap+1` bytes (reading one past the limit distinguishes "exactly at cap," accepted,
@@ -303,7 +303,10 @@ func (s *MyCustomStore) Delete(workflowID string) error {
 ## Performance Considerations
 
 1. **Batch Updates**: Minimize save operations
-2. **Use Binary Formats**: FlatBuffers provides better performance than JSON
+2. **Match the format to the need**: `FlatBuffersStore` is the faster binary
+   format for high-throughput or large state; `JSONFileStore` is a fully
+   supported store whose human-readable files suit debugging and interoperating
+   with external tools that read the JSON directly. Both are first-class.
 3. **Select Appropriate Storage**: Match storage to access patterns
 4. **Consider Caching**: Add a caching layer for frequent access
 5. **Compress Data**: For large workflows, consider compression

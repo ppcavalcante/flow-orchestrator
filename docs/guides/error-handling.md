@@ -107,8 +107,11 @@ This provides fine-grained control over retry behavior.
 
 By default, execution is **fail-fast**: when a node's action returns an error, the
 node is recorded as `Failed`, the executor cancels its in-flight siblings in that
-level, and `DAG.Execute` returns an error **without running any later level**. A
-normal `Failed` node therefore blocks its dependents simply by halting the run.
+level, and `DAG.Execute` returns an `*ExecutionError` **without running any later
+level**. A normal `Failed` node therefore blocks its dependents simply by halting
+the run. If several nodes in the halting level fail concurrently before
+cancellation takes effect, the `*ExecutionError` captures **all** of them (see
+[Aggregate Execution Error](../reference/api-reference.md#aggregate-execution-error)).
 
 Mark a node with `WithContinueOnError()` to opt that node out of fail-fast: its
 failure is still recorded as `Failed`, but it does **not** cancel siblings and
@@ -138,8 +141,10 @@ blocking its dependents) when it `Completed`, **or** when it is a
 continue-on-error node that `Failed`. A *normal* `Failed` dependency still blocks
 (fail-fast), as do `Skipped`/`Running`/`Pending` dependencies. `DAG.Execute`
 returns `nil` if and only if every node that is **not** continue-on-error
-succeeded; there is no partial-error aggregate — inspect per-node status instead.
-These semantics are machine-checked (gopter property suite + a TLA+ model); see
+succeeded; when one or more fail-fast nodes fail it returns an `*ExecutionError`
+aggregating those failures (continue-on-error failures are tolerated and excluded
+— inspect their per-node status instead). These semantics are machine-checked
+(gopter property suite + a TLA+ model); see
 [Verification](../reference/api-reference.md#verification) and
 [`specs/README.md`](../../specs/README.md).
 
@@ -147,6 +152,55 @@ These semantics are machine-checked (gopter property suite + a TLA+ model); see
 > running *after* its upstream node fails. That only works if the upstream node is
 > marked `WithContinueOnError()` — otherwise the upstream failure halts the
 > workflow fail-fast before the recovery node's level runs.
+
+#### Context cancellation and timeouts
+
+Cancellation is distinct from failure, and **cancellation always wins**
+(`DEC-CHUNK6`). When the context passed to `DAG.Execute` is cancelled or its
+deadline is exceeded, `Execute` returns the **wrapped context error**, never an
+`*ExecutionError`:
+
+```go
+err := dag.Execute(ctx, data)
+if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+    // the run was cancelled / timed out — handled separately from a workflow failure
+}
+
+var execErr *workflow.ExecutionError
+if errors.As(err, &execErr) {
+    // a genuine workflow FAILURE (this is never returned for a cancelled run)
+}
+```
+
+The contract:
+
+- **A cancelled run never returns an `*ExecutionError`.** The executor checks
+  `ctx.Err()` after each level, *before* it would build any `*ExecutionError`. If
+  the context is done, it returns the wrapped ctx error and **drops the
+  incidental cancel-induced node errors** (a well-behaved action returns
+  `ctx.Err()` when it observes the cancel; that is noise, not the reason the
+  workflow stopped). This holds whether the cancel lands **between levels** or
+  **mid-level**, and even when a genuine fail-fast failure coexisted in the same
+  level. The caller's question — *why did the workflow stop?* — is answered by the
+  context error.
+- **Genuine coexisting failures stay observable via node status.** A node that
+  truly failed is still recorded `Failed`; inspect `GetNodeStatus` to find it even
+  though `Execute` returned the ctx error.
+- **Un-run and downstream nodes stay `Pending`, not `Skipped`.** The Skipped sweep
+  is suppressed on the cancel path: `Skipped` means "an upstream you needed
+  failed", whereas a cancelled run "stopped before reaching me" — that is
+  `Pending` (preserving the `DEC-CHUNK3-status` distinction). A node that ended
+  `Failed` *only* because it observed the cancellation therefore does **not** mark
+  its downstream `Skipped`.
+- **There is no `Cancelled` status.** In-flight nodes keep whatever status
+  `node.Execute` wrote; the run-level cancellation is reported through the returned
+  error, not a per-node state.
+
+This is machine-checked by `TestCancellationProperty` (a gopter property over
+random DAGs, both pre-cancelled and cancel-during-run, mutation-proven to bite).
+Context cancellation is a Layer-1 (gopter) guarantee and is intentionally outside
+the TLA+ model (which has no ctx/cancel action); see
+[`specs/README.md`](../../specs/README.md).
 
 ### 4. Error Handling Nodes
 

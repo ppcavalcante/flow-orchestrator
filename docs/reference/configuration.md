@@ -65,18 +65,16 @@ type WorkflowDataConfig struct {
 // Default configuration
 config := workflow.DefaultWorkflowDataConfig()
 
-// Optimized for read-heavy workloads
-config := workflow.ReadOptimizedWorkflowDataConfig(expectedNodes)
-
-// Optimized for high concurrency
-config := workflow.HighConcurrencyWorkflowDataConfig(expectedNodes)
-
-// Optimized for low memory usage (disables metrics, aggressive interning)
+// Optimized for low memory usage (sizes maps tightly, disables metrics)
 config := workflow.LowMemoryWorkflowDataConfig(expectedNodes)
-
-// Production preset (1% sampling rate for metrics)
-config := workflow.ProductionWorkflowDataConfig(expectedNodes)
 ```
+
+> **Changed in the pre-1.0 hardening pass:** the `ReadOptimized`, `HighConcurrency`,
+> and `Production` presets were removed. `ReadOptimized` and `HighConcurrency` were
+> byte-identical (both just `ExpectedData = expectedNodes * 2` with default metrics);
+> `Production` only differed by 1% metrics sampling, which is moot now that metrics
+> default to OFF. Use `DefaultWorkflowDataConfig()` and set `ExpectedNodes` /
+> `ExpectedData` directly (see Custom Configuration below), or `LowMemoryWorkflowDataConfig`.
 
 ### Custom Configuration
 
@@ -176,10 +174,10 @@ Store constructors take a base directory path:
 // In-memory store (no configuration needed)
 store := workflow.NewInMemoryStore()
 
-// JSON file store (deprecated — use FlatBuffersStore)
+// JSON file store (human-readable; good for debugging and external tools)
 store, err := workflow.NewJSONFileStore("./workflow_data")
 
-// FlatBuffers store (recommended for production)
+// FlatBuffers store (faster binary format for high-throughput/large state)
 store, err := workflow.NewFlatBuffersStore("./workflow_data")
 ```
 
@@ -199,5 +197,5 @@ type WorkflowStore interface {
 ```go
 builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("my-workflow").
-    WithStore(store) // or WithStateStore(store) for backward compatibility
+    WithStore(store)
 ```

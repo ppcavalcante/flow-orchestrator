@@ -5,15 +5,88 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-alpha]
+
+**M8 Phase B — pre-1.0 hardening & consolidation.** The post-v0.7.4 batch from the
+deep-review roadmap: it sharpens the execution/error/status contracts for the eventual
+1.0, shrinks the public surface, and adds span-per-node tracing. **Pre-1.0, this release
+cuts decisively — there are no deprecation cycles or kept aliases** (see the BREAKING
+sections). The in-code version constant is `0.8.0-alpha`; every tag is a pre-release, so
+`go get @latest` resolves to it. See [STABILITY.md](STABILITY.md).
+
+### BREAKING CHANGES — Removed (0.8.0-alpha — M8 Phase B)
+- **`NodeStatus.NotStarted` dropped.** The status enum is now 5 states —
+  `Pending` / `Running` / `Completed` / `Failed` / `Skipped`. `NotStarted` was vestigial
+  (never written by the engine) and had no FlatBuffers wire slot, so it could not
+  round-trip. `Pending` is now the real written initial state (see Added).
+- **Process-global metrics facade removed.** Metrics are per-instance only. The
+  package-level `Enable` / `Disable` / `TrackOperation` / `Reset` / `Apply` / `Report`
+  (and the rest of the standalone facade) are gone, along with the dead lock-contention
+  apparatus. There is no process-global metrics state. The per-instance
+  `MetricsCollector` and `OTelBridge`/`NewOTelBridge` are unchanged.
+- **Five dead aliases removed:** `WithStateStore`, `WithRetry`, `ListNodeStatuses`,
+  `NewWorkflowFromBuilder`, `GetNodeByName`.
+- **Duplicate config presets removed:** `ReadOptimized` and `HighConcurrency` (byte-identical
+  duplicates) and `Production` (its only trait was 1% metrics sampling, moot now that metrics
+  default OFF). Presets collapse to `Default` + `LowMemory`.
+- **`pkg/workflow/arena` internalized** to `internal/` (zero external importers); the
+  `GetArenaStats` / `ResetArena` accessors and the two arena constructors are removed.
+- **`SaveToFlatBuffer` / `LoadFromFlatBuffer` shims removed** — their own deprecation
+  markers admitted they used JSON, not FlatBuffers.
+
+### BREAKING CHANGES — Changed (0.8.0-alpha — M8 Phase B)
+- **`DAG.Execute` now returns an aggregated `*ExecutionError`.** On a fail-fast halt it
+  reports *every* node that failed in the halting level via
+  `ExecutionError{FailedNodes []NodeError}` (previously only the first failure was
+  returned, silently dropping concurrent siblings). `Unwrap() []error` lets `errors.Is`
+  reach each node's error and any sentinel it wraps. The `Error()` string carries only
+  node names and the actions' own error strings — never `WorkflowData` values, keys, or
+  paths. A pure continue-on-error run (no fail-fast failure) still returns `nil`; coe
+  failures stay tolerated and observable via `GetNodeStatus`.
+- **Cancellation now wins over node failures.** If the context is cancelled or times out,
+  `Execute` returns the wrapped ctx error (`errors.Is(err, context.Canceled)` /
+  `context.DeadlineExceeded`) — never an `*ExecutionError` — regardless of where the
+  cancel landed or whether a genuine failure coexisted. Incidental cancel-induced node
+  errors are dropped; genuine failures remain observable via status. No `Cancelled`
+  status was added.
+
+### Added (0.8.0-alpha — M8 Phase B)
+- **Real `Skipped` status.** A node is marked `Skipped` iff it did not run AND at least
+  one dependency is in a terminal non-resolving state (a non-continue-on-error dependency
+  that `Failed`, or a dependency that was itself `Skipped`); the rule is transitive.
+  Independent nodes that were simply never reached (e.g. a run cancelled or halted before
+  them, with no failed/skipped dependency) stay `Pending`, not `Skipped`. `Skipped` is not
+  a failure — it never appears in `ExecutionError`.
+- **`Pending` is now the written initial state.** Every node is set to `Pending` when
+  `Execute` begins, so `GetNodeStatus` is total over the DAG (a never-reached node is
+  observably `Pending` rather than absent from the map).
+- **OpenTelemetry tracing — span per executed node.** Opt in with
+  `WithTracerProvider(tp)` on `ExecutionConfig`, `DAG`, or `WorkflowBuilder`. Each executed
+  node gets a span named after the node, a child of a parent `workflow.execute` span, with
+  `node.status` / `node.retry_count` attributes and `RecordError` on failure. Skipped nodes
+  get no span (a `workflow.skipped_count` parent attribute instead). API-only (the host
+  owns the SDK), off by default (a nil provider resolves to a no-op tracer, zero overhead),
+  and subject to the same no-leak discipline as `ExecutionError`.
+- **Per-instance metrics isolation** — two `WorkflowData` instances never share metrics
+  state (pinned by a discriminating regression test).
+- **Mutation testing (go-gremlins) in CI** — a non-blocking, informational job scoped to
+  the core executor/data files; see [docs/development/mutation_testing.md](docs/development/mutation_testing.md)
+  for the accepted-survivor baseline and how to run it.
+
+### Note (0.8.0-alpha — M8 Phase B)
+- **`JSONFileStore` is un-deprecated** and is a first-class, supported store (it has
+  out-of-tree consumers and its JSON is the better format for hand-recovery). Its
+  `MigrateToFlatBuffers` path is now bounded (no unbounded `os.ReadFile`).
+
 ## [Unreleased]
 
-Records milestone state for M4–M8. The in-code version constant is `0.7.4-alpha`
-(M5 set `0.5.0-alpha`; the 0.6 line was never cut as a const; M7 close set
-`0.7.0-alpha`; 0.7.1–0.7.3 patched the first-CI-run findings; **0.7.4-alpha is the
-M8 Tier-1 "polish & honesty" batch** from the post-v0.7.3 deep review — see
-`version.go`). Published tags: `v0.7.0-alpha` … `v0.7.4-alpha`; **use `v0.7.4-alpha`**
-(the latest; every tag is a pre-release so `go get @latest` resolves to it). See
-[STABILITY.md](STABILITY.md).
+Historical milestone record for M4–M8 (the detailed batch notes below predate the
+`[0.8.0-alpha]` section above, which is the released summary of M8 Phase B). Version
+lineage: M5 set `0.5.0-alpha`; the 0.6 line was never cut as a const; M7 close set
+`0.7.0-alpha`; 0.7.1–0.7.3 patched the first-CI-run findings; `0.7.4-alpha` was the
+M8 Tier-1 "polish & honesty" batch; **`0.8.0-alpha` is the M8 Tier-2 / Phase B batch**
+(see `version.go` and the `[0.8.0-alpha]` section). Every tag is a pre-release, so
+`go get @latest` resolves to the latest (`v0.8.0-alpha`). See [STABILITY.md](STABILITY.md).
 
 ### Changed (0.7.4-alpha — M8 Tier-1)
 - **Metrics are now OFF by default + a metrics-free fast path on the data plane.**

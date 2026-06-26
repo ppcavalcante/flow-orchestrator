@@ -10,27 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func createTestWorkflow(t *testing.T, store WorkflowStore) *Workflow {
-	workflow := NewWorkflow(store)
-
-	startAction := NewCompositeAction()
-	endAction := NewCompositeAction()
-
-	startNode := NewNode("start", startAction)
-	endNode := NewNode("end", endAction)
-
-	err := workflow.AddNode(startNode)
-	require.NoError(t, err)
-
-	err = workflow.AddNode(endNode)
-	require.NoError(t, err)
-
-	err = workflow.AddDependency("end", "start")
-	require.NoError(t, err)
-
-	return workflow
-}
-
 func TestInMemoryStore(t *testing.T) {
 	// Create a new in-memory store
 	store := NewInMemoryStore()
@@ -261,11 +240,6 @@ func TestStatusToFBStatus(t *testing.T) {
 			name:     "Skipped status",
 			status:   Skipped,
 			expected: fb.NodeStatusSkipped,
-		},
-		{
-			name:     "NotStarted status",
-			status:   NotStarted,
-			expected: fb.NodeStatusPending,
 		},
 		{
 			name:     "Unknown status",
