@@ -26,6 +26,17 @@ type ExecutionConfig struct {
 	// owns the SDK/exporter; the library never imports go.opentelemetry.io/otel/sdk
 	// (DEC-M6-otel-api-only parity, DEC-CHUNK5).
 	TracerProvider trace.TracerProvider
+
+	// checkpoint, when non-nil, is invoked by DAG.Execute at each COMPLETED level
+	// barrier with the workflow's current state, to durably persist progress for
+	// crash-resume (M9). It is INTERNAL plumbing: Workflow.Execute wires it when
+	// the Store implements Checkpointer; it is intentionally unexported so the
+	// public way to opt in is "use a Checkpointer Store", not hand-setting a
+	// callback. The nil zero value disables checkpointing with zero overhead
+	// (no behavior change for non-checkpointing stores). A non-nil callback that
+	// returns an error aborts the run — a durability failure is surfaced, not
+	// silently dropped. (DEC-M9, chunk 2.)
+	checkpoint func(data *WorkflowData) error
 }
 
 // DefaultConfig returns the default execution configuration.

@@ -192,6 +192,11 @@ type WorkflowStore interface {
 }
 ```
 
+All three built-in stores additionally implement the optional `Checkpointer`
+interface, so they enable durable crash-resume out of the box (checkpoint at each
+completed level barrier; non-completed nodes re-run on resume). See the
+[Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume).
+
 ### Using a Store with the Builder
 
 ```go

@@ -148,6 +148,12 @@ Implementations include:
 - `JSONFileStore`: Human-readable file-based persistence; convenient for debugging and external tools that read the JSON
 - `FlatBuffersStore`: Faster binary format for high-throughput or large state
 
+All three also implement the optional `Checkpointer` interface, which enables
+**durable crash-resume** — a run is checkpointed at each completed level barrier
+and resumes from the last checkpoint on re-execution (non-completed nodes re-run,
+an at-least-once contract). See the
+[Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume).
+
 ### Middleware
 
 Middleware provides a way to add cross-cutting concerns to actions:

@@ -144,9 +144,11 @@ When a workflow executes:
 1. The engine validates the DAG for acyclicity
 2. The DAG is topologically sorted to determine execution order
 3. Nodes are executed according to their dependencies
-4. Node status is tracked and persisted
+4. Node status is tracked in the shared workflow data
 5. Workflow data is shared between nodes
-6. On completion, the final state is persisted
+6. If the store implements `Checkpointer`, progress is durably checkpointed at
+   each completed level barrier (crash-resume); on completion the final state is
+   persisted
 7. Metrics are collected and reported
 
 ## Middleware System
@@ -173,6 +175,15 @@ The persistence layer allows workflows to be saved and resumed:
 - `InMemoryStore` for ephemeral workflows (e.g. testing)
 - File-based stores: `JSONFileStore` and `FlatBuffersStore`
 - Custom store implementations via the `WorkflowStore` interface
+
+A store may additionally implement the optional `Checkpointer` interface to enable
+**durable crash-resume**: the run is checkpointed at each completed level barrier,
+and re-running `Execute` with the same `WorkflowID`/store/DAG resumes from the last
+checkpoint (skipping `Completed` nodes). All three built-in stores implement it; a
+store that does not keeps the prior save-at-boundaries behavior with zero overhead.
+Non-completed nodes re-run on resume — an **at-least-once** contract that requires
+side-effecting actions to be idempotent (see the
+[Persistence guide](../guides/persistence.md#durability--idempotency-crash-resume)).
 
 ## Extensibility Points
 

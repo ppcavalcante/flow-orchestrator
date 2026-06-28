@@ -125,6 +125,35 @@ If persistence input can cross a trust boundary, validate and sandbox it before 
 [`docs/guides/persistence.md`](docs/guides/persistence.md) for the worked detail and ADR-0008
 for the FlatBuffers-hardening decision and its residual.
 
+### Durability & crash-resume — the at-least-once contract
+
+A store that implements the optional `Checkpointer` interface gives the workflow **crash-resume**:
+state is checkpointed at each completed level barrier, and re-running `Execute` with the same
+`WorkflowID`/store/DAG resumes from the last checkpoint, skipping `Completed` nodes and
+re-running the rest. This carries a contract callers MUST design around:
+
+- **Execution is at-least-once on any non-completed node.** A node that had not reached
+  `Completed` when the process died — *including a node that was in flight* — re-runs on
+  resume, because the crash can land after a side effect but before that node's completion was
+  checkpointed. A side-effecting action (payment, email, non-idempotent API call) **MUST be
+  idempotent**; otherwise resume can duplicate the effect. This is the same guarantee Temporal,
+  DBOS, and Restate impose — it is a contract, not a defect.
+- **`IdempotencyKey(data, nodeName)` is replay-stable.** It derives a key from
+  `(WorkflowID, nodeName)` ONLY, so the original attempt and every resume present a
+  byte-identical key for downstream dedupe. It deliberately excludes any retry attempt or
+  timestamp (a resume re-run is the *same* logical attempt). Its format —
+  `hex(SHA-256( uint64-LE(len(workflowID)) || workflowID || nodeName ))`, 64 lowercase hex
+  chars — is a **stable contract**: downstream systems may recompute it, so it will not change
+  without a deliberate, documented break.
+- **Checkpoint writes are atomic.** The file stores write via temp-file + fsync + rename, so a
+  crash mid-checkpoint leaves either the prior checkpoint or the new one fully intact, never a
+  torn file.
+- **A changed graph is rejected, not mis-resumed.** If the persisted state references a node
+  the current DAG no longer contains, resume fails with `ErrValidation` rather than silently
+  rehydrating stale state (a node-identity graph-identity guard).
+
+See [`docs/guides/persistence.md`](docs/guides/persistence.md) for the worked detail.
+
 ## Error contract — two domains, intentionally not aliased
 
 Flow Orchestrator exposes two distinct families of sentinel errors. They are matched with

@@ -426,6 +426,23 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 			markSkippedFrom(levels, levelIndex+1, data)
 			return execErr
 		}
+
+		// Durable checkpoint at the level barrier (M9 crash-resume). The level
+		// completed without cancellation or a fail-fast failure, so every node in
+		// it is now terminal in `data`; flushing here persists that progress so a
+		// process crash during a LATER level resumes from this point (completed
+		// nodes skipped). The callback is wired by Workflow.Execute only when the
+		// Store implements Checkpointer; a nil callback (the default) is zero
+		// overhead. A checkpoint write failure aborts the run rather than
+		// continuing with unrecorded progress that a later crash would silently
+		// lose. The cancel and fail-fast return paths above deliberately do NOT
+		// checkpoint here — Workflow.Execute performs a final Save on those paths.
+		// (DEC-M9, chunk 2.)
+		if d.config.checkpoint != nil {
+			if err := d.config.checkpoint(data); err != nil {
+				return fmt.Errorf("workflow checkpoint failed after level %d: %w", levelIndex, err)
+			}
+		}
 	}
 
 	return nil

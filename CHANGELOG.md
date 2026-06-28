@@ -5,6 +5,73 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-alpha]
+
+**M9 — Durable Execution Core (Tier 1: crash-resume).** A process can now crash mid-run
+and resume from where it left off, re-running only the work that had not completed. The
+whole milestone is **ADDITIVE — there are NO breaking changes** (in contrast to the
+breaking `0.8.0-alpha`): the new durability is an *optional* `Checkpointer` interface a
+store may implement, a new `IdempotencyKey` helper, and internal hardening of the file
+writes. Existing code, the `WorkflowStore` interface, and `DAG.Execute`'s signature are
+unchanged; a store that does not implement `Checkpointer` behaves exactly as before. The
+in-code version constant is `0.9.0-alpha`; every tag is a pre-release, so `go get @latest`
+resolves to it. See [STABILITY.md](STABILITY.md) and
+[docs/guides/persistence.md](docs/guides/persistence.md).
+
+### Added (0.9.0-alpha — M9)
+- **Durable crash-resume via an optional `Checkpointer` interface.** A `WorkflowStore` MAY
+  implement `Checkpointer { SaveCheckpoint(*WorkflowData) error }`. When it does,
+  `Workflow.Execute` flushes the run's state at each completed level barrier (the
+  per-level checkpoint, wired through `ExecutionConfig` — `DAG.Execute`'s signature is
+  unchanged). The three built-in stores implement it: `JSONFileStore` /
+  `FlatBuffersStore` checkpoint atomically; `InMemoryStore` checkpoints into its map. A
+  store that does NOT implement `Checkpointer` keeps the prior save-at-boundaries-only
+  behavior with zero overhead.
+- **Resume = re-run `Execute` with the same `WorkflowID` + store + DAG.** Nodes the journal
+  records `Completed` are skipped and their outputs rehydrated; every not-done node —
+  including any node in flight at the crash — re-runs. No new `Resume()` method is needed.
+- **Graph-identity guard.** If the persisted state references a node the current DAG no
+  longer contains, resume is rejected with `ErrValidation` (the node-identity analog of
+  workflow versioning) rather than silently mis-resuming a changed graph.
+- **`IdempotencyKey(data *WorkflowData, nodeName string) string`.** A deterministic,
+  replay-stable dedupe key for side-effecting actions, derived ONLY from
+  `(WorkflowID, nodeName)` so it is byte-identical across a crash-resume re-run. Stable
+  format (a compatibility contract): `hex(SHA-256( uint64-LE(len(workflowID)) ||
+  workflowID || nodeName ))`. See the at-least-once contract below.
+
+### Fixed (0.9.0-alpha — M9)
+- **Atomic file writes (torn-write guard).** Both file stores previously wrote via a bare
+  `os.WriteFile`, which a crash mid-write could leave torn/partial. `Save` and
+  `SaveCheckpoint` now write via temp-file + `fsync` + atomic `rename` (with a parent-dir
+  fsync), so a crash leaves either the prior file or the new file fully intact, never a
+  mix. This is both the durability foundation for checkpointing and an independent fix to
+  a latent corruption-on-crash bug.
+
+### Contract (0.9.0-alpha — M9)
+- **At-least-once on any non-completed node — side effects MUST be idempotent.** On resume,
+  any node that had not reached `Completed` when the process died — *including a node that
+  was in flight* — re-runs, because the crash can land after a side effect but before that
+  node's completion was checkpointed. This is the same guarantee Temporal / DBOS / Restate
+  impose; it is a contract, not a bug. Make side-effecting actions idempotent (use
+  `IdempotencyKey` to drive downstream dedupe). Documented in
+  [STABILITY.md](STABILITY.md) and the persistence guide.
+
+### Verified (0.9.0-alpha — M9)
+- **Crash-resume serialization fidelity (int64).** A gopter property over the real
+  checkpoint `Save → reload` path asserts every value's exact type and magnitude survives
+  (the int64 killers — `MaxInt64` / `MinInt64` / the 2^53 boundary — ride every
+  iteration), guarding the durability multiplier of the v0.7.1 int64-via-float64 saga.
+  Mutation-proven (reverting the `UseNumber` codec falsifies it).
+- **TLA+ `DurableExecutor.tla` — machine-checked resume-equivalence.** A new durable model
+  (the base `Executor.tla` left byte-unchanged) adds `Checkpoint` / `Crash` / `Recover` and
+  proves, exhaustively across continue-on-error / hard-fail / clean scenarios: the retained
+  base safety invariants under crash/recover, **`ExecFidelity`** (a node reported done/
+  failed actually executed — the output arm of resume-equivalence), **`StatusConvergence`**
+  (every settled state reached with crashes is one a no-crash run could reach — the status
+  arm), **`NoDoubleCommit`** (a checkpointed-`done` node never re-runs), and `Termination`
+  including post-crash recovery. Every new property is mutation-proven to bite. See
+  [specs/README.md](specs/README.md).
+
 ## [0.8.0-alpha]
 
 **M8 Phase B — pre-1.0 hardening & consolidation.** The post-v0.7.4 batch from the

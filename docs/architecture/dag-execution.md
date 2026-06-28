@@ -233,12 +233,24 @@ The DAG execution algorithm proceeds as follows:
    - Apply exponential backoff between retry attempts if configured
 
 6. **Persistence**:
-   - Persistence is driven by `Workflow.Execute` (the wrapper around
-     `DAG.Execute`), not by the level executor per node. If a store is configured,
-     `Workflow.Execute` loads existing state at the start and saves the workflow
-     state once at the end — after successful completion, or after a failed run
-     (so failed state is captured). There is no per-node save inside the DAG
-     executor.
+   - Boundary persistence is driven by `Workflow.Execute` (the wrapper around
+     `DAG.Execute`). If a store is configured, `Workflow.Execute` loads existing
+     state at the start and saves the workflow state at the end — after successful
+     completion, or after a failed/cancelled run (so failed state is captured).
+   - **Durable mid-run checkpointing (M9 crash-resume).** When the configured
+     store additionally implements the optional `Checkpointer` interface,
+     `Workflow.Execute` wires an internal `ExecutionConfig.checkpoint` callback so
+     `DAG.Execute` flushes the workflow state **at each completed level barrier**
+     (after the level finished without cancellation or a fail-fast failure, when
+     every node in it is terminal). A crash during a later level then resumes from
+     the last checkpointed level (completed nodes are skipped). The callback is
+     `nil` for a store that does not implement `Checkpointer`, so that path is
+     zero-overhead and unchanged. A checkpoint write failure aborts the run rather
+     than continuing with unrecorded progress. The cancel and fail-fast return
+     paths deliberately do **not** checkpoint at the barrier — `Workflow.Execute`
+     performs the final `Save` on those paths. There is still no per-*node* save
+     inside the executor; the checkpoint granularity is the level barrier. See the
+     [Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume).
 
 ## Execution Context
 

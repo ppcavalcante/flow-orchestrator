@@ -37,6 +37,26 @@ type WorkflowStore interface {
 	Delete(workflowID string) error
 }
 
+// Checkpointer is an OPTIONAL interface a WorkflowStore MAY implement to support
+// durable mid-run checkpointing (M9 crash-resume). It is additive: a Store that
+// does not implement Checkpointer keeps the prior "save at run boundaries only"
+// behavior with zero change. When a Store DOES implement it, Workflow.Execute
+// wires the executor to flush the workflow's state at each completed level
+// barrier, so a process crash mid-run can resume from the last completed level
+// (skipping already-completed nodes) instead of restarting from scratch.
+//
+// SaveCheckpoint must persist data ATOMICALLY and durably: a crash during the
+// call must leave either the prior checkpoint or the new one fully intact, never
+// a torn mix. For the file stores this is the temp+fsync+rename of
+// writeFileAtomic; for InMemoryStore it is the lock-guarded clone. Because the
+// snapshot a Store already writes carries the full per-node {status, output}, a
+// checkpoint is simply an atomic whole-snapshot Save performed mid-run — no new
+// serialization format is involved.
+type Checkpointer interface {
+	// SaveCheckpoint atomically and durably persists the current workflow state.
+	SaveCheckpoint(data *WorkflowData) error
+}
+
 // validateWorkflowID rejects any workflow ID that is not a single safe path
 // segment, preventing path traversal when the ID is joined onto a store's
 // baseDir. An ID is rejected if it is empty, contains a path separator, is not
@@ -53,6 +73,93 @@ func validateWorkflowID(workflowID string) error {
 		filepath.Base(workflowID) != workflowID {
 		return fmt.Errorf("%w: invalid workflow ID %q: must be a single path segment with no separators or traversal", ErrValidation, workflowID)
 	}
+	return nil
+}
+
+// atomicTempFile is the subset of *os.File that writeFileAtomic uses. It exists
+// so a test can inject a failure on the Write / Sync / Chmod / Close steps — the
+// torn-write-guard error branches that are otherwise impossible to trigger with a
+// real on-disk file (a write to a freshly-created temp file does not fail on
+// demand). *os.File satisfies it directly; production never substitutes anything.
+type atomicTempFile interface {
+	Write(p []byte) (int, error)
+	Sync() error
+	Chmod(mode os.FileMode) error
+	Close() error
+	Name() string
+}
+
+// createTempFile is the temp-file-creation seam used by writeFileAtomic (default
+// os.CreateTemp). It is an unexported test seam — the same discipline as
+// openForRead — adding no public surface; tests swap it for a wrapper that returns
+// a real temp file failing on a chosen method. Production never reassigns it.
+var createTempFile = func(dir, pattern string) (atomicTempFile, error) {
+	return os.CreateTemp(dir, pattern)
+}
+
+// writeFileAtomic writes data to path atomically: it writes to a temp file in
+// the SAME directory, fsyncs it, then renames it over path. A crash (or an error)
+// at any point leaves either the prior file fully intact or the new file fully
+// written — never a torn/partial file. This is the torn-write guard the durable
+// checkpoint path (M9) depends on, and it also hardens the existing Save paths.
+//
+// The temp file is created in path's directory (not the system temp dir) so the
+// final os.Rename is a same-filesystem rename, which POSIX guarantees is atomic;
+// a cross-filesystem rename would fall back to a non-atomic copy. On any error
+// the temp file is removed so a failed write leaves no leftover. The parent
+// directory is fsynced after the rename so the rename itself is durable across a
+// power loss (on POSIX the rename is atomic but its persistence is only
+// guaranteed after the directory entry is synced); a dir-sync failure is not
+// fatal — the rename already succeeded and the data file was fsynced.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+	dir := filepath.Dir(path)
+
+	tmp, err := createTempFile(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	// On any failure after creation, remove the temp file so a failed write
+	// never leaves a leftover next to the real file. Both calls are best-effort
+	// cleanup on the error path — there is nothing useful to do with their errors
+	// (the real error is already being returned), so they are intentionally
+	// ignored. nolint:errcheck // best-effort cleanup on the error path
+	defer func() {
+		if err != nil {
+			tmp.Close()        //nolint:errcheck,gosec // may already be closed; cleanup only
+			os.Remove(tmpName) //nolint:errcheck,gosec // best-effort temp cleanup
+		}
+	}()
+
+	if _, err = tmp.Write(data); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	// fsync the data to stable storage BEFORE the rename, so the renamed file is
+	// guaranteed complete on disk (not just in the page cache).
+	if err = tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err = tmp.Chmod(perm); err != nil {
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	// Atomic replace (same-filesystem rename).
+	if err = os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+
+	// Best-effort durability of the rename itself: fsync the parent directory.
+	// The rename already succeeded, so a dir-sync error does not corrupt anything
+	// and must not fail the write — the calls are intentionally best-effort.
+	if d, derr := os.Open(dir); derr == nil { //nolint:gosec // controlled internal directory path
+		d.Sync()  //nolint:errcheck,gosec // best-effort directory fsync; rename already succeeded
+		d.Close() //nolint:errcheck,gosec // best-effort
+	}
+
 	return nil
 }
 
@@ -122,14 +229,22 @@ func (s *JSONFileStore) Save(data *WorkflowData) error {
 		return fmt.Errorf("failed to marshal workflow data: %w", err)
 	}
 
-	// Write to file
+	// Write to file atomically (temp + fsync + rename) so a crash mid-write
+	// cannot leave a torn/partial file (the durable-checkpoint torn-write guard).
 	filePath := filepath.Join(s.baseDir, workflowID+".json")
-	err = os.WriteFile(filePath, jsonData, 0600)
-	if err != nil {
+	if err := writeFileAtomic(filePath, jsonData, 0600); err != nil {
 		return newIOError("write", workflowID, err)
 	}
 
 	return nil
+}
+
+// SaveCheckpoint persists the current workflow state mid-run (M9 crash-resume).
+// A checkpoint is an atomic whole-snapshot Save: JSONFileStore.Save already
+// writes atomically (writeFileAtomic), so the durability contract is satisfied
+// by delegating to it. This makes *JSONFileStore implement Checkpointer.
+func (s *JSONFileStore) SaveCheckpoint(data *WorkflowData) error {
+	return s.Save(data)
 }
 
 // Load retrieves workflow data from JSON
@@ -611,14 +726,22 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	// Get the finished buffer
 	buf := builder.FinishedBytes()
 
-	// Write to file
+	// Write to file atomically (temp + fsync + rename) so a crash mid-write
+	// cannot leave a torn/partial file (the durable-checkpoint torn-write guard).
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
-	err := os.WriteFile(filePath, buf, 0600)
-	if err != nil {
+	if err := writeFileAtomic(filePath, buf, 0600); err != nil {
 		return newIOError("write", workflowID, err)
 	}
 
 	return nil
+}
+
+// SaveCheckpoint persists the current workflow state mid-run (M9 crash-resume).
+// FlatBuffersStore.Save writes atomically (writeFileAtomic), so delegating to it
+// satisfies the durability contract. This makes *FlatBuffersStore implement
+// Checkpointer.
+func (s *FlatBuffersStore) SaveCheckpoint(data *WorkflowData) error {
+	return s.Save(data)
 }
 
 // Load retrieves workflow data using FlatBuffers
@@ -895,6 +1018,15 @@ func (s *InMemoryStore) Save(data *WorkflowData) error {
 	// Clone the data to avoid external modification
 	s.data[workflowID] = data.Clone()
 	return nil
+}
+
+// SaveCheckpoint persists the current workflow state mid-run (M9 crash-resume).
+// InMemoryStore is not durable across process death, but it implements
+// Checkpointer (delegating to the lock-guarded, cloning Save) so it can drive the
+// in-process crash-resume tests and so callers get uniform behavior across
+// stores. This makes *InMemoryStore implement Checkpointer.
+func (s *InMemoryStore) SaveCheckpoint(data *WorkflowData) error {
+	return s.Save(data)
 }
 
 // Load retrieves workflow data from memory

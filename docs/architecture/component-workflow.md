@@ -75,6 +75,22 @@ type WorkflowStore interface {
 }
 ```
 
+A store MAY additionally implement the optional `Checkpointer` interface to opt
+into durable mid-run checkpointing (M9 crash-resume):
+
+```go
+type Checkpointer interface {
+    // SaveCheckpoint atomically and durably persists the current workflow state.
+    SaveCheckpoint(data *WorkflowData) error
+}
+```
+
+When the configured store implements `Checkpointer`, `Workflow.Execute` flushes
+the run's state at each completed level barrier, so a crash mid-run resumes from
+the last checkpoint instead of restarting. All three built-in stores implement it
+(the file stores via atomic temp+fsync+rename). See the
+[Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume).
+
 ## Execution Flow
 
 The workflow execution process follows these steps:

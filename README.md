@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status-alpha-release)
 
-A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes.
+A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes — an **embeddable, formally-verified durable DAG engine**: crash anywhere and resume from the last completed level, with **no server, no database required, and no determinism tax.**
 
 ## Status: Alpha Release
 
@@ -18,11 +18,13 @@ Flow Orchestrator is currently in **alpha status**. While the core functionality
 
 Flow Orchestrator is a flexible workflow engine designed for embedding within Go applications. It allows you to define, execute, and monitor complex workflows with a clean, fluent API while handling parallelism, dependencies, error handling, and persistence automatically.
 
+It is a **durable execution core**: a workflow that crashes mid-run can be resumed — restart with the same workflow ID and store, and execution picks up from the last completed level without re-running finished work. Because a workflow here is **data (a static DAG), not replayed code**, this durability carries **no determinism tax** (unlike replay-based engines) and the resume algorithm is **machine-checked in TLA+** — a niche no other Go engine holds: an embeddable, formally-verified durable DAG engine with no server and no DB required. See [Durable Crash-Resume](#durable-crash-resume).
+
 ### Key Features
 
 - **High Performance**: Optimized for minimal allocations and maximum throughput
 - **Thread-Safe**: Built for concurrent access with minimal lock contention
-- **Persistent**: Save and resume workflows across application restarts
+- **Durable Crash-Resume**: Opt-in mid-run checkpointing (the optional `Checkpointer` interface; nil = zero overhead) lets a workflow survive a process crash and resume from the last completed level — same workflow ID + store, no finished work re-run, no server or DB required. Resume-equivalence is machine-checked in TLA+ ([`DurableExecutor.tla`](specs/README.md))
 - **Observable**: Comprehensive metrics for monitoring and optimization
 - **Extensible**: Designed to support multiple orchestration patterns
 - **Embeddable**: Clean API for integration into any Go application
@@ -39,14 +41,14 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.8.0-alpha`** (the M8 Phase B pre-1.0
-> hardening: aggregated execution errors, real `Skipped` status, cancellation-wins semantics,
-> per-instance metrics, OpenTelemetry span-per-node tracing, and a public-surface shrink — on
-> top of the M1–M7 work). Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.8.0-alpha`** — so the command above is
-> correct. Pinning the exact version (`@v0.8.0-alpha`) is optional but recommended for
+> **no stable (`v1`+) release**. The latest is **`v0.9.0-alpha`** (the M9 durable execution core:
+> crash-resume via the optional `Checkpointer` interface, per-level checkpointing, the
+> at-least-once contract + `IdempotencyKey`, atomic writes, and a TLA+-verified resume-equivalence
+> model — on top of the M1–M8 work). Because there is no stable tag, `go get @latest`
+> resolves to the highest pre-release — currently **`v0.9.0-alpha`** — so the command above is
+> correct. Pinning the exact version (`@v0.9.0-alpha`) is optional but recommended for
 > reproducibility, and the API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
-> The in-code version (`pkg/workflow.Version`) reads `0.8.0-alpha`. See
+> The in-code version (`pkg/workflow.Version`) reads `0.9.0-alpha`. See
 > [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
@@ -238,10 +240,52 @@ run as part of `go test ./...`.
 Beyond the property tests, the level executor is modeled in TLA+ under
 [`specs/`](specs/README.md) and machine-checked with TLC for safety (concurrency
 bound, dependencies-before-run, fail-fast halting) and liveness (termination /
-deadlock-freedom). `specs/README.md` documents the model, the scenarios, and the
-honest scope (design-exhaustive model vs implementation-sampled tests).
+deadlock-freedom). A second model, [`DurableExecutor.tla`](specs/README.md),
+machine-checks the **crash-resume algorithm**: resume-equivalence on both arms —
+`ExecFidelity` (a reported result must have actually executed; no phantom
+checkpoint) and `StatusConvergence` (a crash introduces no new terminal state).
+`specs/README.md` documents the models, the scenarios, and the honest scope
+(design-exhaustive model vs implementation-sampled tests).
 
 For more information on our testing approach, see our [Test Coverage Strategy](docs/development/test_coverage_strategy.md) documentation.
+
+## Durable Crash-Resume
+
+A workflow run can survive a process crash and resume from where it left off,
+re-running only the work that had not yet completed — **durable execution** with no
+server and no database required.
+
+A `WorkflowStore` MAY implement the optional `Checkpointer` interface to opt in:
+
+```go
+type Checkpointer interface {
+    // SaveCheckpoint atomically and durably persists the current workflow state.
+    SaveCheckpoint(data *WorkflowData) error
+}
+```
+
+When the store implements it, `Workflow.Execute` flushes the run's state **at each
+completed level barrier** (atomically — temp file + fsync + rename). **Resume is just
+re-running `Execute`** with the same workflow ID, store, and DAG: completed nodes are
+skipped (their outputs rehydrated), every other node re-runs, and a persisted node
+missing from the current DAG is rejected (a graph-identity guard) rather than
+mis-resumed. A store that does not implement `Checkpointer` keeps the prior
+save-at-boundaries behavior with **zero overhead**. All three built-in stores
+(`InMemoryStore`, `JSONFileStore`, `FlatBuffersStore`) implement it.
+
+**At-least-once contract.** A node that had not reached `Completed` when the crash
+hit — including one that was in flight — re-runs on resume, so its side effect can
+happen more than once. Side-effecting actions **must be idempotent**; the library
+provides `IdempotencyKey(data, nodeName)`, a replay-stable key (derived only from
+the workflow ID and node name, byte-identical across a resume) to drive downstream
+deduplication. This is the same guarantee Temporal, DBOS, and Restate impose.
+
+Because a workflow is **data (a static DAG), not replayed code**, crash-resume costs
+**no determinism tax**, and the resume algorithm is machine-checked in TLA+.
+
+See the [Persistence guide → Durability & Idempotency](docs/guides/persistence.md#durability--idempotency-crash-resume)
+for the worked detail and the [API reference](docs/reference/api-reference.md#durable-crash-resume-added-v090)
+for the durable surface.
 
 ## Architecture
 
@@ -250,7 +294,7 @@ Flow Orchestrator is designed with a modular architecture that separates concern
 Key architectural components include:
 
 - **Workflow Engine**: Core execution engine for DAG-based workflows
-- **Persistence Layer**: Pluggable storage backends for workflow state
+- **Persistence Layer**: Pluggable storage backends for workflow state, with optional durable mid-run checkpointing (`Checkpointer`) for crash-resume
 - **Middleware System**: Extensible middleware for cross-cutting concerns
 - **Metrics & Observability**: Comprehensive metrics for monitoring
 
@@ -398,8 +442,18 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.8.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.8.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.9.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.9.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
+
+### Roadmap
+
+- **Shipped (M9, durable execution core):** crash-resume via the optional
+  `Checkpointer` interface — per-level checkpointing, resume from the last completed
+  level, the at-least-once contract + `IdempotencyKey`, atomic writes, and a
+  TLA+-machine-checked resume-equivalence model.
+- **Future (not yet shipped):** Tier-2 *suspend-resume* — durable timers, signals,
+  and waiting for external events. These require a re-entrant execution model and are
+  a deliberate future direction, **not** part of the current release.
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.
 

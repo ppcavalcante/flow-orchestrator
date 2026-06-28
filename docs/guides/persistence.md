@@ -195,6 +195,93 @@ func resumeWorkflow(workflowID string) error {
 }
 ```
 
+## Durability & Idempotency (crash-resume)
+
+A workflow run can survive a process crash and resume from where it left off,
+re-running only the work that had not yet completed. This is **crash-resume**:
+durable execution built on a per-node *result journal* mapped onto the static DAG.
+
+### How it works
+
+A `WorkflowStore` MAY additionally implement the optional `Checkpointer`
+interface:
+
+```go
+type Checkpointer interface {
+    // SaveCheckpoint atomically and durably persists the current workflow state.
+    SaveCheckpoint(data *WorkflowData) error
+}
+```
+
+When the store a `Workflow` is given implements `Checkpointer`, `Workflow.Execute`
+flushes the run's state to the store **at each completed level barrier** (a
+checkpoint). The three built-in stores all implement it: the file stores
+(`JSONFileStore`, `FlatBuffersStore`) write atomically; `InMemoryStore` checkpoints
+into its map (useful for tests, but not durable across process death).
+
+A store that does **not** implement `Checkpointer` keeps the prior behavior
+exactly — state is saved only at run boundaries — with zero overhead.
+
+**Resume is just re-running `Execute`** with the same `WorkflowID`, the same store,
+and the same DAG (the `resumeWorkflow` example above already does this). On resume:
+
+- nodes the journal records `Completed` are **skipped**, and their outputs are
+  rehydrated from the journal;
+- every other node — including any node that was *in flight* when the crash hit —
+  **re-runs**;
+- if the persisted state references a node the current DAG no longer contains, the
+  resume is **rejected** (a graph-identity guard), rather than silently
+  mis-resuming a changed graph.
+
+Checkpoint writes are atomic (temp file + fsync + rename): a crash mid-write leaves
+either the prior checkpoint or the new one fully intact, never a torn file.
+
+### The at-least-once contract — side effects MUST be idempotent
+
+> **A node that had not reached `Completed` when the crash occurred — including a
+> node that was in flight — RE-RUNS on resume.** The crash can land *after* a node
+> performed a side effect but *before* its completion was checkpointed, so that
+> side effect happens **at least once, possibly more than once**.
+
+This is a contract, not a bug: it is the same at-least-once guarantee Temporal,
+DBOS, and Restate all impose, and it cannot be designed away without a
+same-transaction database. **Any action with an external side effect (charging a
+card, sending an email, calling a non-idempotent API) MUST be made idempotent** so
+a re-run is harmless.
+
+The library provides a replay-stable key to drive downstream deduplication:
+
+```go
+func IdempotencyKey(data *workflow.WorkflowData, nodeName string) string
+```
+
+`IdempotencyKey` returns a deterministic key derived **only** from
+`(WorkflowID, nodeName)`. It is byte-identical across a crash-resume re-run — the
+original attempt and every resume present the *same* key — so an action can pass it
+to a downstream system as an idempotency key and the downstream collapses the
+re-execution into one logical operation:
+
+```go
+node := workflow.NewNode("charge-card", workflow.ActionFunc(
+    func(ctx context.Context, data *workflow.WorkflowData) error {
+        key := workflow.IdempotencyKey(data, "charge-card")
+        // Pass key to the payment API as its idempotency key; on a resume
+        // re-run the same key arrives and the charge is not duplicated.
+        return paymentAPI.Charge(ctx, key, amount)
+    }))
+```
+
+The key deliberately does **not** fold in any retry attempt or timestamp: a resume
+re-run is the *same logical attempt*, not a new one. (In-run retries are a separate
+concern handled by `RetryableAction`.)
+
+**Stable format (a compatibility contract):** the key is the lowercase hex encoding
+of `SHA-256( uint64-LE(len(workflowID)) || workflowID || nodeName )` — 64 hex
+characters. The length-frame on the workflow ID makes the field boundary
+unambiguous (so `("ab","c")` and `("a","bc")` cannot collide). Downstream systems
+may recompute this, so the construction will not change across versions without a
+deliberate, documented break.
+
 ## Serialization Considerations
 
 ### Supported Data Types

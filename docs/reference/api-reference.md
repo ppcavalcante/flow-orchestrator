@@ -345,6 +345,41 @@ func NewJSONFileStore(baseDir string) (*JSONFileStore, error)
 func NewFlatBuffersStore(baseDir string) (*FlatBuffersStore, error)
 ```
 
+### Durable crash-resume (added v0.9.0)
+
+A store MAY additionally implement the optional `Checkpointer` interface to opt
+into durable mid-run checkpointing. All three built-in stores implement it.
+
+```go
+// Checkpointer is an optional interface a WorkflowStore may implement to enable
+// durable mid-run checkpointing (crash-resume). When the store implements it,
+// Workflow.Execute flushes the run's state at each completed level barrier; a
+// store that does not keeps the prior save-at-boundaries behavior with zero
+// overhead.
+type Checkpointer interface {
+    // SaveCheckpoint atomically and durably persists the current workflow state.
+    SaveCheckpoint(data *WorkflowData) error
+}
+```
+
+Resume is just re-running `Workflow.Execute` with the same `WorkflowID`, store, and
+DAG: `Completed` nodes are skipped (outputs rehydrated), every non-completed node
+re-runs, and a persisted node missing from the current DAG is rejected with
+`ErrValidation` (graph-identity guard). Because non-completed nodes re-run,
+execution is **at-least-once** — side-effecting actions must be idempotent.
+
+```go
+// IdempotencyKey returns a replay-stable dedupe key for one node of one workflow
+// run, derived only from (WorkflowID, nodeName): byte-identical across a
+// crash-resume re-run, so a downstream system can collapse the re-execution into
+// one logical operation. Format (a stable contract):
+//   hex(SHA-256( uint64-LE(len(workflowID)) || workflowID || nodeName ))  // 64 hex chars
+func IdempotencyKey(data *WorkflowData, nodeName string) string
+```
+
+See the [Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume)
+for the worked detail and the at-least-once contract.
+
 ## Node Status
 
 ```go
@@ -420,8 +455,12 @@ The execution semantics above are verified at two layers (milestone M7):
 - **Layer 2 — TLA+ formal model.** `specs/` contains a TLA+/PlusCal model of the
   level executor and concurrency semaphore (`Executor.tla` + `MCExecutor.tla`),
   TLC-checked for safety (concurrency bound, dependencies-before-run, fail-fast
-  halting) and liveness (termination / deadlock-freedom). See
-  [`specs/README.md`](../../specs/README.md) for the model, the scenarios, and the
+  halting) and liveness (termination / deadlock-freedom). Milestone M9 adds
+  `DurableExecutor.tla` (+ `MCDurableExecutor.tla`), which models crash-resume and
+  proves **resume-equivalence** on both arms — `ExecFidelity` (a reported result
+  must have actually executed; no phantom checkpoint) and `StatusConvergence` (a
+  crash introduces no new terminal state). See
+  [`specs/README.md`](../../specs/README.md) for the models, the scenarios, and the
   honest scope (design-exhaustive vs implementation-sampled).
 
 ## Error Sentinels
