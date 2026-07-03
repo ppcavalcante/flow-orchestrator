@@ -1,7 +1,18 @@
 # Per-package coverage high-water baselines for the ratchet gate.
 # Auto-updated upward by check_coverage.sh; commit increases. See the
 # script header for how to intentionally lower a baseline. Format: <pkg> <pct>
-github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena 100.0
+# arena is pinned at 99.3 (NOT 100.0) deliberately. The uncovered ~0.7% is the
+# single statement at arena.go:258-259 — a defensive double-checked-lock recheck
+# in StringPool.Intern, reachable ONLY when a concurrent goroutine inserts a
+# string between one goroutine's read-lock RUnlock and its write-lock Lock. That
+# window is scheduling-dependent: deterministically covered on arm64 but not on
+# amd64 (the CI coverage-gate arch). It is not safely+deterministically forceable
+# through the public API — a production test-hook was rejected (arena.go is
+# shipped, byte-identical to v0.9.0) and a busy-spin barrier test was rejected
+# (CI-hang risk on 2-4 core runners). 99.3 is the honest arch-independent floor;
+# a 100.0 baseline asserted a determinism that never existed (M9 CI got lucky).
+# DO NOT re-raise this from a local arm64 100% reading — the amd64 gate floor is 99.3.
+github.com/ppcavalcante/flow-orchestrator/internal/workflow/arena 99.3
 github.com/ppcavalcante/flow-orchestrator/internal/workflow/memory 91.7
 github.com/ppcavalcante/flow-orchestrator/internal/workflow/metrics 82.3
 github.com/ppcavalcante/flow-orchestrator/internal/workflow/utils 100.0
