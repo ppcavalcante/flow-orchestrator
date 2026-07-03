@@ -181,8 +181,28 @@ func (rcv *WorkflowState) MutateTimestamp(n int64) bool {
 	return rcv._tab.MutateInt64Slot(18, n)
 }
 
+func (rcv *WorkflowState) Waits(obj *TimerWaitEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *WorkflowState) WaitsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func WorkflowStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func WorkflowStateAddWorkflowId(builder *flatbuffers.Builder, workflowId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(workflowId), 0)
@@ -225,6 +245,12 @@ func WorkflowStateStartNodeOutputsVector(builder *flatbuffers.Builder, numElems 
 }
 func WorkflowStateAddTimestamp(builder *flatbuffers.Builder, timestamp int64) {
 	builder.PrependInt64Slot(7, timestamp, 0)
+}
+func WorkflowStateAddWaits(builder *flatbuffers.Builder, waits flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(waits), 0)
+}
+func WorkflowStateStartWaitsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func WorkflowStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

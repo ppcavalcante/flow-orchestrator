@@ -77,7 +77,7 @@ func TestDurableResume_CrashResumeSkipsCompleted(t *testing.T) {
 	// --- Phase 1: run until a "crash" at the checkpoint after level 1 (node b). ---
 	dag := buildDAG()
 	levelsCheckpointed := 0
-	dag.config.checkpoint = func(snap *WorkflowData) error {
+	cp := func(snap *WorkflowData) error {
 		levelsCheckpointed++
 		if levelsCheckpointed > 2 {
 			// Levels 0 (a) and 1 (b) have been persisted; the crash hits before
@@ -87,7 +87,7 @@ func TestDurableResume_CrashResumeSkipsCompleted(t *testing.T) {
 		return store.SaveCheckpoint(snap)
 	}
 	data1 := NewWorkflowData(id)
-	err := dag.Execute(context.Background(), data1)
+	err := dag.Execute(withCheckpoint(context.Background(), cp), data1)
 	require.Error(t, err, "the simulated crash must surface as an error")
 
 	// Precondition: the store persisted exactly a and b as Completed.
@@ -100,10 +100,10 @@ func TestDurableResume_CrashResumeSkipsCompleted(t *testing.T) {
 
 	// --- Phase 2: resume from the persisted state with a clean checkpointer. ---
 	resumeDAG := buildDAG()
-	resumeDAG.config.checkpoint = func(snap *WorkflowData) error { return store.SaveCheckpoint(snap) }
+	resumeCP := func(snap *WorkflowData) error { return store.SaveCheckpoint(snap) }
 	data2, loadErr := store.Load(id)
 	require.NoError(t, loadErr)
-	require.NoError(t, resumeDAG.Execute(context.Background(), data2))
+	require.NoError(t, resumeDAG.Execute(withCheckpoint(context.Background(), resumeCP), data2))
 
 	// a and b were persisted Completed → must NOT re-execute (the memoization
 	// guarantee). Each ran exactly once, in phase 1.
@@ -154,8 +154,12 @@ func TestDurableResume_NoCheckpointerNoBehaviorChange(t *testing.T) {
 	require.NoError(t, wf.Execute(context.Background()))
 	assert.Equal(t, 1, counter.get("a"))
 	assert.Equal(t, 1, counter.get("b"))
-	// The DAG must carry no checkpoint callback after a run with a non-checkpointer.
-	assert.Nil(t, wf.DAG.config.checkpoint, "no checkpoint callback may be wired for a non-Checkpointer store")
+	// No checkpoint callback is wired for a non-Checkpointer store. M10-P37 T1
+	// makes this structural: there is no shared config.checkpoint field to inspect
+	// any more — Workflow.Execute injects the callback on the per-Execute ctx ONLY
+	// when the Store implements Checkpointer, so a non-Checkpointer run carries no
+	// callback by construction (checkpointFrom(ctx) → nil). The run completing with
+	// each node executed exactly once (above) is the observable proof.
 }
 
 // TestDurableResume_GraphIdentityGuard: resuming against a DAG that no longer
@@ -187,9 +191,9 @@ func TestDurableResume_GraphIdentityGuard(t *testing.T) {
 func TestDurableResume_CheckpointFailureAbortsRun(t *testing.T) {
 	dag := NewDAG("cp-fail")
 	mustAddNode(t, dag, NewNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
-	dag.config.checkpoint = func(*WorkflowData) error { return errors.New("disk full") }
+	cp := func(*WorkflowData) error { return errors.New("disk full") }
 
-	err := dag.Execute(context.Background(), NewWorkflowData("cp-fail"))
+	err := dag.Execute(withCheckpoint(context.Background(), cp), NewWorkflowData("cp-fail"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checkpoint failed")
 	assert.Contains(t, err.Error(), "disk full")
@@ -257,7 +261,7 @@ func TestDurableResume_Property(t *testing.T) {
 			// crash "at level L" persists checkpoints for levels 0..L-1.
 			crashAtLevel := 1 + int(uint64(seed)%uint64(max(1, numLevels)))
 			cpSeen := 0
-			crashDAG.config.checkpoint = func(snap *WorkflowData) error {
+			crashCP := func(snap *WorkflowData) error {
 				cpSeen++
 				if cpSeen >= crashAtLevel {
 					return errors.New("crash")
@@ -265,7 +269,7 @@ func TestDurableResume_Property(t *testing.T) {
 				return store.SaveCheckpoint(snap)
 			}
 			data1 := NewWorkflowData(id)
-			crashDAG.Execute(context.Background(), data1) //nolint:errcheck // may crash (injected) or complete; outcome read via the store below
+			crashDAG.Execute(withCheckpoint(context.Background(), crashCP), data1) //nolint:errcheck // may crash (injected) or complete; outcome read via the store below
 
 			// Capture which nodes were persisted Completed before the crash.
 			persisted, err := store.Load(id)
@@ -297,8 +301,8 @@ func TestDurableResume_Property(t *testing.T) {
 			} else {
 				data2 = NewWorkflowData(id)
 			}
-			resumeDAG.config.checkpoint = func(snap *WorkflowData) error { return store.SaveCheckpoint(snap) }
-			if err := resumeDAG.Execute(context.Background(), data2); err != nil {
+			resumeCP := func(snap *WorkflowData) error { return store.SaveCheckpoint(snap) }
+			if err := resumeDAG.Execute(withCheckpoint(context.Background(), resumeCP), data2); err != nil {
 				return false
 			}
 

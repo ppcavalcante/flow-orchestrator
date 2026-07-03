@@ -54,6 +54,7 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 | [0006](0006-remove-inert-intern-knobs.md) | Remove inert string-interning config knobs | Accepted | M3 |
 | [0007](0007-error-taxonomy.md) | Error taxonomy — store sentinels + `%w` | Accepted | M3 |
 | [0008](0008-layered-bounds-guard-trust-reratify.md) | Layered bounds guard for FlatBuffers Load; trust re-ratification | Accepted | M4 |
+| [0009](0009-durable-continuations-waiting-status.md) | Durable continuations — the `Waiting` status and "suspend is a crash you chose" | Accepted | M10 |
 
 ## How to Create a New ADR
 

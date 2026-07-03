@@ -485,6 +485,64 @@ builder.AddNode("validate-user").
 For multi-field validation, prefer `ValidationMiddleware(func(*WorkflowData) error)`,
 which receives the whole `WorkflowData`.
 
+## Durable Continuation Patterns (v0.10.0)
+
+These patterns let a workflow **suspend** on an external event and **resume** later —
+across process restarts and long real-world delays — without holding a process open.
+Each uses a declared suspension node that parks in the `Waiting` status; the run
+checkpoints and `Workflow.Execute` returns `ErrSuspended`. See the
+[Persistence guide → Durable Continuations](./persistence.md#durable-continuations-suspend--resume)
+for the full mechanics and requirements (a `Checkpointer` store, and a `SignalStore`
+for signals).
+
+### Durable Sleep / Delay
+
+Wait a fixed real-world duration between steps — e.g. "send a follow-up 24h after
+signup" — without a running process or a `time.Sleep`. The timer persists an absolute
+due-time; an overdue timer fires on the next resume/`Tick`.
+
+```go
+b.AddNode("signup").WithAction(signup)
+b.AddTimer("wait-24h", 24*time.Hour).DependsOn("signup")
+b.AddNode("follow-up").WithAction(sendFollowUp).DependsOn("wait-24h")
+// First Execute parks at wait-24h (ErrSuspended). A host loop calls wf.Tick(ctx, now)
+// on its schedule; once now >= the due-time the timer fires and follow-up runs.
+```
+
+### Human-in-the-Loop Approval
+
+Pause until an operator (or an external system) makes a decision, delivered as a
+durable signal. Delivery is decoupled from the running process — the approval can
+arrive days later, when nothing is running.
+
+```go
+b.AddNode("submit-expense").WithAction(submit)
+b.AddWaitForSignal("await-approval", "approval").DependsOn("submit-expense")
+b.AddNode("reimburse").WithAction(reimburse).DependsOn("await-approval")
+
+// The first drive parks at await-approval (ErrSuspended). Later, an HTTP handler:
+sig := workflow.Signal{ID: "expense-4711", Name: "approval", Payload: decision}
+err := wf.DeliverAndResume(ctx, sig) // durably enqueue, then drive the resume
+// reimburse can read the decision via data.GetOutput("await-approval").
+```
+
+### Wait Until a Condition Holds
+
+Park until a predicate over the workflow data becomes true, re-checked on each wake —
+useful when the readiness is state written by another branch or a delivered signal.
+
+```go
+b.AddWaitForCondition("await-inventory", func(d *workflow.WorkflowData) bool {
+    n, ok := workflow.Get(d, stockKey)
+    return ok && n > 0
+}).DependsOn("reserve")
+```
+
+> **Waking is host-driven — there is no background scheduler.** Drive resumes from
+> your own loop/handler: `Execute` on startup (re-arms timers, re-checks signals),
+> `Tick(now)` for due timers, `DeliverAndResume(sig)` for signals. Same-`WorkflowID`
+> drives within a process are serialized by the `Locker` lease.
+
 ## Limitations of Flow Orchestrator's DAG Execution Model
 
 It's important to understand the following limitations of the DAG execution model:

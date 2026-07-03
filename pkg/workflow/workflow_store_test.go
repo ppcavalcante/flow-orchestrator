@@ -210,6 +210,60 @@ func TestMigration(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+// TestWaitingStatusRoundTripsAllStores is the MH-1 (no-silent-clobber)
+// persistence guard for the M10 Waiting status. A parked node carries Waiting;
+// the suspend/re-enter spine relies on that status surviving the exact
+// Save->Load seam M10 rides. Each built-in store must persist and rehydrate
+// Waiting faithfully:
+//   - FlatBuffersStore round-trips it through BOTH conversion switches
+//     (statusToFBStatus / fbStatusToNodeStatus) — a missed case in either would
+//     silently clobber Waiting back to Pending via the default arm.
+//   - JSONFileStore (which has an out-of-tree consumer) persists the string
+//     value directly; it must not drop or reject "waiting".
+//   - InMemoryStore must carry it across its cloning Save.
+//
+// Co-located with the suspending status itself so a future status addition is
+// reminded to extend the round-trip coverage.
+func TestWaitingStatusRoundTripsAllStores(t *testing.T) {
+	stores := map[string]func(dir string) (WorkflowStore, error){
+		"InMemoryStore":    func(string) (WorkflowStore, error) { return NewInMemoryStore(), nil },
+		"JSONFileStore":    func(dir string) (WorkflowStore, error) { return NewJSONFileStore(dir) },
+		"FlatBuffersStore": func(dir string) (WorkflowStore, error) { return NewFlatBuffersStore(dir) },
+	}
+
+	for name, mk := range stores {
+		t.Run(name, func(t *testing.T) {
+			store, err := mk(t.TempDir())
+			require.NoError(t, err)
+
+			data := NewWorkflowData("wf-waiting")
+			// A representative mix so Waiting is exercised alongside the other
+			// statuses, not in isolation.
+			data.SetNodeStatus("done", Completed)
+			data.SetNodeStatus("parked", Waiting)
+			data.SetNodeStatus("downstream", Pending)
+
+			require.NoError(t, store.Save(data))
+
+			loaded, err := store.Load("wf-waiting")
+			require.NoError(t, err)
+			require.NotNil(t, loaded)
+
+			parked, exists := loaded.GetNodeStatus("parked")
+			require.True(t, exists, "parked node status must survive Save/Load")
+			assert.Equal(t, Waiting, parked,
+				"%s must rehydrate Waiting faithfully, not clobber it to Pending", name)
+
+			// The neighbours must be untouched (guards against a mapping edit that
+			// shifts wire values).
+			done, _ := loaded.GetNodeStatus("done")
+			assert.Equal(t, Completed, done)
+			downstream, _ := loaded.GetNodeStatus("downstream")
+			assert.Equal(t, Pending, downstream)
+		})
+	}
+}
+
 func TestStatusToFBStatus(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -240,6 +294,14 @@ func TestStatusToFBStatus(t *testing.T) {
 			name:     "Skipped status",
 			status:   Skipped,
 			expected: fb.NodeStatusSkipped,
+		},
+		{
+			// MH-1 no-silent-clobber: Waiting must map to its own wire value, not
+			// fall through the default to Pending. Dropping the Waiting case from
+			// statusToFBStatus is a named should-fail bite-proof mutation.
+			name:     "Waiting status",
+			status:   Waiting,
+			expected: fb.NodeStatusWaiting,
 		},
 		{
 			name:     "Unknown status",
@@ -288,6 +350,13 @@ func TestFBStatusToNodeStatus(t *testing.T) {
 			expected: Skipped,
 		},
 		{
+			// MH-1 no-silent-clobber: the wire-5 Waiting value must decode back to
+			// Waiting, not fall through the default to Pending.
+			name:     "Waiting status",
+			status:   fb.NodeStatusWaiting,
+			expected: Waiting,
+		},
+		{
 			name:     "Unknown status",
 			status:   fb.NodeStatus(127), // out-of-range value
 			expected: Pending,            // should default to pending
@@ -309,6 +378,7 @@ func TestStatusConversionRoundTrip(t *testing.T) {
 		Completed,
 		Failed,
 		Skipped,
+		Waiting,
 	}
 
 	for _, status := range statuses {

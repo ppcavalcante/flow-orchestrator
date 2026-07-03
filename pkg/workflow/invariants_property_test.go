@@ -463,7 +463,7 @@ func TestEngineInvariants(t *testing.T) {
 			} else {
 				data.SetNodeStatus("dep", Completed)
 			}
-			failures := executeNodesInLevel(context.Background(), []*Node{child}, data, DefaultMaxConcurrency, resolveTracer(nil))
+			failures, _ := executeNodesInLevel(context.Background(), []*Node{child}, data, DefaultMaxConcurrency, resolveTracer(nil))
 			if depFailed {
 				// normal Failed dep -> child must be blocked: it did not run, it is
 				// marked Skipped (DEC-CHUNK3-status, S1), and Skipped is NOT a

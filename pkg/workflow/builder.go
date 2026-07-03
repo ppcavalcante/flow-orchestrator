@@ -30,6 +30,7 @@ type WorkflowBuilder struct {
 	store           WorkflowStore
 	executionConfig *ExecutionConfig     // nil => DAG uses DefaultConfig()
 	tracerProvider  trace.TracerProvider // nil => tracing off
+	clock           Clock                // nil => system clock (M10 durable timers)
 }
 
 // NewWorkflowBuilder creates a new workflow builder.
@@ -71,6 +72,53 @@ func (b *WorkflowBuilder) WithExecutionConfig(config ExecutionConfig) *WorkflowB
 func (b *WorkflowBuilder) WithTracerProvider(tp trace.TracerProvider) *WorkflowBuilder {
 	b.tracerProvider = tp
 	return b
+}
+
+// WithClock sets the clock used for durable timers on the workflow produced by
+// FromBuilder (M10). Passing nil keeps the default system clock. Tests inject a
+// FakeClock to drive durable-time scenarios deterministically.
+// Returns the builder for method chaining.
+func (b *WorkflowBuilder) WithClock(c Clock) *WorkflowBuilder {
+	b.clock = c
+	return b
+}
+
+// AddTimer adds a declared durable TimerNode (M10 chunk 2): when reached it sleeps
+// until clock.Now()+d (an absolute due-time frozen at the first encounter and
+// persisted in the checkpoint), parking the run (Waiting) so the process can exit;
+// on resume or a host Tick once the due-time has passed it fires and the run
+// converges. The timer is durable DATA, not a live time.Timer — it survives
+// crash/suspend and an overdue timer fires immediately on resume. Returns a
+// NodeBuilder for dependency wiring (DependsOn). The timer action is set directly,
+// so do NOT also call WithAction on the returned builder (that would replace the
+// timer); retry/timeout are not meaningful on a timer (a park bypasses both).
+func (b *WorkflowBuilder) AddTimer(name string, d time.Duration) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &timerAction{nodeName: name, duration: d}
+	return node
+}
+
+// AddWaitForSignal adds a declared WaitForSignalNode (M10 ph37): when reached it
+// parks the run (Waiting) until a signal named signalName is delivered to the
+// workflow's durable mailbox (via DeliverSignal / DeliverAndResume), then applies
+// the payload idempotently and converges. Requires a Store implementing
+// SignalStore. Returns a NodeBuilder for dependency wiring; the action is set
+// directly, so do NOT also call WithAction (that would replace it) — retry/timeout
+// are not meaningful on a park.
+func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &waitForSignalAction{nodeName: name, signalName: signalName}
+	return node
+}
+
+// AddWaitForCondition adds a declared WaitForConditionNode (M10 ph37, "await"):
+// when reached it parks the run while predicate(data) is false, re-evaluating on
+// each wake (a host re-drive), and converges when it flips. Returns a NodeBuilder
+// for dependency wiring; the action is set directly, so do NOT also call WithAction.
+func (b *WorkflowBuilder) AddWaitForCondition(name string, predicate func(*WorkflowData) bool) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &waitForConditionAction{predicate: predicate}
+	return node
 }
 
 // AddNode adds a regular node to the workflow and returns a NodeBuilder for

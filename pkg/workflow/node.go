@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -26,6 +27,15 @@ const (
 	// that Failed, or a dependency that was itself Skipped. Skipped is
 	// transitive and is NOT a failure (it never appears in ExecutionError).
 	Skipped NodeStatus = "skipped"
+	// Waiting indicates the node has parked: it is blocked on an external event
+	// (a clock or a signal) rather than on an upstream node, and the run has
+	// suspended. Waiting is NON-TERMINAL and NON-FAILING — a Waiting node never
+	// causes its dependents to be Skipped, never trips fail-fast, and is never
+	// counted as terminal/skipped. It drives Execute to return ErrSuspended at
+	// the level barrier (the run is not done); re-entering Execute on resume
+	// re-runs the node, which re-parks (or wakes) — so Waiting is treated as
+	// runnable, like Pending, not done. "Suspend is a crash you chose." (M10.)
+	Waiting NodeStatus = "waiting"
 )
 
 // Node represents a unit of work in a workflow.
@@ -112,6 +122,33 @@ func (n *Node) Execute(ctx context.Context, data *WorkflowData) error {
 	// Mark node as running
 	data.SetNodeStatus(n.Name, Running)
 
+	// Declared suspension node: it may PARK (return ErrSuspended). A park
+	// bypasses the timeout and retry wrappers entirely — a park is neither a
+	// failure to time-out nor a transient error to retry — and the action sees
+	// the raw caller context so the park decision is deterministic. The capability
+	// is gated on the action's static type (the suspendableAction marker), so an
+	// ordinary action returning ErrSuspended is NOT honored here (handled below).
+	// (DEC-M10-mechanism.)
+	if _, ok := n.Action.(suspendableAction); ok {
+		err := n.Action.Execute(ctx, data)
+		switch {
+		case err == nil:
+			data.SetNodeStatus(n.Name, Completed)
+			return nil
+		case errors.Is(err, ErrSuspended):
+			// Park: set the non-terminal Waiting status and propagate the
+			// sentinel unchanged (carrying any wake metadata) — a SUCCESS arm,
+			// never a Failed-stamp. The executor turns this into the barrier
+			// drain → checkpoint flush → ErrSuspended return.
+			data.SetNodeStatus(n.Name, Waiting)
+			return err
+		default:
+			// A declared suspension node can still fail for a real reason.
+			data.SetNodeStatus(n.Name, Failed)
+			return fmt.Errorf("node %s execution failed: %w", n.Name, err)
+		}
+	}
+
 	// Create timeout context if needed
 	var execCtx context.Context
 	var cancel context.CancelFunc
@@ -134,6 +171,15 @@ func (n *Node) Execute(ctx context.Context, data *WorkflowData) error {
 
 	// Update node status based on result
 	if err != nil {
+		// An ORDINARY action returning ErrSuspended is a misuse: suspension is
+		// confined to declared suspension node types so the topology stays static.
+		// Fail loudly AND do not let the sentinel escape (no %w of err here) — if
+		// it did, errors.Is would falsely park the run on a node the executor and
+		// TLA model never treat as waiting-capable.
+		if errors.Is(err, ErrSuspended) {
+			data.SetNodeStatus(n.Name, Failed)
+			return fmt.Errorf("node %s returned ErrSuspended but is not a declared suspension node", n.Name)
+		}
 		data.SetNodeStatus(n.Name, Failed)
 		return fmt.Errorf("node %s execution failed: %w", n.Name, err)
 	}

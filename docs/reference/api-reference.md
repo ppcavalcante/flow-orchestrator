@@ -380,6 +380,161 @@ func IdempotencyKey(data *WorkflowData, nodeName string) string
 See the [Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume)
 for the worked detail and the at-least-once contract.
 
+## Durable continuations (added v0.10.0)
+
+<a id="durable-continuations"></a>
+
+Built on the crash-resume seam above, a workflow can **suspend** on an external event
+and **resume** later. A node that must wait *parks* (status [`Waiting`](#node-status)),
+the run drains to its level barrier, the checkpoint flushes, and `Workflow.Execute`
+returns `ErrSuspended` — the process may then exit. Waking is just re-entering the
+executor. There is no mandatory background service; the host drives waking on its own
+schedule. Requires a `Checkpointer` store (durable timers/conditions) and additionally
+a `SignalStore` (signals).
+
+### Suspension sentinel and configuration errors
+
+```go
+// ErrSuspended is returned by Workflow.Execute when the run parked on an external
+// event (a node is Waiting) rather than completing. It is NOT a failure — it means
+// "suspended, re-enter to resume". Test with errors.Is(err, workflow.ErrSuspended).
+var ErrSuspended error
+
+// ErrSuspendRequiresCheckpointer is returned (a real failure) when a suspension node
+// would park but the Store does not implement Checkpointer — a run cannot suspend
+// with nowhere durable to persist the parked state.
+var ErrSuspendRequiresCheckpointer error
+
+// ErrWaitRequiresSignalStore is returned (a real failure) when a WaitForSignalNode is
+// reached but the Store does not implement SignalStore.
+var ErrWaitRequiresSignalStore error
+```
+
+### Durable timers
+
+```go
+// NewTimerNode builds a declared TimerNode: when reached it parks the run (Waiting)
+// until an ABSOLUTE due-time (clock.Now()+d, frozen at the first encounter and
+// persisted), then fires and converges. The due-time survives crash/suspend; an
+// overdue timer fires immediately on the next resume/Tick. A durable timer is a
+// LOWER BOUND on a wake-up, not a hard real-time deadline — the first encounter
+// always parks, so even a zero/elapsed duration parks once then fires on the next
+// resume.
+func NewTimerNode(name string, d time.Duration) *Node
+
+// (builder form) — retry/timeout are not meaningful on a timer; do not also WithAction.
+func (b *WorkflowBuilder) AddTimer(name string, d time.Duration) *NodeBuilder
+
+// Tick is the host-driven wake API: the host calls it on its own schedule with the
+// current instant, and the engine fires any timer that is due at now. fired is true
+// iff at least one timer was due and a resume was re-entered (it signals "a resume
+// ran", not "the run completed" — key off err for the outcome: nil = completed,
+// ErrSuspended = other timers still parked). There is NO mandatory background wake.
+func (w *Workflow) Tick(ctx context.Context, now time.Time) (fired bool, err error)
+
+// DueTimers returns the names of armed timers whose persisted fireAt is at or before
+// now — a read-only inspection a host loop uses to decide whether to Tick. A
+// terminally-failed run reports no due timers (it is never auto-resurrected).
+func (w *Workflow) DueTimers(now time.Time) ([]string, error)
+```
+
+Time is read through an injectable `Clock` so durable-time is testable without real
+sleeping:
+
+```go
+// Clock is the single source of "now" for durable-timer logic.
+type Clock interface{ Now() time.Time }
+
+func SystemClock() Clock            // production wall clock (the default)
+type FakeClock struct{ /* ... */ } // deterministic, test-advanced clock
+func NewFakeClock(t time.Time) *FakeClock
+func (c *FakeClock) Now() time.Time
+func (c *FakeClock) Advance(d time.Duration) // move forward (negative = NTP skew)
+func (c *FakeClock) Set(t time.Time)
+
+// Inject a Clock on the Workflow (nil = SystemClock):
+func (w *Workflow) WithClock(c Clock) *Workflow
+```
+
+### Wait-for-signal and wait-for-condition
+
+```go
+// NewWaitForSignalNode builds a declared node: when reached it parks the run
+// (Waiting) until a Signal named signalName is delivered to the workflow's durable
+// mailbox, then applies the payload idempotently (also surfaced as the node's output)
+// and converges. Requires a Store implementing SignalStore.
+func NewWaitForSignalNode(name, signalName string) *Node
+func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder
+
+// NewWaitForConditionNode ("await") parks while predicate(data) is false,
+// re-evaluating on each wake, and converges when it flips.
+func NewWaitForConditionNode(name string, predicate func(*WorkflowData) bool) *Node
+func (b *WorkflowBuilder) AddWaitForCondition(name string, predicate func(*WorkflowData) bool) *NodeBuilder
+```
+
+### Signal delivery
+
+```go
+// Signal is one durable mailbox entry. ID is a host-supplied stable,
+// unique-per-logical-event identifier (the inbound analog of IdempotencyKey):
+// re-delivering the same ID is idempotent (one entry).
+type Signal struct {
+    ID      string // stable unique-per-logical-event id (host-supplied; dedupe key)
+    Name    string // the signal name a WaitForSignalNode waits on
+    Payload any    // arbitrary payload (JSON-encoded in the durable stores)
+}
+
+// DeliverSignal durably enqueues sig to this workflow's mailbox (enqueue-only). It
+// succeeds with no process running and whether or not the instance exists yet
+// (early-signal buffering). It does NOT drive the workflow.
+func (w *Workflow) DeliverSignal(sig Signal) error
+
+// DeliverAndResume durably enqueues sig and then drives the workflow in-process
+// (enqueue then Execute) — the deliver-and-react convenience. The two steps are
+// distinct: a crash between them just leaves the signal buffered for the next drive.
+func (w *Workflow) DeliverAndResume(ctx context.Context, sig Signal) error
+```
+
+Signal delivery is **at-least-once** and consuming is **idempotent-apply**: the
+consume ordering is take (non-destructive) → idempotent apply → node `Completed` →
+checkpoint → **then** ack, so a crash before the checkpoint re-runs the node and
+re-applies the same byte-identical write. Hosts must ack promptly; a mailbox holds at
+most 2^20 un-acked entries (over-delivery beyond that is a host-contract violation,
+rejected with `ErrCorruptData`).
+
+### SignalStore interface
+
+```go
+// SignalStore is an OPTIONAL interface a WorkflowStore MAY implement (additive,
+// type-asserted exactly like Checkpointer) to carry a durable signal mailbox. All
+// three built-in stores implement it. The mailbox lives OUTSIDE the WorkflowData
+// snapshot so an external deliverer's write can never clobber a running checkpoint.
+type SignalStore interface {
+    DeliverSignal(workflowID string, sig Signal) error   // idempotent by sig.ID; rejects empty ID
+    TakeSignals(workflowID string) ([]Signal, error)     // non-destructive read
+    AckSignals(workflowID string, ids []string) error    // after-durability drain; idempotent
+}
+```
+
+### Drive serialization (Locker)
+
+```go
+// Locker serializes concurrent drives of the SAME WorkflowID within one process — a
+// "drive" is the load→run→checkpoint→save→ack span. Concurrent Tick / Execute /
+// DeliverAndResume calls for one WorkflowID take turns rather than racing that span;
+// different WorkflowIDs are independent. Cross-PROCESS serialization is deferred to a
+// future store lease and remains the host's responsibility until then.
+type Locker interface {
+    Acquire(ctx context.Context, workflowID string) (release func(), err error)
+}
+
+func NewInProcessLocker() Locker            // the default per-WorkflowID mutex locker
+func (w *Workflow) WithLocker(l Locker) *Workflow // nil restores the process-wide default
+```
+
+See the [Persistence guide → Durable Continuations](../guides/persistence.md) for the
+worked patterns (durable sleep, human-in-the-loop approvals).
+
 ## Node Status
 
 ```go
@@ -391,8 +546,18 @@ const (
     Completed NodeStatus = "completed"
     Failed    NodeStatus = "failed"     // the node's action returned an error
     Skipped   NodeStatus = "skipped"    // a non-resolving dependency (Failed non-coe, or Skipped) blocked it
+    Waiting   NodeStatus = "waiting"    // parked on an external event (timer/signal); NON-TERMINAL, NON-FAILING (added v0.10.0)
 )
 ```
+
+> **`Waiting` (added v0.10.0) is non-terminal and non-failing.** A node parks in
+> `Waiting` when it is blocked on an external event — a durable timer's due-time or
+> a signal — rather than on an upstream node. A `Waiting` node never causes its
+> dependents to be `Skipped`, never trips fail-fast, and is never counted as
+> terminal. It drives `Workflow.Execute` to return [`ErrSuspended`](#durable-continuations-added-v0100)
+> at the level barrier (the run is not done); re-entering `Execute` on resume
+> re-runs the node, which re-parks or wakes. Treat it as runnable, like `Pending`,
+> not done. ("Suspend is a crash you chose.")
 
 ## Failure Semantics
 
@@ -444,7 +609,7 @@ builder.AddNode("finalize").
 
 ## Verification
 
-The execution semantics above are verified at two layers (milestone M7):
+The execution semantics above are verified at two layers (kept current through M10):
 
 - **Layer 1 — property-based tests.** `pkg/workflow/invariants_property_test.go`
   is a [gopter](https://github.com/leanovate/gopter) suite that generates random
@@ -459,7 +624,15 @@ The execution semantics above are verified at two layers (milestone M7):
   `DurableExecutor.tla` (+ `MCDurableExecutor.tla`), which models crash-resume and
   proves **resume-equivalence** on both arms — `ExecFidelity` (a reported result
   must have actually executed; no phantom checkpoint) and `StatusConvergence` (a
-  crash introduces no new terminal state). See
+  crash introduces no new terminal state). Milestone M10 adds the durable-continuation
+  capstone `M10DurableExecutor.tla` (+ `MCM10DurableExecutor.tla`), which refines the
+  model with the non-terminal `Waiting` status, `Suspend`/`Wake`/`FireTimer`/`SendSignal`
+  actions, and a `WakeReady`-conditioned `Stuck` arm (the anti-vacuity device that keeps
+  liveness from going hollow in the parked state). It is TLC-checked exhaustively at
+  `MaxCrashes=1` (a crash at every reachable point) with all M9 safety invariants
+  **retained** plus five new ones — `WaitingSound`, `NoDoubleFire`, `NoSignalLost`,
+  `NoDoubleApply`, `SuspendPreservesJournal` (and `NoResurrection`) — and the
+  `WokeOnlyWhenReady` temporal property; each was mutation-proven to bite. See
   [`specs/README.md`](../../specs/README.md) for the models, the scenarios, and the
   honest scope (design-exhaustive vs implementation-sampled).
 

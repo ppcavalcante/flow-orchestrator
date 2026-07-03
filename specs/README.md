@@ -203,3 +203,76 @@ stay `Pending`)* — is therefore verified by the **Layer-1 gopter property
 real `DAG.Execute`, mutation-proven to bite (reverting cancel-wins, or re-running
 the Skip sweep on cancel, both falsify it), plus example-based tests. It is **out
 of scope for the TLA+ model by design**, not an omission.
+
+## `M10DurableExecutor.tla` — M10 durable continuations (suspend / timer / signal)
+
+The M10 verification capstone. Refines the M9 durable model with the non-terminal
+**`Waiting`** status and the durable-continuation machinery M10 built in `pkg/workflow`:
+a declared *suspension node* (`n \in Suspendable`) that parks (`Suspend`), a durable
+timer that fires when the clock reaches its persisted `fireAt` (`FireTimer`), an external
+signal delivered to a mailbox outside the snapshot (`SendSignal`) and consumed
+idempotently, and the `Wake` that re-enters the M9 resume path. `DurableExecutor.tla`
+(M9) is left **byte-unchanged** (`git diff` empty since the M9 seal); the M9 safety
+invariants are **retained and re-checked** under the new actions.
+
+**The anti-vacuity device — the `WakeReady`-conditioned `Stuck` arm.** The `Waiting`
+state is exactly where a liveness property goes hollow: a parked workflow trivially
+"makes progress" by resting forever. The model defeats this by conditioning `Stuck` on
+`WakeReady`: a node whose wake event **has** fired (timer due, or signal delivered) is
+`Stuck` — the engine MUST wake it — while a node still legitimately waiting is allowed to
+rest. Liveness (`Termination`) is thus conditional on event-fairness, not vacuously true.
+
+**Properties checked (exhaustively, by TLC at `MaxCrashes=1`):** all M9 safety invariants
+(`ConcurrencyBound`, `DepsBeforeRun`, `HardFailureHalts`, `SkippedSound`, `ExecFidelity`,
+`NoDoubleCommit`) **re-verified under suspend/wake/crash**, plus the M10-specific safety
+invariants `WaitingSound`, `NoDoubleFire`, `NoSignalLost`, `NoDoubleApply`,
+`SuspendPreservesJournal`, and `NoResurrection`, plus the `Termination` liveness and the
+`WokeOnlyWhenReady` action property.
+
+### M10 scenarios
+
+- **`M10DurableExecutor.cfg` / `MCM10DurableExecutor.tla`** — a diamond
+  `n1 → {n2 timer, n3 signal} → n4`: a durable timer node and a wait-for-signal node run
+  in parallel and re-converge. Exercises suspend, timer fire, signal deliver+consume,
+  wake, and crash at every reachable point.
+- **`M10FailResume.cfg` / `MCM10FailResume.tla`** — a hard-fail / resume shape
+  (`nF` hard-fails, `nD` depends on it, `nT` is an independent timer): models
+  plain-resume-of-a-hard-failed-run (`DEC-M10-P39-T5` Option A) — the independent overdue
+  timer completes while the failed node stays terminal `Failed` and `NoResurrection`
+  holds.
+
+### Running TLC (M10)
+
+```sh
+cd specs
+java -cp /tmp/tla2tools.jar tlc2.TLC -config M10DurableExecutor.cfg MCM10DurableExecutor.tla
+java -cp /tmp/tla2tools.jar tlc2.TLC -config M10FailResume.cfg       MCM10FailResume.tla
+```
+
+**Verified result (`MaxCrashes=1`, single crash at every reachable point):**
+`No error has been found.` — diamond **14,380** distinct states (depth 36), fail-resume
+**915** distinct states (depth 19). (State counts as recorded in the phase-39 verification;
+qa re-ran both and confirmed clean.)
+
+### Why this is not theater — M10
+
+Each new invariant + the liveness was mutation-tested and TLC confirmed the deliberate
+break is *caught*: dropping the `exec++` on finish falsifies `ExecFidelity`; dropping the
+`~wakeReady` guard on `FireTimer` falsifies `NoDoubleFire`; dropping the mailbox guard on
+consume falsifies `NoSignalLost`; a per-attempt (accumulate) apply key falsifies
+`NoDoubleApply` (`recorded` reaches 2, outside `{0,1}`); modelling the mailbox *inside* the
+snapshot so a checkpoint clears it falsifies `SuspendPreservesJournal`; dropping the
+crash-isolation prefix falsifies `WokeOnlyWhenReady`; and dropping `WF(Wake)` fairness
+falsifies `Termination` (Stuttering forever, while **zero** safety invariant is violated —
+proving the liveness teeth are independent of the safety teeth). The crash-isolation and
+`NoDoubleApply` teeth bite **only** at `MaxCrashes>0` (the Recover reload is what makes them
+non-vacuous), which is why the capstone raised `MaxCrashes` from 0 to 1.
+
+**Honest scope (same discipline as the M9 model).** The M10 model proves the
+suspend/timer/signal *algorithm* — the park/checkpoint/wake logic, the at-least-once
+timer-fire and signal-consume frontier, idempotent apply, and no-resurrection — for all
+interleavings with a single crash at every reachable point. It uses a **boolean-per-timer**
+abstraction of time (`clock >= fireAt` as a fired flag), not real durations, and assumes
+the model faithfully mirrors the code's per-level flush and the mailbox-outside-snapshot
+placement (human-reviewed). The Go-side atomic write, int64 fidelity, and the FlatBuffers
+signal-decode bounds guard are covered by the `pkg/workflow` test suites, not this model.

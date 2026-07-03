@@ -47,7 +47,7 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > All tags are pre-releases (alpha; no stable release yet), so `@latest` resolves to the highest
-> pre-release — currently `v0.9.0-alpha`. See the
+> pre-release — currently `v0.10.0-alpha`. See the
 > [Installation Guide](./installation.md#using-go-modules-recommended) for details.
 
 ## Step 1: Create the Main Application File

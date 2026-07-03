@@ -182,8 +182,9 @@ The Workflow Engine provides observability through:
      see the [Observability guide](../guides/observability.md)
 
 2. **Node status**:
-   - Per-node status (Pending/Running/Completed/Failed/Skipped) tracked
-     on the `WorkflowData`
+   - Per-node status (Pending/Running/Completed/Failed/Skipped/Waiting) tracked
+     on the `WorkflowData` (`Waiting` added v0.10.0 — a node parked on an external
+     event; non-terminal and non-failing)
 
 3. **Logging**:
    - `LoggingMiddleware` logs action start/completion and errors via the standard

@@ -282,6 +282,103 @@ unambiguous (so `("ab","c")` and `("a","bc")` cannot collide). Downstream system
 may recompute this, so the construction will not change across versions without a
 deliberate, documented break.
 
+## Durable Continuations (suspend & resume)
+
+Added in **v0.10.0**, a workflow can **suspend** on an external event and **resume**
+later, built on the same crash-resume seam above — "suspend is a crash you chose". A
+declared *suspension node* parks in the non-terminal `Waiting` status, the run
+checkpoints (carrying `Waiting`), and `Workflow.Execute` returns `ErrSuspended`
+(distinguish it with `errors.Is(err, workflow.ErrSuspended)`) instead of `nil`. The
+process may then exit. Waking is just re-entering the executor; the parked node
+re-runs and either re-parks or converges.
+
+Requirements: suspension needs a `Checkpointer` store (otherwise
+`ErrSuspendRequiresCheckpointer`); wait-for-signal additionally needs a store that
+implements `SignalStore` (otherwise `ErrWaitRequiresSignalStore`). All three built-in
+stores satisfy both.
+
+### Durable timers (`AddTimer`)
+
+A timer node parks until an **absolute** due-time — `clock.Now() + d`, frozen and
+persisted at the first encounter, so it survives crash and suspend. An overdue timer
+(the process was down past the due-time) fires immediately on the next resume. A
+durable timer is a **lower bound** on a wake-up, not a hard real-time deadline.
+
+```go
+b := workflow.NewWorkflowBuilder().WithWorkflowID("order-42")
+b.AddNode("place-order").WithAction(placeOrder)
+b.AddTimer("wait-1h", time.Hour).DependsOn("place-order")
+b.AddNode("send-reminder").WithAction(sendReminder).DependsOn("wait-1h")
+wf, _ := b.Build()
+wf.Store = store // must implement Checkpointer
+
+// First drive: the timer arms + parks, Execute returns ErrSuspended.
+if err := wf.Execute(ctx); err != nil && !errors.Is(err, workflow.ErrSuspended) {
+    log.Fatal(err)
+}
+
+// Later — the host drives waking on its own schedule. Tick fires any timer due at now.
+fired, err := wf.Tick(ctx, time.Now())
+// fired == true means a resume ran; err == nil means the run completed,
+// ErrSuspended means other nodes are still parked.
+```
+
+Time is read through an injectable `Clock`. Inject a `FakeClock` to test a
+"fire after 3h" flow instantly and deterministically — no real sleeping:
+
+```go
+clk := workflow.NewFakeClock(time.Now())
+wf.WithClock(clk)
+wf.Execute(ctx)            // arms wait-1h, parks
+clk.Advance(time.Hour)     // no real time passes
+wf.Tick(ctx, clk.Now())    // the timer is now due -> fires -> run converges
+```
+
+### Wait for a signal (`AddWaitForSignal`) — human-in-the-loop
+
+A wait-for-signal node parks until a named `Signal` is delivered to the workflow's
+**durable mailbox**. Delivery is decoupled from any running process: `DeliverSignal`
+succeeds even when nothing is running and even before the instance exists (the signal
+is buffered), and it is idempotent by `Signal.ID`.
+
+```go
+// The workflow: wait for an approval before shipping.
+b.AddWaitForSignal("await-approval", "approval").DependsOn("submit")
+b.AddNode("ship").WithAction(ship).DependsOn("await-approval")
+// ... first Execute parks at await-approval and returns ErrSuspended ...
+
+// Elsewhere (an HTTP handler, days later): deliver the decision and drive the run.
+sig := workflow.Signal{ID: "approval-req-99", Name: "approval", Payload: map[string]any{"ok": true}}
+err := wf.DeliverAndResume(ctx, sig) // enqueue then Execute in one call
+// (or wf.DeliverSignal(sig) to enqueue only, and wake later with Execute)
+```
+
+The consuming node applies the payload **idempotently** and also exposes it as the
+node's output (readable by dependents via `data.GetOutput("await-approval")`).
+Consuming is ordered take → apply → `Completed` → checkpoint → **ack**, so a crash
+before the checkpoint re-runs the node and re-applies the same byte-identical write.
+Ack consumed signals promptly: a mailbox holds at most 2^20 un-acked entries.
+
+### Wait for a condition (`AddWaitForCondition`)
+
+Parks while a predicate over the workflow data is false, re-evaluating on each wake
+(a host re-drive). Useful when the readiness signal is state another node writes:
+
+```go
+b.AddWaitForCondition("await-funded", func(d *workflow.WorkflowData) bool {
+    bal, ok := workflow.Get(d, balanceKey)
+    return ok && bal >= 100
+}).DependsOn("open-account")
+```
+
+### Driving many workflows / concurrency
+
+Waking is host-driven — there is **no mandatory background goroutine**. Within one
+process, concurrent drives of the *same* `WorkflowID` (a timer `Tick` and a signal
+`DeliverAndResume` arriving at once) are serialized by a `Locker` lease (default
+in-process, `NewInProcessLocker`); different `WorkflowID`s run independently.
+Cross-*process* serialization for one `WorkflowID` remains the host's responsibility.
+
 ## Serialization Considerations
 
 ### Supported Data Types

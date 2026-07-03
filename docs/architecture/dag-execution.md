@@ -65,6 +65,8 @@ stateDiagram-v2
     Running --> Completed: Successful execution
     Running --> Failed: Error occurs (after retries)
     Failed --> Running: Retry available
+    Running --> Waiting: Suspension node parks (external event not ready)
+    Waiting --> Running: Resume / Tick / signal delivery re-runs the node
 
     Completed --> [*]
     Failed --> [*]
@@ -92,6 +94,14 @@ stateDiagram-v2
 > simply never reached (the run halted before it, with no failed/skipped
 > dependency of its own) stays `Pending` — `Skipped` means "an upstream you needed
 > failed", `Pending` means "the run stopped before reaching me".
+>
+> `Waiting` (added v0.10.0) is the **non-terminal** park state: a declared
+> suspension node (timer / wait-for-signal / wait-for-condition) that is blocked on
+> an external event returns `ErrSuspended`, and the executor records it `Waiting`
+> rather than terminal. A `Waiting` node never trips fail-fast and never causes its
+> dependents to be `Skipped`; on the next resume/`Tick`/signal it re-runs and either
+> re-parks or converges. See [Suspend and resume](#suspend-and-resume-durable-continuations)
+> below.
 
 ## Building a DAG
 
@@ -286,6 +296,51 @@ This shared data model allows nodes to pass information to downstream nodes and 
   executing (see `executeNodesInLevel` in `parallel_execution.go`). There is no
   worker pool, work-stealing, or adaptive/backpressure scheduling — the bound is
   a fixed configured value.
+
+## Suspend and resume (durable continuations)
+
+Added in v0.10.0, a workflow can **suspend** mid-run on an external event and
+**resume** later, reusing the M9 crash-resume machinery — "suspend is a crash you
+chose". The mechanism is deliberately small: it adds no new persistence path and no
+mandatory background service.
+
+1. **Park.** A *declared suspension node* — built via `AddTimer`,
+   `AddWaitForSignal`, or `AddWaitForCondition` (equivalently `NewTimerNode` /
+   `NewWaitForSignalNode` / `NewWaitForConditionNode`) — runs its action, which
+   returns the internal `ErrSuspended` sentinel when its event is not yet ready. The
+   executor records the node `Waiting` (non-terminal) instead of treating the return
+   as a failure. Suspension nodes are declared statically (a package-internal
+   capability marker), and their actions are set directly, bypassing the
+   retry/timeout middleware — a park is not an error to retry.
+2. **Drain to the barrier.** The rest of the level finishes normally. Because
+   `Waiting` is non-terminal and non-failing, it does not trip fail-fast and does
+   not cause dependents to be skipped.
+3. **Checkpoint the parked state.** At the level barrier the M9 `Checkpointer`
+   flush persists the workflow state **carrying the `Waiting` status** (and, for a
+   timer, the absolute `fireAt`). Suspending without a `Checkpointer` store is a real
+   error (`ErrSuspendRequiresCheckpointer`) — there would be nowhere durable to park.
+4. **Return `ErrSuspended`.** `Workflow.Execute` returns `ErrSuspended` (test with
+   `errors.Is`) rather than `nil`/`*ExecutionError`. The run is suspended, not done;
+   the process may now exit with zero further compute.
+5. **Wake = re-enter.** Waking is just re-running the executor on the same
+   `WorkflowID`+store — the identical M9 resume path. Completed nodes are skipped and
+   rehydrated; the `Waiting` node re-runs its action, which re-checks its event and
+   either re-parks or fires (returns `nil`) and lets the run converge. Three drive
+   entry points do this: a plain `Workflow.Execute` on startup, `Workflow.Tick(now)`
+   for due timers, and `Workflow.DeliverAndResume(sig)` after a signal delivery.
+
+**Durable timers are data, not live timers.** A timer persists an *absolute*
+due-time (`clock.Now()+d`, frozen at the first encounter), re-derived on every load;
+an overdue timer fires immediately on resume. Time is read through an injectable
+`Clock`, so no wall-clock value is ever recorded or replayed — there is no
+determinism tax. **Signals** are delivered to a durable mailbox that lives outside
+the `WorkflowData` snapshot; delivery is decoupled from any running process
+(at-least-once), and consuming applies the payload idempotently
+(take → apply → `Completed` → checkpoint → ack). **Drive serialization** for one
+`WorkflowID` within a process is handled by a `Locker` lease (default in-process).
+
+See the [Persistence guide → Durable Continuations](../guides/persistence.md) and the
+[API reference → Durable continuations](../reference/api-reference.md#durable-continuations).
 
 ## Error Handling
 

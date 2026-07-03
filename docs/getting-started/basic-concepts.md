@@ -221,6 +221,14 @@ Nodes have several possible status values that track their execution state:
   skipped nodes never appear in an `ExecutionError`. (Contrast `Pending`: skipped
   means "an upstream you needed failed"; pending means "the run stopped before
   reaching me".)
+- `Waiting` (added v0.10.0): The node has **parked** on an external event — a
+  durable timer's due-time or a signal — rather than on an upstream node. `Waiting`
+  is **non-terminal and non-failing**: it never causes dependents to be `Skipped`,
+  never trips fail-fast, and is never counted as done. It drives `Workflow.Execute`
+  to return `ErrSuspended` at the level barrier (the run is suspended, not
+  finished); a later resume, timer `Tick`, or signal delivery re-runs the node,
+  which either re-parks or wakes and converges. Treat it as runnable, like
+  `Pending`. See the [durable continuations](#durable-continuations) section below.
 
 ```go
 // Get a node's status
@@ -287,6 +295,38 @@ builder.AddNode("optional-step").
 
 See the [Error Handling guide](../guides/error-handling.md) for the full
 continue-on-error semantics.
+
+## Durable Continuations
+
+<a id="durable-continuations"></a>
+
+Added in **v0.10.0**, a workflow can **suspend** on an external event and **resume**
+later — a durable timer's due-time, an inbound signal, or a data condition — without
+holding a process open or paying a determinism tax. The mechanism reuses the M9
+crash-resume seam: a node that must wait *parks* (status `Waiting`), the run drains
+to its level barrier, the checkpoint flushes the parked state, and `Workflow.Execute`
+returns `ErrSuspended`. The process may then exit. Waking is just re-entering
+`Execute` (or `Tick`/`DeliverAndResume`); the parked node re-runs and either re-parks
+or fires. "**Suspend is a crash you chose.**"
+
+Three declared suspension node types express this — all built as first-class nodes, so
+they participate in the DAG's topological ordering, checkpointing, and resume like any
+other node:
+
+- **`AddTimer(name, d)`** — a durable sleep. It parks until an **absolute** due-time
+  (`clock.Now()+d`, frozen at the first encounter and persisted), so it survives crash
+  and suspend; an overdue timer fires immediately on the next resume/`Tick`.
+- **`AddWaitForSignal(name, signalName)`** — parks until a named `Signal` is delivered
+  to the workflow's durable mailbox (via `DeliverSignal` / `DeliverAndResume`), then
+  applies the payload and converges. Delivery is durable and decoupled from the running
+  process — a signal can arrive when nothing is running, and is buffered.
+- **`AddWaitForCondition(name, predicate)`** — parks while a predicate over the workflow
+  data is false, re-evaluating on each wake.
+
+There is **no mandatory background service**: the host drives waking on its own schedule
+(`Tick` for due timers, `DeliverAndResume` for signals). See the
+[Persistence guide → Durable Continuations](../guides/persistence.md) and the
+[API reference → Durable continuations](../reference/api-reference.md#durable-continuations).
 
 ## Next Steps
 

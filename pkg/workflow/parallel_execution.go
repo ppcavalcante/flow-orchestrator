@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"go.opentelemetry.io/otel/codes"
@@ -26,17 +27,6 @@ type ExecutionConfig struct {
 	// owns the SDK/exporter; the library never imports go.opentelemetry.io/otel/sdk
 	// (DEC-M6-otel-api-only parity, DEC-CHUNK5).
 	TracerProvider trace.TracerProvider
-
-	// checkpoint, when non-nil, is invoked by DAG.Execute at each COMPLETED level
-	// barrier with the workflow's current state, to durably persist progress for
-	// crash-resume (M9). It is INTERNAL plumbing: Workflow.Execute wires it when
-	// the Store implements Checkpointer; it is intentionally unexported so the
-	// public way to opt in is "use a Checkpointer Store", not hand-setting a
-	// callback. The nil zero value disables checkpointing with zero overhead
-	// (no behavior change for non-checkpointing stores). A non-nil callback that
-	// returns an error aborts the run — a durability failure is surfaced, not
-	// silently dropped. (DEC-M9, chunk 2.)
-	checkpoint func(data *WorkflowData) error
 }
 
 // DefaultConfig returns the default execution configuration.
@@ -64,15 +54,24 @@ func DefaultConfig() ExecutionConfig {
 // is wrapped in a span named after the node, a child of the run's parent span
 // carried in ctx. When tracing is off the tracer is the noop tracer, so the
 // span machinery is zero-cost (DEC-CHUNK5).
-func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData, maxConcurrency int, tracer trace.Tracer) []NodeError {
+//
+// It additionally returns the names of nodes that PARKED (returned ErrSuspended)
+// this level. A park is NOT a failure: the node is left Waiting (by n.Execute),
+// its siblings are NOT cancelled — the level drains to the barrier (Model A,
+// whole-run suspend) — and the park is reported separately so the level loop can
+// flush the durable checkpoint and return ErrSuspended. (M10 / DEC-M10.)
+func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData, maxConcurrency int, tracer trace.Tracer) (failures []NodeError, parkedNodes []string) {
 	// Create a cancellable context so we can stop siblings on first failure
 	levelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Buffered failure channel (one slot per node is the upper bound) and wait
 	// group. Each goroutine sends at most one NodeError; the channel is drained
-	// after wg.Wait so a full buffer never blocks a sender.
+	// after wg.Wait so a full buffer never blocks a sender. A parallel parkChan
+	// carries the names of nodes that parked — a park drains to the barrier with
+	// no cancel, so its slot is independent of the failure path.
 	failChan := make(chan NodeError, len(level))
+	parkChan := make(chan string, len(level))
 	var wg sync.WaitGroup
 
 	// Semaphore to limit concurrency. A non-positive limit coerces to the
@@ -145,6 +144,16 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 			span.SetAttributes(nodeSpanAttributes(n, status)...)
 
 			if err != nil {
+				// A park is NOT a failure (Model A, whole-run suspend). The node
+				// is already Waiting (set by n.Execute); record it as parked, do
+				// NOT cancel siblings (the level drains to the barrier), and do
+				// NOT record a NodeError. The level loop turns a parked level into
+				// the checkpoint flush + ErrSuspended return. Checked before the
+				// span is marked Error — a park is a clean outcome, not an error.
+				if errors.Is(err, ErrSuspended) {
+					parkChan <- n.Name
+					return
+				}
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "node execution failed")
 				if n.ContinueOnError {
@@ -164,15 +173,20 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 		}(node)
 	}
 
-	// Wait for all nodes to complete, then drain every recorded failure.
+	// Wait for all nodes to complete, then drain every recorded failure and
+	// every parked node. Both channels are closed after the barrier so a full
+	// buffer never blocks a sender.
 	wg.Wait()
 	close(failChan)
+	close(parkChan)
 
-	var failures []NodeError
 	for ne := range failChan {
 		failures = append(failures, ne)
 	}
-	return failures
+	for name := range parkChan {
+		parkedNodes = append(parkedNodes, name)
+	}
+	return failures, parkedNodes
 }
 
 // depResolved reports whether a dependency in the given status no longer blocks

@@ -5,6 +5,84 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0-alpha]
+
+**M10 — Durable Continuations (Tier 2: suspend / resume).** A workflow can now *park*
+mid-run — waiting on a durable timer, an external signal, or a data condition — and
+re-enter later exactly where it left off, with **no process needing to stay alive** in
+between. It is built directly on the M9 crash-resume seam ("suspend is a crash you
+chose"): a parked run drains to the level barrier, flushes the M9 checkpoint (now
+carrying wake metadata), and `Execute` returns the typed **`ErrSuspended`**; waking is
+the M9 resume path re-entered. The whole milestone is **ADDITIVE — there are NO breaking
+changes**: a new non-terminal `Waiting` NodeStatus (additive FlatBuffers wire slot), new
+node constructors + builder helpers, and new signal-delivery methods; existing DAGs,
+stores, and `DAG.Execute`'s signature are unchanged, and a workflow that never uses a
+suspension node behaves exactly as before. Crucially there is **no determinism tax** —
+a durable timer is stored as *data* (an absolute fire time re-armed on load), never by
+replaying workflow code. The in-code version constant is `0.10.0-alpha`; every tag is a
+pre-release, so `go get @latest` resolves to it. See [STABILITY.md](STABILITY.md),
+[docs/guides/persistence.md](docs/guides/persistence.md), and
+[specs/README.md](specs/README.md).
+
+### Added (0.10.0-alpha — M10)
+- **`Waiting` — the 6th, non-terminal `NodeStatus`.** A declared suspension node that
+  parks is marked `Waiting` (not terminal, not `Skipped`); it drives `Execute` to drain
+  the level and return `ErrSuspended` at the barrier. The status has its own additive
+  FlatBuffers wire slot, so it round-trips through the file stores. A persisted `Waiting`
+  node ⟺ `Execute` returned `ErrSuspended` (a durable park actually succeeded).
+- **`ErrSuspended` sentinel + suspend / re-enter core.** `Workflow.Execute` /
+  `DAG.Execute` return `ErrSuspended` (distinguish with `errors.Is`) when a declared
+  suspension node parks. Only a *declared* suspension node may park — an `ErrSuspended`
+  from an ordinary action is a misuse and surfaces as an error. Suspension requires
+  running via `Workflow.Execute` with a `Store` (a non-durable park is refused). Re-enter
+  by calling `Execute` again with the same `WorkflowID` + store + DAG — the same path M9
+  resume uses.
+- **Durable timers — `NewTimerNode(name, d)` / `WorkflowBuilder.AddTimer(name, d)`.** A
+  timer node parks until an **absolute** fire time (persisted in the checkpoint, re-armed
+  on load), so it survives process exit with no determinism tax. The clock is injectable
+  via `WithClock(Clock)` on the builder or workflow for deterministic tests.
+- **Wait-for-signal — `NewWaitForSignalNode(name, signalName)` /
+  `WorkflowBuilder.AddWaitForSignal(name, signalName)`.** Parks until a named external
+  `Signal` is delivered to the run's durable inbox, then completes.
+- **Wait-for-condition — `NewWaitForConditionNode(name, predicate)` /
+  `WorkflowBuilder.AddWaitForCondition(name, predicate)`.** Parks while a
+  `func(*WorkflowData) bool` predicate is false; completes when it becomes true (e.g.
+  after a signal mutates the data).
+- **Signal delivery — `Signal` + `DeliverSignal` on every built-in store +
+  `Workflow.DeliverSignal(sig)` / `Workflow.DeliverAndResume(ctx, sig)`.** `Signal`
+  carries an `ID` (the inbound analog of `IdempotencyKey`) for dedupe. The three built-in
+  stores (`InMemoryStore` / `JSONFileStore` / `FlatBuffersStore`) implement a durable
+  inbox; `DeliverAndResume` delivers then re-enters `Execute` to wake the run.
+- **`Locker` interface + `NewInProcessLocker()`.** A single-writer lease guarding
+  concurrent wake/deliver against a run in flight (in-process now; a distributed lease is
+  future work).
+
+### Contract (0.10.0-alpha — M10)
+- **At-least-once signal delivery — signal *apply* MUST be idempotent.** A signal may be
+  delivered (and applied) more than once across a crash/wake; re-delivering the same
+  `Signal.ID` is deduped by construction, and the wait-for-signal apply is idempotent.
+  Hard exactly-once (a single same-transaction store) is deferred to the SQLite store
+  (M9.x). This is the inbound analog of the M9 at-least-once execution contract.
+
+### Verified (0.10.0-alpha — M10)
+- **TLA+ `M10DurableExecutor.tla` — exhaustive suspend / resume capstone.** A refining
+  durable model (the M9 `DurableExecutor.tla` left byte-unchanged) adds the non-terminal
+  `Waiting` status and the `Suspend` / `Wake` / `FireTimer` / `SendSignal` machinery. It
+  defeats the hollow-liveness trap the `Waiting` state invites with the
+  **`WakeReady`-conditioned `Stuck` arm**: a node whose wake event has fired is `Stuck`
+  (the engine MUST wake it) while a node still legitimately waiting may rest — so
+  `Termination` is conditional on event-fairness, not vacuously true. Checked
+  exhaustively by TLC at `MaxCrashes=1`: all M9 safety invariants re-verified under
+  suspend/wake/crash, plus the M10 safety invariants `WaitingSound`, `NoDoubleFire`,
+  `NoSignalLost`, `NoDoubleApply`, `SuspendPreservesJournal`, `NoResurrection`, the
+  `WokeOnlyWhenReady` action property, and `Termination` liveness. Every new property is
+  mutation-proven to bite (`NoDoubleApply`'s teeth are an accumulate-style property that
+  bites only at `MaxCrashes>0` — which is why the capstone raised `MaxCrashes` 0→1), and
+  qa independently re-ran the suite. See [specs/README.md](specs/README.md).
+- **Note:** `ChoiceNode` and dynamic `Map` / sub-DAG are **not** in this release — they
+  are deferred to M11 (dynamic sub-graph instantiation is the only piece that would break
+  exhaustive verification).
+
 ## [0.9.0-alpha]
 
 **M9 — Durable Execution Core (Tier 1: crash-resume).** A process can now crash mid-run

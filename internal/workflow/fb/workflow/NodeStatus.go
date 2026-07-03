@@ -12,6 +12,7 @@ const (
 	NodeStatusCompleted NodeStatus = 2
 	NodeStatusFailed    NodeStatus = 3
 	NodeStatusSkipped   NodeStatus = 4
+	NodeStatusWaiting   NodeStatus = 5
 )
 
 var EnumNamesNodeStatus = map[NodeStatus]string{
@@ -20,6 +21,7 @@ var EnumNamesNodeStatus = map[NodeStatus]string{
 	NodeStatusCompleted: "Completed",
 	NodeStatusFailed:    "Failed",
 	NodeStatusSkipped:   "Skipped",
+	NodeStatusWaiting:   "Waiting",
 }
 
 var EnumValuesNodeStatus = map[string]NodeStatus{
@@ -28,6 +30,7 @@ var EnumValuesNodeStatus = map[string]NodeStatus{
 	"Completed": NodeStatusCompleted,
 	"Failed":    NodeStatusFailed,
 	"Skipped":   NodeStatusSkipped,
+	"Waiting":   NodeStatusWaiting,
 }
 
 func (v NodeStatus) String() string {

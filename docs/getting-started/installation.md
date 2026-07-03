@@ -29,19 +29,21 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.9.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.10.0-alpha
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release and there is
-> **no stable (`v1`+) release**. The latest is **`v0.9.0-alpha`** (the M9 durable execution core:
-> crash-resume via the optional `Checkpointer` interface, per-level checkpointing, the
-> at-least-once contract + `IdempotencyKey`, atomic writes, and a TLA+-verified resume-equivalence
-> model — on top of the M1–M8 work). Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.9.0-alpha`** — so the command above is
+> **no stable (`v1`+) release**. The latest is **`v0.10.0-alpha`** (the M10 durable-continuations
+> core: suspend/resume via the non-terminal `Waiting` status + the `ErrSuspended` park seam,
+> durable timers (`AddTimer`), wait-for-signal / wait-for-condition (`AddWaitForSignal` /
+> `AddWaitForCondition`), signal delivery (`DeliverSignal` / `DeliverAndResume`), and an
+> in-process `Locker` lease — built on the M9 crash-resume core, all with no determinism tax).
+> Because there is no stable tag, `go get @latest`
+> resolves to the highest pre-release — currently **`v0.10.0-alpha`** — so the command above is
 > correct. Pinning the exact version
-> (`go get github.com/ppcavalcante/flow-orchestrator@v0.9.0-alpha`) is optional but recommended
+> (`go get github.com/ppcavalcante/flow-orchestrator@v0.10.0-alpha`) is optional but recommended
 > for reproducibility, and the API may change between alpha minors. The in-code version
-> (`pkg/workflow.Version`) reads `0.9.0-alpha`. See
+> (`pkg/workflow.Version`) reads `0.10.0-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH
@@ -168,7 +170,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.9.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.10.0-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

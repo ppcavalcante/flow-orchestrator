@@ -180,7 +180,7 @@ func TestParallelExecutionWithDefaultConfig(t *testing.T) {
 	// Test parallel execution via the live level-executor; no failures on the
 	// happy path.
 	nodes := []*Node{node1, node2, node3}
-	failures := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
+	failures, _ := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
 	require.Empty(t, failures)
 
 	// Verify all nodes were executed
@@ -214,7 +214,7 @@ func TestParallelExecutionWithError(t *testing.T) {
 	// Test parallel execution via the live level-executor. The failing node is
 	// returned as a NodeError; the slice is non-empty.
 	nodes := []*Node{node1, node2, node3}
-	failures := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
+	failures, _ := executeNodesInLevel(context.Background(), nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
 	require.NotEmpty(t, failures)
 	var sawNode2 bool
 	for _, ne := range failures {
@@ -247,7 +247,7 @@ func TestParallelExecutionWithContext(t *testing.T) {
 	// Test parallel execution with timeout via the live level-executor. The
 	// timed-out nodes are reported as NodeErrors carrying the deadline error.
 	nodes := []*Node{node1, node2}
-	failures := executeNodesInLevel(ctx, nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
+	failures, _ := executeNodesInLevel(ctx, nodes, data, DefaultConfig().MaxConcurrency, resolveTracer(nil))
 	require.NotEmpty(t, failures)
 	var sawDeadline bool
 	for _, ne := range failures {

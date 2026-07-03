@@ -9,9 +9,12 @@ Flow Orchestrator was created with several core design goals:
 1. **High Performance**: Optimized for minimal memory allocations and maximum throughput
 2. **Thread Safety**: All components designed for concurrent access with minimal lock contention
 3. **Persistence**: Ability to save and resume workflows across application restarts
-4. **Observability**: Comprehensive metrics for monitoring and optimization
-5. **Extensibility**: Support for multiple orchestration patterns
-6. **Embeddability**: Clean API for integration into any Go application
+4. **Durable Continuations**: Suspend on an external event (a durable timer, an
+   inbound signal, or a data condition) and resume later — with no mandatory
+   background service and no determinism tax (added v0.10.0)
+5. **Observability**: Comprehensive metrics for monitoring and optimization
+6. **Extensibility**: Support for multiple orchestration patterns
+7. **Embeddability**: Clean API for integration into any Go application
 
 ## Core Architecture
 
@@ -149,7 +152,10 @@ When a workflow executes:
 6. If the store implements `Checkpointer`, progress is durably checkpointed at
    each completed level barrier (crash-resume); on completion the final state is
    persisted
-7. Metrics are collected and reported
+7. If a node parks on an external event (a durable timer/signal/condition), it is
+   recorded `Waiting`, the run checkpoints, and `Execute` returns `ErrSuspended`;
+   waking re-enters the executor and resumes from the checkpoint
+8. Metrics are collected and reported
 
 ## Middleware System
 
@@ -184,6 +190,16 @@ store that does not keeps the prior save-at-boundaries behavior with zero overhe
 Non-completed nodes re-run on resume — an **at-least-once** contract that requires
 side-effecting actions to be idempotent (see the
 [Persistence guide](../guides/persistence.md#durability--idempotency-crash-resume)).
+
+Built on this same seam, a workflow can also **suspend on purpose** and resume later
+(added v0.10.0): a declared suspension node — a durable timer (`AddTimer`), a
+wait-for-signal (`AddWaitForSignal`), or a wait-for-condition (`AddWaitForCondition`)
+— parks in the non-terminal `Waiting` status, the run checkpoints and `Execute`
+returns `ErrSuspended`, and the process may exit. Waking is re-entering the executor
+(`Execute` on startup, `Tick` for due timers, `DeliverAndResume` for signals). Timers
+persist an absolute due-time (read through an injectable `Clock`); signals land in a
+durable mailbox outside the snapshot. See
+[DAG Execution → Suspend and resume](./dag-execution.md#suspend-and-resume-durable-continuations).
 
 ## Extensibility Points
 

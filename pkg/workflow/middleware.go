@@ -4,6 +4,7 @@ package workflow
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -148,6 +149,14 @@ func RetryMiddleware(maxRetries int, backoff time.Duration) Middleware {
 					return nil // Success
 				}
 
+				// A park is not a retryable failure — return the suspend sentinel
+				// immediately rather than retrying it maxRetries times and wrapping
+				// it in "max retries exceeded" (which would delay the park and
+				// mis-describe it). (M10 suspend-arm short-circuit.)
+				if errors.Is(err, ErrSuspended) {
+					return err
+				}
+
 				lastErr = err
 			}
 
@@ -187,6 +196,12 @@ func NoDelayRetryMiddleware(maxRetries int, verbose ...bool) Middleware {
 				// If successful, return immediately
 				if err == nil {
 					return nil
+				}
+
+				// A park is not a retryable failure — short-circuit the suspend
+				// sentinel out of the retry loop. (M10 suspend-arm short-circuit.)
+				if errors.Is(err, ErrSuspended) {
+					return err
 				}
 
 				lastErr = err
@@ -259,6 +274,14 @@ func ConditionalRetryMiddleware(maxRetries int, backoff time.Duration, predicate
 				err := next.Execute(ctx, data)
 				if err == nil {
 					return nil // Success!
+				}
+
+				// A park is not a retryable failure — short-circuit the suspend
+				// sentinel out of the retry loop before the user predicate, so a
+				// predicate that retries everything can't loop on a park or wrap it
+				// in "all N retries failed". (M10 suspend-arm short-circuit; D-05.)
+				if errors.Is(err, ErrSuspended) {
+					return err
 				}
 
 				lastErr = err

@@ -47,6 +47,15 @@ jobs:
       - name: Test (race)
         run: go test ./... -race
       - name: govulncheck (symbol-scan blocking)
+        # Scoped to the 1.25.11 (release/build) toolchain ON PURPOSE — do NOT
+        # un-scope this. A stdlib-advisory gate must reflect the toolchain we
+        # actually RELEASE with (1.25.11, govulncheck-clean), not the EOL 1.24
+        # floor arm: 1.24 is out of Go's support window, and the called stdlib
+        # advisory GO-2026-4602 (os.ReadDir) has NO 1.24 backport (fixed only in
+        # go1.25.8/1.26.1), so running this on 1.24.x is a PERMANENT false red.
+        # The 1.24.x arm still gets full build/vet/gofmt/test-race floor
+        # coverage; only the stdlib-vuln gate is 1.25.11-only.
+        if: matrix.go == '1.25.11'
         run: |
           # Pin the gate tool itself (A2) — @latest would let the scanner drift,
           # making a green/red result non-reproducible across runs.

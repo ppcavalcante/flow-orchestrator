@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -330,7 +331,7 @@ func (d *DAG) TopologicalSort() ([][]*Node, error) {
 // Execute runs the DAG with the provided workflow data.
 // Nodes are executed in topological order, with independent nodes potentially running in parallel.
 // Returns an error if execution fails.
-func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
+func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 	// Validate the DAG (also computes StartNodes/EndNodes)
 	if err := d.Validate(); err != nil {
 		return err
@@ -356,14 +357,48 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 	}()
 	ctx = spanCtx
 
+	// Resolve the per-Execute durable checkpoint callback from ctx. M10-P37 T1
+	// (MH37-5a): the callback is ctx-scoped, NOT a shared `d.config` field — each
+	// Execute carries its own, so two concurrent drivers of one *Workflow are
+	// memory-safe (no shared-field write, no `defer …=nil` racing another run).
+	// nil here means no Checkpointer Store was wired (the semantics the park /
+	// level-barrier flush sites below depend on).
+	checkpoint := checkpointFrom(ctx)
+
+	// Suspend chokepoint — the SINGLE enforcement point of the suspend
+	// durability invariant: a node is persisted Waiting IFF this Execute returned
+	// ErrSuspended (a durable park actually succeeded). On EVERY other exit — nil
+	// (run complete), cancellation, fail-fast, checkpoint==nil, a failed flush,
+	// and any new suspend/wake exit later chunks add to this function — no node
+	// may be left Waiting: a non-suspended run must never persist a stray
+	// "suspended" frontier (which a store inspector or a re-entry would misread).
+	// Enforcing this once here, by construction, replaces the scattered per-exit
+	// resets: two consecutive per-exit misses (AF1 checkpoint==nil, then N2
+	// flush-error) proved per-exit is the fragility, and phases 36/37 add
+	// timer-fire / signal-deliver re-entry exits that this defer protects
+	// automatically. The scan also clears a Waiting that was PRESERVED from a
+	// resumed run but never re-reached this run (a path per-exit tracking missed).
+	// (DEC review: structural single-point over per-exit; FIND-M10-P35-N2.)
+	defer func() {
+		if !errors.Is(retErr, ErrSuspended) {
+			clearWaiting(data)
+		}
+	}()
+
 	// Initialize every node to Pending so status is total over the DAG: a node
 	// that is never reached (e.g. a run that halts before it, with no failed or
 	// skipped dependency) is observably Pending rather than absent from the map.
 	// A node already carrying a terminal status from a resumed/persisted run is
-	// left as-is. (DEC-CHUNK3-status.)
+	// left as-is (DEC-CHUNK3-status). A persisted non-terminal Waiting node is
+	// ALSO left as-is: it is a parked node from a suspended run being resumed, and
+	// resetting it to Pending would lose the accounting that the run was Waiting
+	// here. (Correctness does not depend on this — executeNodesInLevel re-runs any
+	// non-terminal node with resolved deps, so a reset Waiting node would re-run
+	// and re-park identically; preserving it keeps the status honest and total.)
+	// (M10 / DEC-M10, D-08.)
 	for _, level := range levels {
 		for _, node := range level {
-			if status, ok := data.GetNodeStatus(node.Name); !ok || !isTerminalStatus(status) {
+			if status, ok := data.GetNodeStatus(node.Name); !ok || (!isTerminalStatus(status) && status != Waiting) {
 				data.SetNodeStatus(node.Name, Pending)
 			}
 		}
@@ -396,7 +431,7 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 		// failures are returned; when several fail concurrently they are ALL
 		// captured (not just the first). Continue-on-error failures are tolerated
 		// and never returned here (observable via node status).
-		levelFailures := executeNodesInLevel(ctx, level, data, d.config.MaxConcurrency, tracer)
+		levelFailures, parkedNodes := executeNodesInLevel(ctx, level, data, d.config.MaxConcurrency, tracer)
 
 		// Cancellation ALWAYS wins (DEC-CHUNK6, FORK 1 = a). If the context was
 		// cancelled or timed out, return the wrapped ctx error regardless of
@@ -414,6 +449,9 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 		// Pending ("stopped before reaching me", not "an upstream you needed
 		// failed"), preserving the chunk-3 distinction (DEC-CHUNK3-status).
 		if err := ctx.Err(); err != nil {
+			// Cancel outranks park: a cancelled run does not suspend. Any node that
+			// parked in this level is reset off Waiting by the suspend chokepoint
+			// defer (this return is not ErrSuspended).
 			return fmt.Errorf("workflow cancelled during level %d: %w", levelIndex, err)
 		}
 
@@ -423,8 +461,42 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 		// nodes transitively blocked by the failure are marked Skipped (and
 		// independent unreached nodes stay Pending). (DEC-CHUNK3-status.)
 		if execErr := newExecutionError(levelFailures); execErr != nil {
+			// Fail-fast outranks park: a failing run does not suspend. A parked
+			// sibling in this level is reset off Waiting by the suspend chokepoint
+			// defer (this return is not ErrSuspended).
 			markSkippedFrom(levels, levelIndex+1, data)
 			return execErr
+		}
+
+		// A park suspends the whole run (Model A, whole-run suspend). Checked
+		// AFTER cancellation and fail-fast (both of which outrank a park: a
+		// cancelled or failing run does not suspend), and only when this level had
+		// no fail-fast failure. The parked node(s) are already Waiting; the level
+		// has drained to the barrier. Flush the durable checkpoint FIRST so the
+		// park's bytes are down before we return (MH-3 / D-10,
+		// durable-flush-before-suspend — "the park IS a checkpoint" only if it is
+		// persisted), then return ErrSuspended. Re-entering Execute later (same
+		// WorkflowID + Store, via the M9 resume path + graph-identity guard)
+		// resumes from here. (M10 / DEC-M10.)
+		if len(parkedNodes) > 0 {
+			// Two non-suspend exits here (no checkpointer; a failed flush) leave
+			// the parked nodes Waiting; the suspend chokepoint defer resets them
+			// because neither returns ErrSuspended. Only the successful
+			// `return ErrSuspended` below — the durable park actually succeeded —
+			// keeps Waiting.
+			if checkpoint == nil {
+				// No durable checkpoint wired: a park cannot honor
+				// durable-flush-before-suspend, so this is a configuration error,
+				// never a silently non-durable ErrSuspended. (D-11 / Review AF1.)
+				return ErrSuspendRequiresCheckpointer
+			}
+			if err := checkpoint(data); err != nil {
+				// The flush errored — the durable park did NOT succeed, so this is a
+				// failure, not a suspend. (FIND-M10-P35-N2.)
+				return fmt.Errorf("workflow checkpoint failed while suspending after level %d: %w", levelIndex, err)
+			}
+			// The ONE exit that legitimately keeps Waiting: a durable park happened.
+			return ErrSuspended
 		}
 
 		// Durable checkpoint at the level barrier (M9 crash-resume). The level
@@ -438,8 +510,8 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error {
 		// lose. The cancel and fail-fast return paths above deliberately do NOT
 		// checkpoint here — Workflow.Execute performs a final Save on those paths.
 		// (DEC-M9, chunk 2.)
-		if d.config.checkpoint != nil {
-			if err := d.config.checkpoint(data); err != nil {
+		if checkpoint != nil {
+			if err := checkpoint(data); err != nil {
 				return fmt.Errorf("workflow checkpoint failed after level %d: %w", levelIndex, err)
 			}
 		}
@@ -470,6 +542,30 @@ func countSkipped(levels [][]*Node, data *WorkflowData) int {
 		}
 	}
 	return n
+}
+
+// clearWaiting resets EVERY node currently Waiting back to Pending. It is the
+// reset half of the suspend chokepoint (DAG.Execute's deferred guard): on any
+// non-ErrSuspended exit, no node may remain Waiting, so that "a persisted Waiting
+// node ⟺ DAG.Execute returned ErrSuspended (a durable park succeeded)" holds by
+// construction across every exit — current and future. Scanning all node
+// statuses (rather than only the last level's parked set) also clears a Waiting
+// that was preserved from a resumed run but never re-reached on this pass.
+//
+// It collects the Waiting names first and sets them after, because
+// ForEachNodeStatus holds the read lock while iterating and SetNodeStatus takes
+// the write lock (mutating inside the callback would deadlock). (DEC review:
+// structural single-point over per-exit; F1 / AF1 / FIND-M10-P35-N2.)
+func clearWaiting(data *WorkflowData) {
+	var waiting []string
+	data.ForEachNodeStatus(func(name string, status NodeStatus) {
+		if status == Waiting {
+			waiting = append(waiting, name)
+		}
+	})
+	for _, name := range waiting {
+		data.SetNodeStatus(name, Pending)
+	}
 }
 
 func markSkippedFrom(levels [][]*Node, startLevel int, data *WorkflowData) {

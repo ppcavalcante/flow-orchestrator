@@ -420,6 +420,49 @@ if errors.Is(err, workflow.ErrIO) {
 }
 ```
 
+### Suspension is not a failure — `ErrSuspended` (v0.10.0)
+
+When a workflow uses durable continuations ([timers / signals / conditions](./persistence.md#durable-continuations-suspend--resume)),
+`Workflow.Execute` can return `ErrSuspended` — the run **parked** on an external
+event (a node is `Waiting`) rather than completing. This is **not** a failure and is
+**not** an `*ExecutionError`; treat it as "suspended, re-enter later":
+
+```go
+err := wf.Execute(ctx)
+switch {
+case err == nil:
+    // the run completed
+case errors.Is(err, workflow.ErrSuspended):
+    // a node parked on a timer/signal/condition — checkpoint is durable, resume later
+    // (via Execute on startup, Tick for due timers, or DeliverAndResume for signals)
+case errors.Is(err, workflow.ErrSuspendRequiresCheckpointer):
+    // configuration error: a suspension node needs a Checkpointer store to park into
+case errors.Is(err, workflow.ErrWaitRequiresSignalStore):
+    // configuration error: a WaitForSignal node needs a SignalStore
+default:
+    // a real execution failure (an *ExecutionError) or a context error
+}
+```
+
+A `Waiting` node is non-terminal and non-failing: it never trips fail-fast and never
+causes dependents to be `Skipped`. `ErrSuspendRequiresCheckpointer` and
+`ErrWaitRequiresSignalStore` **are** real failures — they mean the store cannot
+support the suspension the workflow asked for.
+
+> **Caveat — a resume can return `nil` while a hard-failed node stays `Failed`.**
+> This is the pre-existing M9 resume-return semantics (`DEC-CHUNK3`) surfaced in the
+> durable-continuations context. If a run hard-failed and you *plainly* re-`Execute`
+> it (or `Tick` fires an **independent** overdue timer on another branch), the resume
+> re-runs the eligible non-terminal nodes and may return `nil` — but the hard-failed
+> node **stays terminal `Failed` and observable via `GetNodeStatus`**, and its
+> non-continue-on-error dependents stay `Skipped`. The failure lives in the node
+> status, not necessarily in the return value. A resume never **resurrects** a
+> `Failed` node (`Failed` is terminal and skipped on resume — machine-checked as
+> `NoResurrection` in the M10 model). If you need the run's health after a resume,
+> **inspect node statuses** — do not rely on the `Execute` return alone.
+> (`Workflow.Tick` is stricter: it refuses to report due timers for a run containing
+> a hard failure, so a host `Tick` loop cannot drive a failed run toward completed.)
+
 ### Returning sentinels from your own actions
 
 For action-level failures, wrap an action-domain sentinel with `%w` so downstream handlers

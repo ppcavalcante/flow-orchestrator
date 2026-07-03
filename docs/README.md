@@ -2,6 +2,29 @@
 
 Welcome to the Flow Orchestrator documentation. This comprehensive guide will help you understand, use, and extend Flow Orchestrator for your workflow automation needs.
 
+## Why Flow Orchestrator
+
+Flow Orchestrator occupies a niche no other engine holds: a **formally-verified,
+embeddable, durable workflow engine that needs no server and no database** — yet
+supports **durable timers, signals, and long-running waits** with **no determinism tax**.
+
+- **Embeddable** — a pure Go library you import, not a service you operate.
+- **No server, no database required** — durability is plain files (or in-memory); there
+  is no broker, no daemon, no DB to stand up. (Checkpoint/journal engines like DBOS deliver
+  the same crash-resume model but require Postgres; Flow Orchestrator requires neither. An
+  optional same-transaction store for exactly-once is a future add-on, never a requirement.)
+- **Durable continuations** — suspend on a durable timer, an inbound signal, or a data
+  condition and resume later, across process restarts, with no process held open.
+- **No determinism tax** — your workflow is static DAG *data*, never replayed code. Unlike
+  replay-based engines (e.g. Temporal, Azure Durable Functions / durabletask, go-workflows),
+  Flow Orchestrator never re-executes your code to rebuild state, so your actions carry no
+  "must be deterministic under replay" constraint.
+- **Formally verified core** — the executor's crash-resume and suspend/resume semantics are
+  machine-checked in TLA+ (TLC-exhaustive) and exercised by property-based tests over random
+  DAGs. (Scope: the core scheduling/durability *algorithm* is verified; see
+  [specs/README.md](../specs/README.md) for the honest design-exhaustive-vs-implementation-sampled
+  boundary.)
+
 ## Documentation Sections
 
 ### [Getting Started](./getting-started/)
@@ -63,13 +86,14 @@ Flow Orchestrator is a lightweight, high-performance workflow orchestration engi
 
 - **High Performance**: Optimized for minimal allocations and maximum throughput
 - **Thread-Safe**: Built for concurrent access with minimal lock contention
-- **Persistent**: Save and resume workflows across application restarts
+- **Durable — no server, no database required**: Save and resume workflows across application restarts using plain files (or in-memory) — no broker, daemon, or DB to stand up — see the [Persistence guide](./guides/persistence.md)
+- **Durable Continuations**: Suspend on a durable timer, an inbound signal, or a data condition and resume later, across restarts, with no process held open and no determinism tax — see the [Persistence guide → Durable Continuations](./guides/persistence.md#durable-continuations-suspend--resume)
 - **Observable**: Comprehensive metrics for monitoring and optimization, exportable to OpenTelemetry (API-only) — see the [Observability guide](./guides/observability.md)
 - **Extensible**: Designed to support multiple orchestration patterns
 - **Embeddable**: Clean API for integration into any Go application
 - **Type-Safe Data**: Optional generic typed keys (`Key[T]`) over the shared data store — see [api-reference.md → Typed-Key Data API](./reference/api-reference.md#typed-key-data-api-added-v070)
 - **Resilient**: Per-node continue-on-error lets selected steps fail without halting the workflow — see the [Error Handling guide](./guides/error-handling.md#3-continue-on-error)
-- **Rigorously Tested & Formally Modeled**: Property-based tests over random DAGs plus a TLC-checked TLA+ model of the executor — see [`specs/README.md`](../specs/README.md)
+- **Formally Verified core**: Crash-resume and suspend/resume semantics machine-checked in TLA+ (TLC-exhaustive) plus property-based tests over random DAGs — see [`specs/README.md`](../specs/README.md)
 
 ## Status
 

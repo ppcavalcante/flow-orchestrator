@@ -2,7 +2,7 @@
 
 namespace workflow;
 
-enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4 }
+enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4, Waiting = 5 }
 
 table KeyValueString {
   key:string;
@@ -35,6 +35,23 @@ table NodeOutputEntry {
   output:string; // JSON encoded
 }
 
+table TimerWaitEntry {
+  node_name:string;
+  fire_at:long; // M10: absolute wake instant, unix nanoseconds (int64, faithful long)
+}
+
+// Signal is a single durable mailbox entry (M10 phase 37, wait-for-signal).
+// It lives OUTSIDE WorkflowState (the snapshot) — the mailbox is an independent
+// channel so an external deliverer cannot clobber a running instance's
+// checkpoint. payload is JSON-encoded (same convention as NodeOutputEntry.output)
+// so an int64 payload round-trips via the json UseNumber() path. Not reachable
+// from root_type WorkflowState; serialized and read as its own buffer root.
+table Signal {
+  id:string;      // host-supplied stable unique-per-logical-event id (idempotency)
+  name:string;    // the signal name a WaitForSignalNode waits on
+  payload:string; // JSON-encoded payload (mirrors NodeOutputEntry.output)
+}
+
 table WorkflowState {
   workflow_id:string;
   string_data:[KeyValueString];
@@ -44,6 +61,7 @@ table WorkflowState {
   node_statuses:[NodeStatusEntry];
   node_outputs:[NodeOutputEntry];
   timestamp:long; // Unix timestamp in milliseconds
+  waits:[TimerWaitEntry]; // M10 additive: durable timer fireAt per parked node (highest field id)
 }
 
 root_type WorkflowState; 

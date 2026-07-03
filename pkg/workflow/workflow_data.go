@@ -22,6 +22,16 @@ type WorkflowData struct {
 	nodeStatus map[string]NodeStatus
 	outputs    map[string]interface{} // Renamed from nodeOutput for compatibility
 
+	// waits holds the durable wake metadata of parked timer nodes (M10 chunk 2,
+	// D36-04): nodeName -> fireAt, an ABSOLUTE wall-clock instant in unix
+	// nanoseconds (int64). It is the persisted source of truth for a durable
+	// timer — the live time.Timer is a disposable optimization re-derived from
+	// this on every boot. fireAt rides the same WorkflowData snapshot as node
+	// statuses/outputs, so one atomic write commits state+timer with no torn
+	// write, and the int64 magnitude round-trips losslessly through both the
+	// FlatBuffers (value_long-style long) and JSON (UseNumber) paths.
+	waits map[string]int64
+
 	// Keep the ID and metrics configuration
 	ID      string
 	metrics *metrics.MetricsCollector
@@ -55,8 +65,56 @@ func NewWorkflowDataWithConfig(id string, config WorkflowDataConfig) *WorkflowDa
 		data:           make(map[string]interface{}, config.ExpectedData),
 		nodeStatus:     make(map[string]NodeStatus, config.ExpectedNodes),
 		outputs:        make(map[string]interface{}, config.ExpectedNodes),
+		waits:          make(map[string]int64),
 		metrics:        metricsCollector,
 		stringInterner: stringInterner,
+	}
+}
+
+// SetWait records the durable wake metadata for a parked timer node: fireAt, an
+// absolute wall-clock instant in unix nanoseconds (M10 chunk 2, D36-04). It is
+// stored in the same snapshot as node statuses, so a single atomic checkpoint
+// write commits "this node is Waiting until fireAt".
+func (w *WorkflowData) SetWait(nodeName string, fireAt int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.waits[w.internKey(nodeName)] = fireAt
+}
+
+// GetWait returns the persisted fireAt for a node and whether the node has an
+// armed timer. A non-ok result means the node is not (or no longer) an armed
+// timer — the timer action treats that as "arm me" on first encounter.
+func (w *WorkflowData) GetWait(nodeName string) (int64, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	// No interning on the read path (see Get).
+	fireAt, ok := w.waits[nodeName]
+	return fireAt, ok
+}
+
+// ClearWait removes a node's armed-timer metadata. Called when a timer fires (the
+// node transitions out of Waiting), so a completed timer carries no stale fireAt.
+func (w *WorkflowData) ClearWait(nodeName string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// No interning on the read path; delete is keyed by string value.
+	delete(w.waits, nodeName)
+}
+
+// ForEachWait iterates over every armed timer's (nodeName, fireAt). Used by the
+// host-driven Tick/DueTimers wake API to find due timers.
+//
+// CAVEAT (Review F5): the read lock is held for the whole iteration, and this
+// RWMutex is non-reentrant — the callback MUST NOT call back into WorkflowData
+// (GetWait/SetWait/ClearWait/GetNodeStatus/etc.), or it can deadlock. Collect what
+// you need inside the callback and do any WorkflowData access AFTER ForEachWait
+// returns (the pattern DueTimers uses for its status check). Same gotcha as
+// ForEachNodeStatus.
+func (w *WorkflowData) ForEachWait(fn func(nodeName string, fireAt int64)) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for k, v := range w.waits {
+		fn(k, v)
 	}
 }
 
@@ -336,12 +394,20 @@ func (w *WorkflowData) Snapshot() ([]byte, error) {
 // createSnapshot creates a snapshot of the workflow data
 // Caller must hold the read lock
 func (w *WorkflowData) createSnapshot() ([]byte, error) {
-	// Create a snapshot structure
+	// Create a snapshot structure. `waits` (durable timer fireAt, M10) rides the
+	// same snapshot; omitted when empty so a workflow with no timers serializes
+	// byte-identically to its pre-M10 form (additive, backward-compatible). int64
+	// fireAt values are marshalled as JSON number literals and rehydrated through
+	// the UseNumber() path in loadSnapshotInternal, preserving full int64
+	// magnitude (the v0.7.1 int64-via-float64 lesson applied to fireAt).
 	snapshot := map[string]interface{}{
 		"id":         w.ID,
 		"data":       w.data,
 		"nodeStatus": w.nodeStatus,
 		"outputs":    w.outputs,
+	}
+	if len(w.waits) > 0 {
+		snapshot["waits"] = w.waits
 	}
 
 	// Serialize to JSON
@@ -390,7 +456,7 @@ func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
 	// before populating the maps, so a malformed/abusive payload cannot drive a huge
 	// allocation. (The byte-size cap upstream bounds the document; this bounds the
 	// decoded entry count typed and early.)
-	for _, section := range []string{"data", "nodeStatus", "outputs"} {
+	for _, section := range []string{"data", "nodeStatus", "outputs", "waits"} {
 		if m, ok := snapshot[section].(map[string]interface{}); ok && len(m) > defaultMaxElements {
 			return fmt.Errorf("%w: element count exceeds max", ErrCorruptData)
 		}
@@ -440,6 +506,29 @@ func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
 		w.outputs = make(map[string]interface{})
 		for k, v := range outputs {
 			w.outputs[w.internKey(k)] = v
+		}
+	}
+
+	// Update durable timer waits (M10). fireAt is an absolute unix-nanos int64 and
+	// MUST rehydrate at full magnitude — with UseNumber every JSON number arrives
+	// as json.Number (the original literal), so Int64() recovers it exactly,
+	// matching the FlatBuffers long path. A value that does not parse as an int64
+	// (a malformed/forged snapshot) is rejected as ErrCorruptData rather than
+	// silently coerced through a lossy float64 (the v0.7.1 int64-via-float64 trap).
+	// Always reset the map so a resume that carries no waits clears any stale ones
+	// (symmetric with the data/nodeStatus/outputs resets above).
+	w.waits = make(map[string]int64)
+	if waits, ok := snapshot["waits"].(map[string]interface{}); ok {
+		for k, v := range waits {
+			num, ok := v.(json.Number)
+			if !ok {
+				return fmt.Errorf("%w: timer fireAt for %q is not a number", ErrCorruptData, k)
+			}
+			fireAt, err := num.Int64()
+			if err != nil {
+				return fmt.Errorf("%w: timer fireAt for %q is not an int64: %w", ErrCorruptData, k, err)
+			}
+			w.waits[w.internKey(k)] = fireAt
 		}
 	}
 
@@ -518,6 +607,7 @@ func (w *WorkflowData) Clone() *WorkflowData {
 		data:           make(map[string]interface{}, len(w.data)),
 		nodeStatus:     make(map[string]NodeStatus, len(w.nodeStatus)),
 		outputs:        make(map[string]interface{}, len(w.outputs)),
+		waits:          make(map[string]int64, len(w.waits)),
 		stringInterner: newStringInterner(),
 	}
 
@@ -534,6 +624,12 @@ func (w *WorkflowData) Clone() *WorkflowData {
 	// Copy outputs
 	for k, v := range w.outputs {
 		clone.outputs[k] = v
+	}
+
+	// Copy durable timer waits (M10) — int64 is a value type, so a shallow copy
+	// is a full copy (no shared mutable state, matching the clone contract).
+	for k, v := range w.waits {
+		clone.waits[k] = v
 	}
 
 	return clone

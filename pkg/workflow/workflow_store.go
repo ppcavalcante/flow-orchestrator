@@ -335,6 +335,13 @@ func (s *JSONFileStore) Delete(workflowID string) error {
 		return err
 	}
 
+	// Reclaim the durable signal mailbox too (ph37 F2): the <id>.signals/ sibling
+	// dir is a separate channel the snapshot Delete would otherwise orphan. Done
+	// FIRST + best-effort so it runs even for a mailbox with no snapshot (an early
+	// signal delivered to a workflow that never ran/saved).
+	//nolint:errcheck,gosec // best-effort mailbox reclamation (ph37 F2)
+	removeSignalDir(s.baseDir, workflowID)
+
 	// Delete file
 	filePath := filepath.Join(s.baseDir, workflowID+".json")
 	err := os.Remove(filePath)
@@ -690,6 +697,27 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 		outputsVector = builder.EndVector(len(outputOffsets))
 	}
 
+	// Create durable timer waits vector (M10). fireAt is written to the faithful
+	// int64 `fire_at` long, symmetric with the JSON UseNumber() path — no clamp,
+	// no float64 detour, so a MaxInt64/MinInt64 fireAt round-trips losslessly.
+	waitOffsets := make([]flatbuffers.UOffsetT, 0)
+	data.ForEachWait(func(nodeName string, fireAt int64) {
+		fbNodeName := builder.CreateString(nodeName)
+		fb.TimerWaitEntryStart(builder)
+		fb.TimerWaitEntryAddNodeName(builder, fbNodeName)
+		fb.TimerWaitEntryAddFireAt(builder, fireAt)
+		waitOffsets = append(waitOffsets, fb.TimerWaitEntryEnd(builder))
+	})
+
+	var waitsVector flatbuffers.UOffsetT
+	if len(waitOffsets) > 0 {
+		fb.WorkflowStateStartWaitsVector(builder, len(waitOffsets))
+		for i := len(waitOffsets) - 1; i >= 0; i-- {
+			builder.PrependUOffsetT(waitOffsets[i])
+		}
+		waitsVector = builder.EndVector(len(waitOffsets))
+	}
+
 	// Create WorkflowState table
 	fb.WorkflowStateStart(builder)
 	fb.WorkflowStateAddWorkflowId(builder, fbWorkflowID)
@@ -716,6 +744,10 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 
 	if len(outputOffsets) > 0 {
 		fb.WorkflowStateAddNodeOutputs(builder, outputsVector)
+	}
+
+	if len(waitOffsets) > 0 {
+		fb.WorkflowStateAddWaits(builder, waitsVector)
 	}
 
 	workflowState := fb.WorkflowStateEnd(builder)
@@ -842,7 +874,8 @@ func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err erro
 		fbState.DoubleDataLength() > defaultMaxElements ||
 		fbState.StringDataLength() > defaultMaxElements ||
 		fbState.NodeStatusesLength() > defaultMaxElements ||
-		fbState.NodeOutputsLength() > defaultMaxElements {
+		fbState.NodeOutputsLength() > defaultMaxElements ||
+		fbState.WaitsLength() > defaultMaxElements {
 		return nil, fmt.Errorf("%w: element count exceeds max", ErrCorruptData)
 	}
 
@@ -919,6 +952,17 @@ func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err erro
 		}
 	}
 
+	// Load durable timer waits (M10). The int64 fire_at is read straight from the
+	// faithful long — no float64 detour — so a MaxInt64/MinInt64 fireAt survives
+	// the FB round-trip, matching the JSON path. Absent in pre-M10 buffers
+	// (WaitsLength()==0), so older snapshots load unchanged (additive field id 8).
+	for i := 0; i < fbState.WaitsLength(); i++ {
+		var entry fb.TimerWaitEntry
+		if fbState.Waits(&entry, i) {
+			data.SetWait(string(entry.NodeName()), entry.FireAt())
+		}
+	}
+
 	return data, nil
 }
 
@@ -954,6 +998,13 @@ func (s *FlatBuffersStore) Delete(workflowID string) error {
 		return err
 	}
 
+	// Reclaim the durable signal mailbox too (ph37 F2): the <id>.signals/ sibling
+	// dir is a separate channel the snapshot Delete would otherwise orphan. Done
+	// FIRST + best-effort so it runs even for a mailbox with no snapshot (an early
+	// signal delivered to a workflow that never ran/saved).
+	//nolint:errcheck,gosec // best-effort mailbox reclamation (ph37 F2)
+	removeSignalDir(s.baseDir, workflowID)
+
 	// Delete file
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
 	err := os.Remove(filePath)
@@ -982,6 +1033,8 @@ func fbStatusToNodeStatus(status fb.NodeStatus) NodeStatus {
 		return Failed
 	case fb.NodeStatusSkipped:
 		return Skipped
+	case fb.NodeStatusWaiting:
+		return Waiting
 	default:
 		return Pending
 	}
@@ -991,13 +1044,20 @@ func fbStatusToNodeStatus(status fb.NodeStatus) NodeStatus {
 // It's useful for testing and workflows that don't need persistence.
 type InMemoryStore struct {
 	data map[string]*WorkflowData
-	mu   sync.RWMutex
+	// signals is the in-process durable mailbox (M10 phase 37): per-workflow
+	// delivered signals, keyed by workflowID, deduplicated by sig.ID. It lives
+	// SEPARATE from data (the snapshot) so a DeliverSignal cannot clobber a
+	// running instance's checkpoint (MH37-1). Durable only in-process, exactly
+	// like this store's checkpoint — honest for an in-memory store.
+	signals map[string]map[string]Signal
+	mu      sync.RWMutex
 }
 
 // NewInMemoryStore creates a new in-memory workflow store.
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
-		data: make(map[string]*WorkflowData),
+		data:    make(map[string]*WorkflowData),
+		signals: make(map[string]map[string]Signal),
 	}
 }
 
@@ -1070,6 +1130,7 @@ func (s *InMemoryStore) Delete(workflowID string) error {
 	}
 
 	delete(s.data, workflowID)
+	delete(s.signals, workflowID) // reclaim the in-process mailbox too (ph37 F2)
 	return nil
 }
 
@@ -1086,6 +1147,8 @@ func statusToFBStatus(status NodeStatus) fb.NodeStatus {
 		return fb.NodeStatusFailed
 	case Skipped:
 		return fb.NodeStatusSkipped
+	case Waiting:
+		return fb.NodeStatusWaiting
 	default:
 		return fb.NodeStatusPending
 	}

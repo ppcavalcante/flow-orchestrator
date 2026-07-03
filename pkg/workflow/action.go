@@ -211,6 +211,15 @@ func (r *RetryableAction) Execute(ctx context.Context, data *WorkflowData) error
 			return nil // Success
 		}
 
+		// A park is not a retryable failure. If the wrapped action suspended,
+		// return the sentinel immediately — retrying would re-run the action and
+		// could re-park in a loop, and a park is a SUCCESS arm, not an error to
+		// recover from. (Declared suspension nodes bypass this wrapper entirely via
+		// node.Execute; this is defense-in-depth for a hand-wrapped action.)
+		if errors.Is(err, ErrSuspended) {
+			return err
+		}
+
 		lastErr = err
 
 		// Should we retry?
