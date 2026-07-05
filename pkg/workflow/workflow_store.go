@@ -1035,6 +1035,8 @@ func fbStatusToNodeStatus(status fb.NodeStatus) NodeStatus {
 		return Skipped
 	case fb.NodeStatusWaiting:
 		return Waiting
+	case fb.NodeStatusBypassed:
+		return Bypassed
 	default:
 		return Pending
 	}
@@ -1149,6 +1151,8 @@ func statusToFBStatus(status NodeStatus) fb.NodeStatus {
 		return fb.NodeStatusSkipped
 	case Waiting:
 		return fb.NodeStatusWaiting
+	case Bypassed:
+		return fb.NodeStatusBypassed
 	default:
 		return fb.NodeStatusPending
 	}

@@ -521,13 +521,17 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 }
 
 // markSkippedFrom sweeps the levels at index startLevel and beyond in
-// topological order, marking Skipped every not-yet-terminal node that has at
-// least one dependency in a terminal non-resolving state (a non-coe Failed dep,
-// or an already-Skipped dep). Because the sweep runs in level order, a node
-// marked Skipped here causes its own dependents (in later levels) to be marked
-// Skipped too — transitivity (DEC-CHUNK3-status, S1). A node whose dependencies
-// all resolved, or that has no failed/skipped ancestor, is left untouched
-// (stays Pending) — it was simply never reached.
+// topological order, assigning each not-yet-terminal node its CAUSE-AWARE
+// terminal status via the shared classifyBlockedStatus predicate — the SAME
+// classifier the launch gate uses, so the sweep and the gate cannot drift
+// (DEC-M11-STATUS-CAUSE). A node blocked by a non-coe Failed / Skipped ancestor
+// becomes Skipped; a node blocked purely by a Bypassed branch interior becomes
+// Bypassed; a bypassed node with a surviving taken ancestor becomes Skipped
+// (the diamond rule, DEC-M11-P41-DIAMOND). Because the sweep runs in level
+// order, a node settled here propagates its cause to its own dependents in later
+// levels — transitivity (DEC-CHUNK3-status, S1). A node whose dependencies all
+// resolved, or that has only a not-reached-yet (Pending/Running/Waiting)
+// ancestor, is left untouched (stays Pending) — it was simply never reached.
 // countSkipped returns the number of nodes across all levels whose final status
 // is Skipped. It is used only to annotate the parent workflow span
 // (workflow.skipped_count); Skipped nodes get no span of their own because a
@@ -574,15 +578,8 @@ func markSkippedFrom(levels [][]*Node, startLevel int, data *WorkflowData) {
 			if status, _ := data.GetNodeStatus(node.Name); isTerminalStatus(status) {
 				continue
 			}
-			for _, dep := range node.DependsOn {
-				depStatus, _ := data.GetNodeStatus(dep.Name)
-				if depResolved(dep, depStatus) {
-					continue
-				}
-				if isSkipCause(depStatus) {
-					data.SetNodeStatus(node.Name, Skipped)
-					break
-				}
+			if status, assign := classifyBlockedStatus(node, data, dependentRole(node)); assign {
+				data.SetNodeStatus(node.Name, status)
 			}
 		}
 	}

@@ -36,6 +36,16 @@ const (
 	// re-runs the node, which re-parks (or wakes) — so Waiting is treated as
 	// runnable, like Pending, not done. "Suspend is a crash you chose." (M10.)
 	Waiting NodeStatus = "waiting"
+	// Bypassed indicates a not-taken branch of a ChoiceNode: the node did not run
+	// because the routing decision activated a different branch, NOT because an
+	// upstream it needed failed. Bypassed is TERMINAL (never runs, never
+	// re-armed) and is distinct from Skipped on purpose — Skipped preserves the
+	// failure-diagnostics meaning "an upstream you needed failed/was-skipped"
+	// (DEC-CHUNK3), so overloading it would corrupt that signal. A node blocked
+	// solely by Bypassed dep(s) is Bypassed; a node blocked by a Bypassed dep
+	// that ALSO has a surviving taken (resolved) ancestor is Skipped, not
+	// Bypassed (the taken path wins — DEC-M11-P41-DIAMOND). (M11.)
+	Bypassed NodeStatus = "bypassed"
 )
 
 // Node represents a unit of work in a workflow.

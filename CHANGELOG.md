@@ -5,6 +5,54 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0-alpha]
+
+**M11 — Conditional Branching (ChoiceNode + OR-join).** A workflow can now *branch on
+data*: a `ChoiceNode` evaluates a predicate over `WorkflowData` to activate exactly one
+branch and **bypass** the others, with a downstream `MergeNode` that **OR-joins** them —
+firing on whichever branch was taken. This is the first true conditional control flow in
+the engine (previously every node was strict-AND: a merge below a choice always cascaded
+to `Skipped`). The whole milestone is **ADDITIVE — there are NO breaking changes**: a new
+terminal `Bypassed` NodeStatus (additive FlatBuffers wire slot 6), new builder helpers
+(`AddChoice` / `AddMerge`), and a build-time reconvergence validator; existing DAGs,
+stores, and `DAG.Execute`'s signature are unchanged, and a workflow that uses no
+ChoiceNode behaves exactly as before. Crucially there is **no determinism tax** — routing
+is *data* (a predicate over persisted state), never replayed workflow code — and the
+OR-join semantics (including the bypass-satisfies-vs-failure-blocks separator, across a
+crash) are **machine-checked exhaustively in TLA+**. The in-code version constant is
+`0.11.0-alpha`; every tag is a pre-release, so `go get @latest` resolves to it. See
+[docs/guides/workflow-patterns.md](docs/guides/workflow-patterns.md),
+[docs/architecture/adr/0010-conditional-branching-bypassed-status.md](docs/architecture/adr/0010-conditional-branching-bypassed-status.md),
+and [specs/README.md](specs/README.md).
+
+### Added (0.11.0-alpha — M11)
+- **`Bypassed` — the 7th, terminal `NodeStatus`.** A branch not taken by a `ChoiceNode` is
+  marked `Bypassed` (distinct from `Skipped` on purpose — bypass is a deliberate not-taken,
+  `Skipped` is a failure/skip cascade — so failure diagnostics stay honest). It has its own
+  additive FlatBuffers wire slot (6) and round-trips through the file stores.
+- **`ChoiceNode` — `WorkflowBuilder.AddChoice(name).When(pred, branch).Otherwise(branch)`.**
+  A data-driven router: the predicate reads `WorkflowData`, branches are tried in declared
+  order (**first-match**), and the unmatched branches are bypassed. A no-match with no
+  `Otherwise` cascades downstream to `Skipped` (`ErrNoBranchMatched` when the choice itself
+  has no viable branch).
+- **`MergeNode` / OR-join — `WorkflowBuilder.AddMerge(name).From(tail1, tail2, ...)`.**
+  Reconverges a `ChoiceNode`'s branch tails: it **fires iff ≥1 taken tail completed** (the
+  always-completed choice edge is excluded from the count), is itself `Bypassed` when every
+  branch was bypassed (composes downward), and **fail-fasts** if the taken branch failed.
+  Pass-through by default; an optional join action is set via `.WithAction(...)`.
+- **Build-time reconvergence validator.** Only structured, single-`ChoiceNode`, local
+  OR-joins are expressible — every unstructured shape is a typed build error
+  (`ErrUnstructuredMerge`, `ErrSharedBranch`, `ErrDanglingMerge`) rather than a runtime
+  surprise. This strictness is what keeps the OR-join *local* and exhaustively verifiable.
+- **TLA+ OR-join arm (the moat).** The refining spec gains a conditional-branching arm with
+  five bite-proven safety invariants (exactly-one-branch-taken, merge-fires-iff-≥1-taken,
+  no-bypassed-descendant-runs, the bypass-vs-failure separator, and failed-choice-skips)
+  proven exhaustively — including across a crash — with all M10 invariants preserved.
+
+**Not in this release** (deliberate, to protect exhaustive verification / the moat):
+unstructured van-der-Aalst OR-join, loops, dynamic `Map` / sub-DAG, and empty-branch merges
+(a `ChoiceNode` wired directly to a `MergeNode` with no intervening node — use a pass-through).
+
 ## [0.10.0-alpha]
 
 **M10 — Durable Continuations (Tier 2: suspend / resume).** A workflow can now *park*
@@ -81,7 +129,8 @@ pre-release, so `go get @latest` resolves to it. See [STABILITY.md](STABILITY.md
   qa independently re-ran the suite. See [specs/README.md](specs/README.md).
 - **Note:** `ChoiceNode` and dynamic `Map` / sub-DAG are **not** in this release — they
   are deferred to M11 (dynamic sub-graph instantiation is the only piece that would break
-  exhaustive verification).
+  exhaustive verification). *(`ChoiceNode` + OR-join delivered in [0.11.0-alpha] above;
+  dynamic `Map` / sub-DAG remain deferred.)*
 
 ## [0.9.0-alpha]
 
@@ -484,7 +533,8 @@ plus the M1 correctness/security fixes that were never recorded in this file.
 - Limited persistence options
 - Documentation is being improved
 
-[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.7.2-alpha...HEAD
+[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.11.0-alpha...HEAD
+[0.11.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.11.0-alpha
 [0.7.2-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.2-alpha
 [0.7.1-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.1-alpha
 [0.7.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.0-alpha

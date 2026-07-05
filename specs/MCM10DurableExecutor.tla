@@ -29,5 +29,18 @@ MCFireAt == [n \in MCNodes |-> IF n = n2 THEN 2 ELSE 0]
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
           mailbox, delivered, applied, recorded
 
-INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt
+\* M11 OR-join topology is EMPTY for the M10 diamond config — the OR-join arm is
+\* inert, so this config re-runs the extended spec byte-behaviour-unchanged
+\* (DEC-M11-P44-PRESERVE: the preservation proof is this exact re-run staying green
+\* at ~14,380 states).
+MCChoiceNodes    == {}
+MCChoiceFailSet  == {}
+MCMergeNodes     == {}
+MCChoiceBranches == [c \in {} |-> {}]
+MCChosenBranch   == [c \in {} |-> n1]
+MCMergeTails     == [m \in {} |-> {}]
+
+INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
+    ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
+    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails
 =============================================================================

@@ -229,6 +229,16 @@ Nodes have several possible status values that track their execution state:
   finished); a later resume, timer `Tick`, or signal delivery re-runs the node,
   which either re-parks or wakes and converges. Treat it as runnable, like
   `Pending`. See the [durable continuations](#durable-continuations) section below.
+- `Bypassed` (added v0.11.0): The node is the **not-taken branch of a `ChoiceNode`** —
+  it did not run because the routing decision activated a *different* branch, **not**
+  because an upstream it needed failed. `Bypassed` is **terminal** (never runs, never
+  re-armed) and is deliberately distinct from `Skipped`: `Skipped` preserves the
+  failure-diagnostics meaning "an upstream you needed failed/was-skipped", so a clean
+  not-taken branch must not be labelled with it. Bypass propagates through a not-taken
+  branch's whole subgraph. (One subtlety — the *diamond rule*: a node with a `Bypassed`
+  dependency that **also** has a surviving taken/`Completed` ancestor is `Skipped`, not
+  `Bypassed`; the taken path wins.) See [conditional branching](#conditional-branching)
+  below.
 
 ```go
 // Get a node's status
@@ -327,6 +337,44 @@ There is **no mandatory background service**: the host drives waking on its own 
 (`Tick` for due timers, `DeliverAndResume` for signals). See the
 [Persistence guide → Durable Continuations](../guides/persistence.md) and the
 [API reference → Durable continuations](../reference/api-reference.md#durable-continuations).
+
+## Conditional Branching
+
+<a id="conditional-branching"></a>
+
+Added in **v0.11.0**, Flow Orchestrator supports **true workflow-level branching**: a
+`ChoiceNode` routes execution down exactly **one** of several branches, and a `MergeNode`
+reconverges them with an **OR-join**. Unlike the earlier "run every node, decide inside
+the action" pattern, a not-taken branch genuinely **does not run** — its nodes become
+`Bypassed`. This is a static, declared structure (no dynamic graph mutation, no
+determinism tax), and the branching semantics are machine-checked in TLA+.
+
+- **`AddChoice(name)`** evaluates ordered `When(predicate, target)` arms in **declared
+  order, first match wins**, and activates that one branch; every other branch entry (and
+  its subgraph) is `Bypassed`. An `Otherwise(target)` supplies a default; with no
+  `Otherwise` and no match, the choice **fails** with `ErrNoBranchMatched` (a routing
+  dead-end is a typed error, never a silent hang). The predicate is `func(*WorkflowData)
+  bool` and must read only **guaranteed-run-ancestor or seed keys** — reading an absent
+  key returns the zero value and simply falls through to the next arm.
+- **`AddMerge(name).From(tail1, tail2, ...)`** OR-joins the named branch tails: it **fires
+  iff ≥1 taken branch-tail completed** (a `Bypassed` tail is satisfied, not blocking). If
+  **every** branch was bypassed, the merge is itself `Bypassed` (bypass composes downward).
+  A failure on the taken branch fails the run fail-fast, as usual.
+
+```go
+wb.AddChoice("route").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 1000 }, "big").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 0 },    "small").
+    Otherwise("zero")
+// ... branch bodies, each ending at a tail node ...
+wb.AddMerge("done").From("bigTail", "smallTail", "zero")
+wb.AddNode("after").DependsOn("done")
+```
+
+Only **structured, single-`ChoiceNode`, local** OR-joins are expressible — the builder
+rejects unstructured reconvergence at `Build()` time (see the
+[API reference → Conditional branching](../reference/api-reference.md#conditional-branching)
+and [ADR-0010](../architecture/adr/0010-conditional-branching-bypassed-status.md)).
 
 ## Next Steps
 

@@ -2,7 +2,7 @@
 
 namespace workflow;
 
-enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4, Waiting = 5 }
+enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4, Waiting = 5, Bypassed = 6 }
 
 table KeyValueString {
   key:string;

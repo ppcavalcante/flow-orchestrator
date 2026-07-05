@@ -31,6 +31,8 @@ type WorkflowBuilder struct {
 	executionConfig *ExecutionConfig     // nil => DAG uses DefaultConfig()
 	tracerProvider  trace.TracerProvider // nil => tracing off
 	clock           Clock                // nil => system clock (M10 durable timers)
+	choiceEdges     []choiceEdge         // ChoiceNode branch edges, folded in Build (M11)
+	mergeEdges      []mergeEdge          // MergeNode join edges, folded in Build (M11 ph42)
 }
 
 // NewWorkflowBuilder creates a new workflow builder.
@@ -223,6 +225,35 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 		dag.WithTracerProvider(b.tracerProvider)
 	}
 
+	// Fold ChoiceNode branch edges (choice -> target) and MergeNode join edges
+	// (merge -> tail) into the dependency lists. Done FIRST so the existing
+	// count/wire/cycle-check passes treat them like any other edge, and so the
+	// When/Otherwise/From wiring is independent of node-declaration order (a
+	// target/tail may be declared before or after the call). (M11.)
+	if len(b.choiceEdges) > 0 || len(b.mergeEdges) > 0 {
+		builderByName := make(map[string]*NodeBuilder, nodeCount)
+		for _, nb := range b.nodes {
+			builderByName[nb.name] = nb
+		}
+		for _, e := range b.choiceEdges {
+			target, ok := builderByName[e.target]
+			if !ok {
+				return nil, fmt.Errorf("choice %q routes to unknown branch target %q", e.choice, e.target)
+			}
+			target.dependencies = append(target.dependencies, e.choice)
+		}
+		for _, e := range b.mergeEdges {
+			merge, ok := builderByName[e.merge]
+			if !ok {
+				return nil, fmt.Errorf("merge %q not found while wiring its tails", e.merge)
+			}
+			if _, ok := builderByName[e.tail]; !ok {
+				return nil, fmt.Errorf("merge %q joins unknown branch tail %q", e.merge, e.tail)
+			}
+			merge.dependencies = append(merge.dependencies, e.tail)
+		}
+	}
+
 	// Map to track node dependency counts for capacity hints
 	nodeDependencyCounts := make(map[string]int, nodeCount)
 
@@ -291,6 +322,14 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 
 	// Validate the DAG
 	if err := dag.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid workflow: %w", err)
+	}
+
+	// Strict reconvergence validation (M11 ph42, D-P42-STRICT): only structured,
+	// single-Choice, local OR-joins are expressible. Runs after the cycle-check
+	// so a rejected graph never reaches the executor, and so the runtime OR-join
+	// semantics can rely on "a merge reconverges exactly one Choice".
+	if err := validateReconvergence(dag); err != nil {
 		return nil, fmt.Errorf("invalid workflow: %w", err)
 	}
 

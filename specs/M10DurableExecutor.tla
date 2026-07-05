@@ -53,7 +53,26 @@ CONSTANTS
     TimerNodes,      \* subset of Suspendable driven by a DURABLE TIMER (clock>=fireAt), as
                      \* opposed to a signal (FireEvent). The phase-36 timer dimension.
     MaxTick,         \* logical-clock ceiling (clock in 0..MaxTick) — bounded discrete time
-    FireAt           \* FireAt[n]: the absolute logical due-time of a timer node (in 0..MaxTick)
+    FireAt,          \* FireAt[n]: the absolute logical due-time of a timer node (in 0..MaxTick)
+    \* --- M11 OR-join topology (phase 44). ALL default to {} / trivial for the M10
+    \* diamond config, so the OR-join arm is INERT and M10 re-runs byte-behaviour-
+    \* unchanged (preservation-by-re-verification, DEC-M11-P44-PRESERVE). ---
+    ChoiceNodes,     \* subset of Nodes that are ChoiceNodes (first-match router; abstracted to a nondet pick)
+    ChoiceFailSet,   \* subset of ChoiceNodes that FAIL to route (no branch matched + no default -> ErrNoBranchMatched,
+                     \* choice.go:52-59): the choice FAILS (non-coe), its branch entries are left UNTOUCHED and the
+                     \* cascade SKIPS them (never bypasses) — the 41-F1 distinction. Default {} (choices route).
+    MergeNodes,      \* subset of Nodes that are MergeNodes (OR-join)
+    ChoiceBranches,  \* [ChoiceNodes -> SUBSET Nodes]: the branch-entry nodes each Choice picks among
+    ChosenBranch,    \* [ChoiceNodes -> Nodes]: the DETERMINISTIC branch each Choice takes. Models the
+                     \* first-match predicate as a PURE FUNCTION of checkpointed seed keys (CHOICE-02
+                     \* same-branch-on-resume) — a durable-by-data pick, like a timer's FireAt. A nondet
+                     \* pick would be UNFAITHFUL under crashes: it could re-route on resume (run a branch,
+                     \* then bypass it after a crash reverts an un-checkpointed decision -> exec>0 for a
+                     \* bypassed node), violating the resume-determinism ph43 §1 proved. Explore multiple
+                     \* routes by running the config once per ChosenBranch value.
+    MergeTails       \* [MergeNodes -> SUBSET Nodes]: the branch-TAIL predecessors the merge OR-joins (the
+                     \* count set). The structural always-`done` Choice-dep is a dep of the merge but is
+                     \* NOT in MergeTails, so it is EXCLUDED from the taken count (anti-vacuity, MAJOR-1)
 
 VARIABLES
     status,    \* status[n]: in-memory status in {pending,running,done,failed,skipped,waiting}
@@ -88,12 +107,17 @@ vars == <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCoun
 \* complete after waking. Bounds exec finitely.
 MaxRuns == 2 * (MaxCrashes + 1)
 
-Statuses == {"pending","running","done","failed","skipped","waiting"}
+\* 7th status "bypassed" (M11 ph41/44): a not-taken ChoiceNode branch. Terminal
+\* (mirrors Bypassed in isTerminalStatus), distinct from "skipped" (which means an
+\* upstream you needed failed). For an AND node a bypassed dep is neither Resolved
+\* nor a SkipCause — it is a distinct BYPASS cause (the Bypass/DiamondSkip actions);
+\* for a MergeNode a bypassed predecessor is SATISFIED (MergeResolved), not blocking.
+Statuses == {"pending","running","done","failed","skipped","waiting","bypassed"}
 
 ------------------------------------------------------------------------
 (* Base scheduling helpers — mirror DurableExecutor.tla / Executor.tla.      *)
 
-Terminal == {"done", "failed", "skipped"}
+Terminal == {"done", "failed", "skipped", "bypassed"}
 
 DepsOf(n) == { d \in Nodes : <<d, n>> \in Deps }
 
@@ -150,6 +174,7 @@ Start(n) ==
     /\ up
     /\ status[n] = "pending"
     /\ ~halted
+    /\ n \notin MergeNodes   \* M11: a MergeNode launches via MergeStart (OR-join), not the strict-AND Start
     /\ DepsResolved(n)
     /\ Cardinality(Running) < MaxConc
     /\ status' = [status EXCEPT ![n] = "running"]
@@ -162,6 +187,7 @@ Start(n) ==
 Finish(n) ==
     /\ up
     /\ status[n] = "running"
+    /\ n \notin ChoiceNodes   \* M11: a ChoiceNode completes via ChoiceFinish (activates one branch, bypasses the rest)
     /\ (n \in Suspendable => wakeReady[n])
     /\ exec' = [exec EXCEPT ![n] = exec[n] + 1]
     /\ IF n \in FailSet
@@ -256,6 +282,129 @@ Skip(n) ==
     /\ status[n] = "pending"
     /\ HasSkipCauseDep(n)
     /\ status' = [status EXCEPT ![n] = "skipped"]
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+------------------------------------------------------------------------
+(* M11 OR-JOIN actions (phase 44 — the ChoiceNode + MergeNode arm).           *)
+(* All are INERT when ChoiceNodes = MergeNodes = {} (the M10 diamond config),  *)
+(* so M10 re-runs unchanged (DEC-M11-P44-PRESERVE). Models parallel_execution  *)
+(* .go:140-161 (the cause-aware gate + the OR-join launch-eligibility count).  *)
+
+AllDepsSettled(n) == \A d \in DepsOf(n) : status[d] \in Terminal
+HasBypassDep(n)   == \E d \in DepsOf(n) : status[d] = "bypassed"
+
+\* MergeResolved: for a MergeNode a Bypassed predecessor is SATISFIED (does not
+\* block the OR-join) — the role-aware inverse of the strict-AND Resolved. (done /
+\* coe-failed are the taken cases, already Resolved.)  [depResolved, merge arm]
+MergeResolved(d)      == Resolved(d) \/ status[d] = "bypassed"
+MergeDepsSatisfied(m) == \A d \in DepsOf(m) : MergeResolved(d)
+\* TakenTails: the OR-join count set — branch tails that RAN (Resolved), ranging
+\* over MergeTails ONLY, so the always-`done` structural Choice-dep is EXCLUDED
+\* (anti-vacuity, red-team MAJOR-1). A Bypassed tail is satisfied but NOT taken.
+TakenTails(m)         == { t \in MergeTails[m] : Resolved(t) }
+
+\* ChoiceFinish (ph41): a running ChoiceNode COMPLETES (done — a Choice always
+\* Completes, D38-01) and activates EXACTLY ONE branch (ChosenBranch[c]): it marks
+\* every OTHER branch entry "bypassed". The pick is DETERMINISTIC (ChosenBranch, a
+\* pure function of checkpointed seed keys) so it is STABLE across a crash/resume
+\* (CHOICE-02 same-branch-on-resume). ABSTRACTION (documented, M9/M10 honesty): the
+\* declared-order first-match (DEC-M11-FIRSTMATCH) is modeled as a fixed per-choice
+\* pick — the routing DATA is irrelevant to the SAFETY invariants (exactly-one-taken,
+\* bypass propagation, the separator); it is the exactly-one-ness + resume-stability
+\* that matter, not which branch. Different routes are separate exhaustive runs.
+ChoiceFinish(c) ==
+    /\ up
+    /\ c \in ChoiceNodes
+    /\ c \notin ChoiceFailSet   \* a no-match choice FAILS instead (ChoiceFail); it does not route
+    /\ status[c] = "running"
+    /\ exec' = [exec EXCEPT ![c] = exec[c] + 1]
+    /\ status' = [nn \in Nodes |->
+                    IF nn = c THEN "done"
+                    ELSE IF nn \in (ChoiceBranches[c] \ {ChosenBranch[c]}) THEN "bypassed"
+                    ELSE status[nn]]
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* ChoiceFail (ph41 / 41-F1, phase-44 review 44-F1): a ChoiceNode with NO matching
+\* branch and NO default FAILS (non-coe -> halts the attempt) and leaves its branch
+\* entries UNTOUCHED (choice.go:52-59 does NOT bypass on the error path). The cascade
+\* then SKIPS the branches (a failed non-coe choice-dep is a SkipCause -> the existing
+\* Skip fires -> "skipped", NEVER "bypassed"). This is the crux the milestone protects:
+\* a FAILED route is distinguishable from a BYPASSED (not-taken) route AT the branches.
+\* ChoiceFailureSkipsNotBypasses is the safety witness; the bite is letting ChoiceFail
+\* bypass its branches (mislabel a routing failure as a clean bypass — the 41-F1 defect).
+ChoiceFail(c) ==
+    /\ up
+    /\ c \in ChoiceFailSet
+    /\ status[c] = "running"
+    /\ exec'   = [exec   EXCEPT ![c] = exec[c] + 1]
+    /\ status' = [status EXCEPT ![c] = "failed"]      \* branches left untouched (Pending) -> cascade Skips them
+    /\ halted' = (halted \/ (c \notin ContinueOnError))
+    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* Bypass (classifyBlockedStatus rule 4): a non-merge node blocked SOLELY by
+\* bypassed dep(s) — all deps settled, >=1 bypassed, NONE a skip-cause, NONE
+\* resolved (no surviving taken ancestor) — is itself bypassed (a not-taken branch
+\* interior). Skip (rule 1) dominates a failure cascade; DiamondSkip (rule 3) a
+\* surviving taken ancestor — the three are mutually exclusive by their guards.
+Bypass(n) ==
+    /\ up
+    /\ status[n] = "pending"
+    /\ n \notin MergeNodes
+    /\ AllDepsSettled(n)
+    /\ HasBypassDep(n)
+    /\ ~HasSkipCauseDep(n)
+    /\ ~(\E d \in DepsOf(n) : Resolved(d))
+    /\ status' = [status EXCEPT ![n] = "bypassed"]
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* DiamondSkip (rule 3 / D-03 / DEC-M11-P41-DIAMOND): a non-merge node with a
+\* bypassed dep AND a surviving taken (Resolved) ancestor is SKIPPED, not bypassed
+\* (the taken-path ancestor wins).
+DiamondSkip(n) ==
+    /\ up
+    /\ status[n] = "pending"
+    /\ n \notin MergeNodes
+    /\ AllDepsSettled(n)
+    /\ HasBypassDep(n)
+    /\ ~HasSkipCauseDep(n)
+    /\ \E d \in DepsOf(n) : Resolved(d)
+    /\ status' = [status EXCEPT ![n] = "skipped"]
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* MergeStart (ph42 launch-eligibility): a Merge is launch-eligible once ALL its
+\* predecessors are resolved-for-merge (a bypassed tail SATISFIES). It FIRES (runs,
+\* then Finish -> done) iff >=1 TAKEN branch-tail (over MergeTails, Choice-dep
+\* EXCLUDED). A failed(non-coe)/skipped tail is NOT resolved-for-merge, so the merge
+\* is not launch-eligible and Skip fires instead (fail-fast — BypassVsFailureSeparator).
+MergeStart(m) ==
+    /\ up
+    /\ m \in MergeNodes
+    /\ status[m] = "pending"
+    /\ ~halted
+    /\ MergeDepsSatisfied(m)
+    /\ TakenTails(m) # {}
+    /\ Cardinality(Running) < MaxConc
+    /\ status' = [status EXCEPT ![m] = "running"]
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* MergeBypass (ph42 MH-2): a Merge whose every branch-tail is bypassed (0 taken) is
+\* itself bypassed (composes downward — the nested all-bypassed case).
+MergeBypass(m) ==
+    /\ up
+    /\ m \in MergeNodes
+    /\ status[m] = "pending"
+    /\ MergeDepsSatisfied(m)
+    /\ TakenTails(m) = {}
+    \* NOTE (superset abstraction, documented): MergeBypass is NOT gated on ~halted.
+    \* MergeDepsSatisfied already excludes any merge with a failed/skipped tail (a
+    \* skip-cause tail is not MergeResolved), so a failure of the merge's OWN branch
+    \* never reaches here — it Skips (fail-fast, the separator). Only an all-bypassed
+    \* merge reaches MergeBypass, which in a single-Choice topology implies no failure
+    \* (hence no halt) anyway. On an UNRELATED halt the Go leaves a clean-dep merge
+    \* Pending (markSkippedFrom); the model may bypass it — a SUPERSET behavior, safe
+    \* for safety proofs. Gating on ~halted here would MASK the separator bite (a
+    \* failed-tail scenario is always halted), hiding the anti-vacuity teeth.
+    /\ status' = [status EXCEPT ![m] = "bypassed"]
     /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
 
 ------------------------------------------------------------------------
@@ -378,6 +527,17 @@ Stuck(n) ==
     \* rests legitimately (the signal may never come — not a liveness bug), keeping
     \* the anti-hollow discipline; only a delivered signal demands progress.
     \/ (status[n] = "waiting" /\ mailbox[n])
+    \* M11 OR-join must-progress arms. A launch-eligible MergeNode (all preds
+    \* resolved-for-merge, run not halted) must fire or bypass; a non-merge node all
+    \* of whose deps are settled with a bypassed one among them must bypass/skip
+    \* (the cause-aware classification markSkippedFrom performs even on a halt, so no
+    \* ~halted guard there). Inert when ChoiceNodes = MergeNodes = {}.
+    \* A launch-eligible merge must progress: it can always BYPASS (0 taken), and
+    \* can FIRE only when not halted (MergeStart is ~halted-gated) — so it is Stuck
+    \* iff it can take one of those steps.
+    \/ (status[n] = "pending" /\ n \in MergeNodes /\ MergeDepsSatisfied(n)
+          /\ (TakenTails(n) = {} \/ ~halted))
+    \/ (status[n] = "pending" /\ n \notin MergeNodes /\ AllDepsSettled(n) /\ HasBypassDep(n))
 
 Settled == up /\ (\A n \in Nodes : ~Stuck(n))
 
@@ -386,6 +546,10 @@ Done == Settled /\ UNCHANGED vars
 Next == \/ \E n \in Nodes : (Start(n) \/ Finish(n) \/ Skip(n) \/ Suspend(n) \/ Wake(n))
         \/ \E n \in Nodes : (SendSignal(n) \/ Consume(n) \/ Ack(n))
         \/ \E n \in Nodes : FireTimer(n)
+        \* M11 OR-join actions (inert when ChoiceNodes = MergeNodes = {}).
+        \/ \E c \in ChoiceNodes : (ChoiceFinish(c) \/ ChoiceFail(c))
+        \/ \E n \in Nodes : (Bypass(n) \/ DiamondSkip(n))
+        \/ \E m \in MergeNodes : (MergeStart(m) \/ MergeBypass(m))
         \/ Tick
         \/ Checkpoint
         \/ Crash
@@ -404,6 +568,10 @@ Next == \/ \E n \in Nodes : (Start(n) \/ Finish(n) \/ Skip(n) \/ Suspend(n) \/ W
 (*     event like a signal.                                                         *)
 Fairness ==
     /\ \A n \in Nodes : WF_vars(Start(n) \/ Finish(n) \/ Skip(n) \/ Suspend(n))
+    \* M11 OR-join engine obligations are weak-fair (inert when the sets are empty).
+    /\ \A c \in ChoiceNodes : WF_vars(ChoiceFinish(c) \/ ChoiceFail(c))
+    /\ \A n \in Nodes : WF_vars(Bypass(n) \/ DiamondSkip(n))
+    /\ \A m \in MergeNodes : WF_vars(MergeStart(m) \/ MergeBypass(m))
     /\ \A n \in Nodes : WF_vars(Wake(n))
     /\ \A n \in Nodes : WF_vars(FireTimer(n))
     /\ \A n \in Nodes : WF_vars(Consume(n))
@@ -421,9 +589,17 @@ ConcurrencyBound == Cardinality(Running) =< MaxConc
 (* A node that has run (running/done) OR parked (waiting) had its deps resolved   *)
 (* when it Started; deps are upstream-terminal and monotone, so this persists     *)
 (* through a park. (Extends the M9 claim with the waiting case.)                  *)
+(* M11 RESTATEMENT (phase 44, DEC-M11-P44-PRESERVE): "deps resolved" is ROLE-AWARE *)
+(* — a MergeNode launches on the OR-join condition (MergeDepsSatisfied: a bypassed *)
+(* tail SATISFIES), a strict-AND node on DepsResolved. Reduces EXACTLY to the M10  *)
+(* strict-AND form when MergeNodes = {} (so M10 re-runs unchanged). This is a       *)
+(* faithful role restatement, NOT a weakening: it still mandates every running/done *)
+(* node had its launch precondition met — a bite that lets a merge run with an      *)
+(* unresolved (pending/failed) tail still FALSIFIES it.                             *)
 DepsBeforeRun ==
     \A n \in Nodes :
-        (status[n] \in {"running","done","waiting"}) => DepsResolved(n)
+        (status[n] \in {"running","done","waiting"}) =>
+            (IF n \in MergeNodes THEN MergeDepsSatisfied(n) ELSE DepsResolved(n))
 
 (* HardFailureHalts (RESTATED ph39, within-attempt — DEC-M10-P39-T5 Option A). A FRESH *)
 (* non-coe failure halts the CURRENT attempt: fail-fast cancels the level and stops     *)
@@ -563,6 +739,67 @@ WokeOnlyWhenReady ==
     [][ \A n \in Nodes :
           (up /\ up' /\ status[n] = "waiting" /\ status'[n] = "pending") => wakeReady[n]
       ]_vars
+
+------------------------------------------------------------------------
+(* M11 OR-JOIN SAFETY invariants (phase 44). Each is BITE-PROVEN: an isolated  *)
+(* falsifying mutation reddens ONLY it (see 44-SUMMARY for the mutation log).  *)
+(* Vacuously TRUE when ChoiceNodes = MergeNodes = {} (the M10 config), so they  *)
+(* are safe to carry in the M10 invariant list too.                            *)
+
+(* ExactlyOneBranchTaken — a ChoiceNode that has completed activated EXACTLY ONE   *)
+(* branch: exactly one of its branch entries is NOT bypassed (the taken one; the   *)
+(* rest are bypassed). BITE: let ChoiceFinish take two branches (mark only ONE     *)
+(* non-taken bypassed) -> two non-bypassed -> FALSIFIES. *)
+ExactlyOneBranchTaken ==
+    \A c \in ChoiceNodes :
+        status[c] = "done" =>
+            Cardinality({ e \in ChoiceBranches[c] : status[e] # "bypassed" }) = 1
+
+(* MergeFiresIffTakenTailComplete (anti-vacuity, red-team MAJOR-1) — a merge that   *)
+(* fired (done) had >=1 TAKEN branch-tail Resolved, counted over MergeTails ONLY    *)
+(* (the always-`done` structural Choice-dep is a dep but NOT a tail, so it is       *)
+(* EXCLUDED). BITE: count the Choice-dep as a taken tail (TakenTails ranges over    *)
+(* DepsOf instead of MergeTails) -> the all-bypassed merge fires on the Choice-dep  *)
+(* alone -> a `done` merge with no Resolved TAIL -> FALSIFIES. *)
+MergeFiresIffTakenTailComplete ==
+    \A m \in MergeNodes :
+        status[m] = "done" => (\E t \in MergeTails[m] : Resolved(t))
+
+(* BypassedNeverRuns — a bypassed node NEVER executed (a not-taken branch interior, *)
+(* or an all-bypassed merge, never runs its action). The only thing "below a        *)
+(* bypassed branch" that reaches `done` is a MERGE that had >=1 taken tail (which is *)
+(* `done`, not `bypassed`, so this invariant permits it). BITE: let a bypassed node *)
+(* run (Bypass sets status while bumping exec) -> exec>0 for a bypassed node ->      *)
+(* FALSIFIES. *)
+BypassedNeverRuns ==
+    \A n \in Nodes : status[n] = "bypassed" => exec[n] = 0
+
+(* BypassVsFailureSeparator (THE critical one — the semantic M10 refused to model).  *)
+(* At a merge, a `bypassed` predecessor SATISFIES (does not block) while a           *)
+(* `failed`(non-coe)/`skipped` predecessor BLOCKS: a merge with a skip-cause dep is  *)
+(* fail-fast SKIPPED — never `done` (fired) and never `bypassed`. So a merge that     *)
+(* reached `done` OR `bypassed` had NO skip-cause dep. Bypass and failure are         *)
+(* distinguishable AT the merge — the exact thing M10 could not tell apart. BITE:     *)
+(* model "merge fires/satisfies on any resolved-OR-SKIPPED predecessor" (MergeResolved *)
+(* treats a skip-cause as satisfied) -> a merge with a failed/skipped tail is         *)
+(* launch-eligible and (0 taken among the survivors) BYPASSES instead of SKIPPING ->  *)
+(* a `bypassed` merge WITH a skip-cause dep -> FALSIFIES. *)
+BypassVsFailureSeparator ==
+    \A m \in MergeNodes :
+        (status[m] \in {"done", "bypassed"}) => ~HasSkipCauseDep(m)
+
+(* ChoiceFailureSkipsNotBypasses (41-F1 / review 44-F1) — the bypass-vs-failure       *)
+(* separator AT THE CHOICE (not just at the merge). A branch entry is "bypassed"      *)
+(* ONLY because its Choice TOOK ANOTHER branch (status[c]="done"). If the Choice      *)
+(* itself FAILED to route (ChoiceFail: no branch matched), its branches are SKIPPED   *)
+(* by the cascade, NEVER bypassed — a routing FAILURE must not be mislabeled a clean  *)
+(* BYPASS. So a bypassed branch entry implies its Choice completed. BITE: let         *)
+(* ChoiceFail bypass its branches (the 41-F1 defect) -> a bypassed entry under a       *)
+(* failed choice -> FALSIFIES. *)
+ChoiceFailureSkipsNotBypasses ==
+    \A c \in ChoiceNodes :
+        \A e \in ChoiceBranches[c] :
+            status[e] = "bypassed" => status[c] = "done"
 
 ------------------------------------------------------------------------
 (* LIVENESS — every behavior eventually reaches a stable Settled fixed point.      *)

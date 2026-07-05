@@ -89,28 +89,75 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 			continue
 		}
 
-		// Check dependencies via the shared resolution predicate (DEC-P21-depguard):
-		// a dep resolves iff it Completed OR it is a continue-on-error node that
-		// Failed. If any dep is NOT resolved AND is a terminal skip-cause (a
-		// non-coe Failed dep, or an already-Skipped dep), this node did not run
-		// because an upstream it needed failed/was-skipped — mark it Skipped
-		// (DEC-CHUNK3-status, S1). Skipped is transitive: a node skipped here
-		// makes its own dependents skip on a later level.
+		// Two-part dependency check (DEC-P21-depguard + DEC-M11-STATUS-CAUSE):
+		//
+		//  (1) LAUNCH decision — a cheap boolean: do ALL deps resolve? A dep
+		//      resolves iff it Completed OR it is a continue-on-error node that
+		//      Failed. This keeps the early break on the first unresolved dep, so
+		//      the launch hot path costs exactly what it did pre-M11.
+		//  (2) BLOCKED classification — only when NOT all deps resolve, assign a
+		//      cause-aware terminal status computed from the FULL dep set (a
+		//      second scan, off the launch hot path). The early break in (1)
+		//      cannot see a taken sibling that appears AFTER the first unresolved
+		//      dep, so the diamond rule (D-03) needs the full scan here — see
+		//      classifyBlockedStatus. Both parts consult the SAME predicates
+		//      (depResolved / isSkipCause), so launch and skip/bypass cannot drift.
+		role := dependentRole(node)
 		dependenciesComplete := true
 		for _, dep := range node.DependsOn {
 			depStatus, _ := data.GetNodeStatus(dep.Name)
-			if depResolved(dep, depStatus) {
+			if depResolved(dep, depStatus, role) {
 				continue
 			}
 			dependenciesComplete = false
-			if isSkipCause(depStatus) {
-				data.SetNodeStatus(node.Name, Skipped)
-			}
 			break
 		}
 
 		if !dependenciesComplete {
+			// Blocked this pass: assign the terminal status implied by the cause
+			// across the whole dep set — Skipped (a failure/skip cascade, or a
+			// bypassed dep with a surviving taken ancestor) or Bypassed (a purely
+			// not-taken branch interior). assign=false means "not decidable yet"
+			// (a Pending/Running/Waiting dep) — leave the node for a later pass.
+			if status, assign := classifyBlockedStatus(node, data, role); assign {
+				data.SetNodeStatus(node.Name, status)
+			}
 			continue
+		}
+
+		// OR-join fire-vs-bypass (M11 ph42, DEC-M11-P42-SEAM). A MergeNode is
+		// launch-eligible once ALL its predecessors resolved — and a Bypassed tail
+		// resolves for a merge (depResolved). So "all deps resolved" alone does NOT
+		// mean fire: it could be all-bypassed. Decide here, on the launch path (the
+		// one place the OR-join must touch beyond classifyBlockedStatus): fire iff
+		// >=1 TAKEN branch-tail (Completed or coe-Failed). The count ranges over the
+		// merge's RECORDED From tail-set (mergeAction.tails), NOT its full DependsOn —
+		// so neither the structural always-Completed Choice-dep (DEPMODEL edge) nor
+		// any extra DependsOn can inflate the count (anti-vacuity, red-team MAJOR-1;
+		// code-review 42-F1/adversarial 42-AF2). Zero taken (every join tail bypassed)
+		// -> the merge is itself Bypassed and never runs (composes downward, MH-2).
+		// Role-gated: AND nodes pay nothing.
+		if ma, isMerge := node.Action.(*mergeAction); isMerge { // == role==mergeDependent
+			tailSet := make(map[string]bool, len(ma.tails))
+			for _, t := range ma.tails {
+				tailSet[t] = true
+			}
+			takenTails := 0
+			for _, dep := range node.DependsOn {
+				if !tailSet[dep.Name] {
+					continue // not a From join tail (Choice-dep or an extra DependsOn)
+				}
+				depStatus, _ := data.GetNodeStatus(dep.Name)
+				// "taken" = the AND resolution (Completed || coe-Failed); a Bypassed
+				// tail is satisfied, not taken.
+				if depResolved(dep, depStatus, andDependent) {
+					takenTails++
+				}
+			}
+			if takenTails == 0 {
+				data.SetNodeStatus(node.Name, Bypassed)
+				continue
+			}
 		}
 
 		// Launch goroutine for node execution
@@ -189,34 +236,120 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 	return failures, parkedNodes
 }
 
+// depRole classifies a DEPENDENT node's join semantics — how its own dependency
+// set gates its launch and terminal status. Every node today is andDependent
+// (strict AND: needs all deps resolved). Phase 42 adds MergeNode (OR-join),
+// which is mergeDependent; until then dependentRole is a total function to
+// andDependent and the merge arms below are present-but-unreached.
+type depRole int
+
+const (
+	andDependent depRole = iota
+	// mergeDependent is the OR-join role activated by MergeNode in phase 42.
+	mergeDependent
+)
+
+// dependentRole reports the join role of a node as a dependent: a MergeNode
+// OR-joins (mergeDependent), every other node is strict-AND (andDependent). The
+// role is carried by the node's action type — a *mergeAction marks a MergeNode
+// (the marker survives even a user join action, see mergeAction). (M11 ph42.)
+func dependentRole(node *Node) depRole {
+	if _, isMerge := node.Action.(*mergeAction); isMerge {
+		return mergeDependent
+	}
+	return andDependent
+}
+
 // depResolved reports whether a dependency in the given status no longer blocks
 // its dependents (DEC-P21-depguard). A dep resolves iff it Completed, OR it is a
 // continue-on-error node that Failed (its failure is tolerated and observable
 // via status). This is the single source of truth for dependency resolution —
-// both the launch decision and the Skipped rule consult it, so the two cannot
-// drift.
-func depResolved(dep *Node, depStatus NodeStatus) bool {
+// both the launch decision and the skip/bypass rule consult it, so the two
+// cannot drift.
+func depResolved(dep *Node, depStatus NodeStatus, role depRole) bool {
 	if depStatus == Completed {
 		return true
 	}
 	if dep.ContinueOnError && depStatus == Failed {
 		return true
 	}
+	if role == mergeDependent {
+		// OR-join (M11 ph42, DEC-M11-P42-SEAM): a Bypassed predecessor is SATISFIED
+		// for a merge — a not-taken branch does not block the join. (Completed /
+		// coe-Failed are the "taken" cases, already resolved above.) The fire-vs-
+		// bypass decision over the taken count is made on the launch-eligibility
+		// path in executeNodesInLevel, not here.
+		return depStatus == Bypassed
+	}
 	return false
 }
 
-// isSkipCause reports whether a non-resolving dependency status is a terminal
-// reason to Skip a dependent (DEC-CHUNK3-status, S1): a Failed dependency (the
+// isSkipCause reports whether a non-resolving dependency status is a FAILURE
+// skip-cause for a dependent (DEC-CHUNK3-status, S1): a Failed dependency (the
 // continue-on-error case is already resolved by depResolved, so a Failed status
 // reaching here is a non-coe failure) or an already-Skipped dependency. A
-// Pending/Running dep is non-resolving but NOT terminal — it means "not reached
-// yet", which is not a skip cause.
+// Bypassed dep is NON-resolving but NOT a failure skip-cause — it is a distinct
+// bypass cause handled by classifyBlockedStatus. A Pending/Running/Waiting dep
+// is non-resolving but NOT terminal — "not reached yet", not a skip cause.
+//
+// Role-independent (M11 ph42, DEC-M11-P42-SEAM / Finding B): a merge's Failed/
+// Skipped predecessor is ALSO a skip-cause. Because a Choice takes exactly one
+// branch and the strict validator forbids cross-Choice merges, a Failed merge
+// predecessor is always the SOLE taken branch failing → fail-fast (INV-01); the
+// OR "tolerance" is Bypassed-only, already handled by depResolved. (A merge arm
+// returning false here would strand the merge Pending forever.)
 func isSkipCause(depStatus NodeStatus) bool {
 	return depStatus == Failed || depStatus == Skipped
+}
+
+// classifyBlockedStatus computes the terminal status of a node that could not
+// launch this pass, from the cause across its FULL dependency set — a single
+// scan with NO early break, because the diamond rule (D-03 / DEC-M11-P41-DIAMOND)
+// must see a taken sibling even when a Bypassed dep appears first. It returns
+// (status, true) to assign, or ("", false) to leave the node for a later pass
+// (a dep is not-terminal yet, so the outcome is not decidable). It consults the
+// SAME predicates the launch decision uses (depResolved / isSkipCause), so the
+// run and skip/bypass rules cannot drift.
+//
+// Rule order (DEC-M11-STATUS-CAUSE + DEC-M11-P41-DIAMOND + D-03a):
+//  1. any failure skip-cause dep (non-coe Failed / Skipped) -> Skipped   (a failure cascade dominates)
+//  2. any non-terminal dep (Pending / Running / Waiting)    -> revisit   (outcome not yet decidable — D-03a)
+//  3. any Bypassed dep AND any resolved (taken) dep         -> Skipped   (surviving taken ancestor wins)
+//  4. any Bypassed dep                                      -> Bypassed  (pure not-taken branch interior)
+func classifyBlockedStatus(node *Node, data *WorkflowData, role depRole) (NodeStatus, bool) {
+	var sawFailCause, sawNonTerminal, sawBypassed, sawResolved bool
+	for _, dep := range node.DependsOn {
+		depStatus, _ := data.GetNodeStatus(dep.Name)
+		switch {
+		case depResolved(dep, depStatus, role):
+			sawResolved = true // a taken path that ran (Completed or coe-Failed)
+		case isSkipCause(depStatus):
+			sawFailCause = true
+		case depStatus == Bypassed:
+			sawBypassed = true
+		default:
+			// Pending / Running / Waiting: non-resolving but not a terminal cause.
+			// A Waiting (suspended) sibling must NOT be read as a terminal cause
+			// (D-03a) — the node waits for a later pass, staying Pending.
+			sawNonTerminal = true
+		}
+	}
+	switch {
+	case sawFailCause:
+		return Skipped, true
+	case sawNonTerminal:
+		return "", false
+	case sawBypassed && sawResolved:
+		return Skipped, true
+	case sawBypassed:
+		return Bypassed, true
+	default:
+		return "", false
+	}
 }
 
 // isTerminalStatus reports whether a node has reached a terminal state and will
 // not transition further within a run.
 func isTerminalStatus(status NodeStatus) bool {
-	return status == Completed || status == Failed || status == Skipped
+	return status == Completed || status == Failed || status == Skipped || status == Bypassed
 }

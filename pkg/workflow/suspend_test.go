@@ -109,8 +109,8 @@ func TestWaitingIsLiveNotTerminal_Predicates(t *testing.T) {
 	plain := NewNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
 	coe := NewNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
 	coe.ContinueOnError = true
-	assert.False(t, depResolved(plain, Waiting), "a Waiting dep does not resolve its dependents")
-	assert.False(t, depResolved(coe, Waiting), "a Waiting continue-on-error dep does not resolve either")
+	assert.False(t, depResolved(plain, Waiting, andDependent), "a Waiting dep does not resolve its dependents")
+	assert.False(t, depResolved(coe, Waiting, andDependent), "a Waiting continue-on-error dep does not resolve either")
 }
 
 // TestNodeExecute_DeclaredSuspensionNodeParks is the T3 (DEC-M10-mechanism)

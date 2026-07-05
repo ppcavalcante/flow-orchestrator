@@ -233,6 +233,10 @@ func (b *WorkflowBuilder) AddNode(name string) *NodeBuilder
 
 // Build creates the final DAG
 func (b *WorkflowBuilder) Build() (*DAG, error)
+
+// Feature-specific node builders (documented in their own sections):
+//   AddTimer / AddWaitForSignal / AddWaitForCondition  — Durable continuations (v0.10.0)
+//   AddChoice / AddMerge                               — Conditional branching (v0.11.0)
 ```
 
 ### NodeBuilder
@@ -535,6 +539,98 @@ func (w *Workflow) WithLocker(l Locker) *Workflow // nil restores the process-wi
 See the [Persistence guide → Durable Continuations](../guides/persistence.md) for the
 worked patterns (durable sleep, human-in-the-loop approvals).
 
+## Conditional branching (added v0.11.0)
+
+<a id="conditional-branching-added-v0110"></a>
+<a id="conditional-branching"></a>
+
+`ChoiceNode` and `MergeNode` add **true workflow-level branching** — one branch of a
+choice runs, the rest are [`Bypassed`](#node-status), and a `MergeNode` OR-joins them.
+The structure is static and declared (no dynamic graph mutation, no determinism tax);
+the branching semantics are machine-checked in TLA+.
+
+### ChoiceNode — `AddChoice`
+
+```go
+func (b *WorkflowBuilder) AddChoice(name string) *choiceBuilder
+func (c *choiceBuilder) When(pred func(*WorkflowData) bool, target string) *choiceBuilder
+func (c *choiceBuilder) Otherwise(target string) *choiceBuilder
+func (c *choiceBuilder) DependsOn(deps ...string) *choiceBuilder
+```
+
+A `ChoiceNode` is a pure **routing decision**. When it runs it evaluates its `When` arms
+in **declared order, first match wins**, activates that one branch's `target`, and marks
+every other branch entry (and its reachable subgraph) `Bypassed`. It never blocks and is
+itself always `Completed` (it makes a decision — it is never `Bypassed`).
+
+- **Predicate:** `func(*WorkflowData) bool`, **data-only**. It may read only keys produced
+  by a **guaranteed-run ancestor** or the seed data — reading an absent/not-yet-produced
+  key returns the zero value and falls through to the next arm (never panics).
+- **`Otherwise(target)`** is the default, taken when no `When` matches. **With no
+  `Otherwise` and no match, the choice fails** with `ErrNoBranchMatched` (wrapped with the
+  node name) — a routing dead-end is a typed error, not a silent hang. The downstream then
+  cascades to `Skipped` (an upstream you needed failed), which is the honest cause.
+- **`DependsOn`** wires the choice's **own** upstream (the nodes that must complete before
+  the decision is made). Each `When`/`Otherwise` `target` is wired to depend on the choice
+  automatically, independent of node-declaration order.
+- A choice builder is deliberately distinct from `NodeBuilder`: no `WithAction` /
+  `WithRetries` / `WithTimeout` — its action **is** the routing decision.
+
+### MergeNode — `AddMerge`
+
+```go
+func (b *WorkflowBuilder) AddMerge(name string) *mergeBuilder
+func (m *mergeBuilder) From(tails ...string) *mergeBuilder
+func (m *mergeBuilder) WithAction(action interface{}) *mergeBuilder // Action or func(context.Context, *WorkflowData) error
+func (m *mergeBuilder) DependsOn(deps ...string) *mergeBuilder
+```
+
+A `MergeNode` is the **OR-join** below a choice's branches. It **fires iff ≥1 taken
+branch-tail resolved** — `Completed`, or a `WithContinueOnError()` tail that `Failed`
+(both count as a taken path that ran); a `Bypassed` tail is satisfied, not blocking. If
+**every** branch was bypassed, the merge is itself `Bypassed` (bypass composes downward). A
+non-continue-on-error failure on the taken branch fails the run fail-fast. The taken count
+ranges over the recorded `From` tails only — the structural choice-dependency is excluded,
+so it cannot vacuously inflate the count.
+
+- **`From(tails...)`** names the branch-tail predecessors to OR-join. May be called more
+  than once (tails accumulate).
+- **`WithAction`** optionally replaces the default **pass-through** join (which simply
+  `Completed`s on fire; downstream reads the taken branch's output from `WorkflowData`).
+- The merge depends on its `From` tails **and** the reconvergence-source `ChoiceNode`
+  (wired automatically).
+
+```go
+wb.AddChoice("route").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 1000 }, "big").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 0 },    "small").
+    Otherwise("zero")
+// ... branch bodies, each ending at a tail node ...
+wb.AddMerge("done").From("bigTail", "smallTail", "zero")
+wb.AddNode("after").DependsOn("done")
+```
+
+### Reconvergence validation (structured OR-joins only)
+
+Only **structured, single-`ChoiceNode`, local** OR-joins are expressible. `Build()`
+returns a typed error for every unstructured shape (the strictness is load-bearing for the
+runtime semantics and the exhaustive verification moat):
+
+| Sentinel | Rejected shape |
+|---|---|
+| `ErrUnstructuredMerge` | a **non-`MergeNode`** reconverges two branches of the same choice (an implicit OR-join — only a `MergeNode` may sit at a reconvergence point); **or** a merge joins tails from **more than one** `ChoiceNode` (cross-Choice merge); **or** a merge joins a `ChoiceNode` tail directly (empty-branch merge — see below). |
+| `ErrSharedBranch` | a single node is a branch entry of **two different** `ChoiceNode`s (ambiguous ownership). |
+| `ErrDanglingMerge` | a `MergeNode` joins a tail that is under **no** `ChoiceNode`. |
+
+**Not supported (by design):**
+- **Unstructured (van der Aalst) OR-join** — arbitrary reconvergence is rejected; every
+  OR-join must be a local, single-choice `MergeNode`.
+- **Empty-branch merge** — a `Choice → merge` with no intervening node (the tail is the
+  `ChoiceNode` itself) is rejected at `Build` (`DEC-M11-P42-EMPTYBRANCH`): a `ChoiceNode`
+  is always `Completed`, so it carries no per-branch "was this branch taken?" signal.
+  **Workaround:** put a pass-through node on the branch and merge from that.
+- **Loops / cycles** — a DAG cannot contain cycles; branching does not add looping.
+
 ## Node Status
 
 ```go
@@ -547,6 +643,7 @@ const (
     Failed    NodeStatus = "failed"     // the node's action returned an error
     Skipped   NodeStatus = "skipped"    // a non-resolving dependency (Failed non-coe, or Skipped) blocked it
     Waiting   NodeStatus = "waiting"    // parked on an external event (timer/signal); NON-TERMINAL, NON-FAILING (added v0.10.0)
+    Bypassed  NodeStatus = "bypassed"   // the not-taken branch of a ChoiceNode; TERMINAL, NOT a failure (added v0.11.0)
 )
 ```
 
@@ -558,6 +655,16 @@ const (
 > at the level barrier (the run is not done); re-entering `Execute` on resume
 > re-runs the node, which re-parks or wakes. Treat it as runnable, like `Pending`,
 > not done. ("Suspend is a crash you chose.")
+
+> **`Bypassed` (added v0.11.0) is terminal and is not a failure.** A node is
+> `Bypassed` when it is the **not-taken branch of a [`ChoiceNode`](#conditional-branching-added-v0110)** —
+> the routing decision activated a *different* branch, so this node (and its whole
+> subgraph) did not run. It is deliberately distinct from `Skipped`: `Skipped` carries
+> the failure-diagnostics meaning "an upstream you needed failed/was-skipped", so a
+> clean not-taken branch must not be labelled with it (that separation is machine-checked).
+> `Bypassed` nodes never appear in an `ExecutionError`. **Diamond rule:** a node with a
+> `Bypassed` dependency that **also** has a surviving taken/`Completed` (or
+> continue-on-error `Failed`) ancestor is `Skipped`, not `Bypassed` — the taken path wins.
 
 ## Failure Semantics
 

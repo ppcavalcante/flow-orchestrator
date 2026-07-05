@@ -276,3 +276,60 @@ abstraction of time (`clock >= fireAt` as a fired flag), not real durations, and
 the model faithfully mirrors the code's per-level flush and the mailbox-outside-snapshot
 placement (human-reviewed). The Go-side atomic write, int64 fidelity, and the FlatBuffers
 signal-decode bounds guard are covered by the `pkg/workflow` test suites, not this model.
+
+## `M10DurableExecutor.tla` — M11 OR-join arm (ChoiceNode + MergeNode) — phase 44
+
+M11 conditional branching is modeled by **extending the M10 refining spec in place** with a
+node-role-aware OR-join arm (the TLA twin of the Go `dependentRole`): a 7th `bypassed`
+status, a **ChoiceNode** (activates exactly one branch, bypasses the rest — a *deterministic*
+per-choice pick `ChosenBranch`, and a `ChoiceFailSet` no-match-fails arm), the cause-aware
+`Bypass`/`DiamondSkip` propagation, and a **MergeNode** OR-join launch-eligibility (`fires
+iff ≥1 taken tail resolved, Choice-dep EXCLUDED from the count; all-bypassed → bypassed; a
+failed/skipped tail Skips fail-fast`). The arm is **inert when `ChoiceNodes = MergeNodes =
+{}`**, so the M10 diamond config re-runs the extended spec **byte-behaviour-unchanged at
+14,380 distinct states** — that re-run *is* the preservation proof (DEC-M11-P44-PRESERVE:
+preservation by re-verification, not byte-identity; `DepsBeforeRun` was restated role-aware
+in the process).
+
+### M11 scenarios
+
+- **`M11ChoiceMerge.cfg` / `MCM11ChoiceMerge.tla`** — a single Choice `c` → three branches
+  (each entry → interior) → a Merge `m` over `{bAi, bBi}` (branch C a leaf), `FailSet={bA}`,
+  crash-free. Routed by the cfg constants `pick` (branch taken) and `cfail` (`{c}` = c fails
+  to route). Exercises fail-blocks (`pick=bA`), bypass-satisfies (`pick=bB`), all-bypassed /
+  anti-vacuity (`pick=bC`), choice-routing-failure (`cfail={c}`, 44-F1), and coe-failed-tail-
+  fires (`ContinueOnError={bA}`).
+- **`M11CrashChoice.cfg` / `MCM11CrashChoice.tla`** — a single Choice / 2 branches / Merge
+  under **one crash** (`MaxCrashes=1`, DEC-M11-P44-CRASHCHOICE): the OR-join composes with
+  crash-resume — a bypassed branch stays bypassed after Recover, and a taken-tail failure
+  still blocks the merge post-crash (75–175 distinct states; no product explosion).
+
+### Running TLC (M11)
+
+```
+# preservation (M10 re-run under the extended spec)
+java -cp /tmp/tla2tools.jar tlc2.TLC -config M10DurableExecutor.cfg MCM10DurableExecutor.tla
+# every M11 route + the crash routes, exhaustively:
+./run_m11_capstone.sh
+```
+
+### Why this is not theater — M11
+
+Every M11 invariant is **bite-proven non-vacuous** (falsify→restore, each reddening *only*
+its target): letting the Choice bypass no branch falsifies `ExactlyOneBranchTaken`; counting
+the Choice-dep as a taken tail falsifies `MergeFiresIffTakenTailComplete` (the anti-vacuity /
+red-team MAJOR-1 property); letting a bypassed node bump `exec` falsifies `BypassedNeverRuns`;
+modelling the merge as firing on any *resolved-or-skipped* predecessor falsifies
+`BypassVsFailureSeparator` (the critical bypass-vs-failure separator — **and it falsifies
+across a crash** too); and letting a *failed* Choice bypass its branches falsifies
+`ChoiceFailureSkipsNotBypasses` (the 41-F1 anti-mislabel guarantee). Dropping `WF(MergeStart
+∨ MergeBypass)` falsifies `Termination` while the complete state space passes every safety
+invariant — the liveness teeth are independent of the safety teeth.
+
+**Honest scope.** The model is a documented *superset* of the Go OR-join: `ChosenBranch` is a
+deterministic constant (it *assumes* CHOICE-02 same-branch-on-resume — the Go test verifies
+it), and `MergeBypass` is not `~halted`-gated (a wider behavior than the code's "leave a
+clean-dep merge Pending on an unrelated halt", safe because `MergeDepsSatisfied` excludes any
+failed/skipped tail). VER-03: the choice path adds **no determinism tax** (`no-determinism-tax`
+analyzer: 0 findings) and the non-choice hot path is byte-identical to the phase-41 baseline
+(277 allocs/op, ~676 KB/op unchanged — this phase changes no Go production code).

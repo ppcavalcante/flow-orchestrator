@@ -189,9 +189,15 @@ graph TD
 
 ## Advanced Patterns
 
-### Conditional Action Execution
+### Conditional Action Execution (in-action branching)
 
-While Flow Orchestrator's DAG engine executes all nodes whose dependencies are satisfied, you can implement conditional logic within node actions to achieve branching-like behavior. Note that this is not true branching at the workflow level - all nodes will execute if their dependencies are met.
+> **Since v0.11.0, Flow Orchestrator also supports _true_ workflow-level branching** via
+> `ChoiceNode` / `MergeNode` — see [True Conditional Branching](#true-conditional-branching-choicenode--mergenode)
+> below. The in-action pattern shown here remains valid and is the lightest option when
+> every node should still run but do work conditionally; reach for a `ChoiceNode` when a
+> not-taken branch should genuinely **not** run.
+
+You can implement conditional logic *within* node actions to achieve branching-like behavior. With this pattern every node still executes if its dependencies are met — the condition only decides what happens inside each action, not whether the node runs.
 
 ```go
 builder := workflow.NewWorkflowBuilder().
@@ -261,13 +267,72 @@ graph TD
     style D fill:#f99,stroke:#333,stroke-width:2px
 ```
 
-**Important Note:** This is not true branching at the workflow level. All nodes in the DAG will be executed if their dependencies are satisfied. The conditional logic determines what happens inside each action, not whether the node executes.
+**Important Note:** In *this* pattern, all nodes in the DAG execute if their dependencies are satisfied — the conditional logic determines what happens inside each action, not whether the node runs. For branching where a not-taken branch genuinely does not run, use a `ChoiceNode` (next section).
 
 **Best Practices:**
 - Use flags in `WorkflowData` to control execution paths
 - Keep flag names consistent and well-documented
 - Consider adding a dedicated decision node that centralizes branching logic
 - Document which branches are expected to do actual work based on conditions
+
+### True Conditional Branching (ChoiceNode / MergeNode)
+
+Added in **v0.11.0**, a `ChoiceNode` performs **true workflow-level branching**: it routes
+execution down exactly **one** branch and marks the rest `Bypassed` (they do not run). A
+`MergeNode` reconverges the branches with an **OR-join**. The structure stays static and
+declared — no dynamic graph mutation, no determinism tax — and the branching semantics are
+machine-checked in TLA+.
+
+```go
+builder := workflow.NewWorkflowBuilder().WithWorkflowID("order-routing")
+
+builder.AddStartNode("classify").
+    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+        data.Set("amount", 2500) // determined from input
+        return nil
+    })
+
+// Route to exactly one branch, first-match wins.
+builder.AddChoice("route").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 1000 }, "manual-review").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 0 },    "auto-approve").
+    Otherwise("reject").
+    DependsOn("classify")
+
+builder.AddNode("manual-review").WithAction(reviewAction) // "big" branch
+builder.AddNode("auto-approve").WithAction(approveAction) // "small" branch
+builder.AddNode("reject").WithAction(rejectAction)        // default branch
+
+// OR-join: fires on whichever single branch was taken.
+builder.AddMerge("settle").From("manual-review", "auto-approve", "reject")
+builder.AddNode("notify").WithAction(notifyAction).DependsOn("settle")
+```
+
+**Semantics to know:**
+- **First-match, declared order.** `When` arms are evaluated top to bottom; the first
+  matching predicate's branch is taken, later matches are ignored.
+- **Data-only predicates.** A predicate is `func(*WorkflowData) bool` and may read only
+  keys produced by a **guaranteed-run ancestor** or the seed; an absent key reads as the
+  zero value and falls through.
+- **No match, no `Otherwise` → typed error** (`ErrNoBranchMatched`) — a routing dead-end
+  is surfaced, never a silent hang.
+- **Not-taken branches are `Bypassed`**, not `Skipped` — a distinct, non-failure status
+  (bypass propagates through the whole branch subgraph).
+- **The merge OR-joins**: it fires iff ≥1 taken tail completed; if every branch was
+  bypassed the merge is itself `Bypassed`.
+- **Structured only.** Only single-`ChoiceNode`, local OR-joins are allowed — unstructured
+  reconvergence, cross-choice merges, and empty-branch merges are rejected at `Build()`
+  (see [API reference → Conditional branching](../reference/api-reference.md#conditional-branching)).
+
+**Best Practices:**
+- Give every `When` a mutually-exclusive-enough predicate, or rely on first-match order
+  deliberately (order is significant).
+- Always provide an `Otherwise` unless an unmatched input is genuinely a workflow error you
+  want surfaced as `ErrNoBranchMatched`.
+- Use a `MergeNode` (not a plain node) to reconverge branches — a plain node depending on
+  two branches of the same choice is rejected at build time.
+- For an empty branch (a choice arm with no work), route it to a small pass-through node
+  and merge from that — a `Choice → merge` direct tail is not supported.
 
 ### Error Handling Workflow
 
@@ -547,7 +612,7 @@ b.AddWaitForCondition("await-inventory", func(d *workflow.WorkflowData) bool {
 
 It's important to understand the following limitations of the DAG execution model:
 
-1. **No True Conditional Branching**: As a strict DAG engine, Flow Orchestrator executes every node whose dependencies are satisfied (absent a failure — see below). There is no native way to conditionally skip executing a node at the engine level - all decisions about whether to perform work must be made within the node actions themselves.
+1. **Structured branching only**: Since v0.11.0 a `ChoiceNode` provides true workflow-level branching — a not-taken branch does **not** run (its nodes are `Bypassed`), and a `MergeNode` OR-joins the branches (see [True Conditional Branching](#true-conditional-branching-choicenode--mergenode)). This is deliberately **structured**: only single-`ChoiceNode`, local OR-joins are expressible — unstructured (van der Aalst) reconvergence, cross-choice merges, and empty-branch merges are rejected at `Build()`. For "run every node, decide inside the action" behavior, the in-action pattern above still applies.
 
 2. **Fail-fast by default**: A node failure halts the run by default — in-flight siblings are cancelled and later levels do not execute, so not every node necessarily runs. Mark a node `WithContinueOnError()` to let it fail without halting the workflow (see [Error Handling → Continue-on-Error](./error-handling.md#3-continue-on-error)).
 

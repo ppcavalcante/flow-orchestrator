@@ -25,11 +25,13 @@ It is a **durable execution core**: a workflow that crashes mid-run can be resum
 - **High Performance**: Optimized for minimal allocations and maximum throughput
 - **Thread-Safe**: Built for concurrent access with minimal lock contention
 - **Durable Crash-Resume**: Opt-in mid-run checkpointing (the optional `Checkpointer` interface; nil = zero overhead) lets a workflow survive a process crash and resume from the last completed level — same workflow ID + store, no finished work re-run, no server or DB required. Resume-equivalence is machine-checked in TLA+ ([`DurableExecutor.tla`](specs/README.md))
+- **Durable Continuations (suspend-resume)**: A workflow can suspend on an external event and resume later — durable timers (`AddTimer`), wait-for-signal (`AddWaitForSignal`) and wait-for-condition, the non-terminal `Waiting` status — without holding a process open or paying a determinism tax. The suspend/resume model is machine-checked in TLA+
 - **Observable**: Comprehensive metrics for monitoring and optimization
 - **Extensible**: Designed to support multiple orchestration patterns
 - **Embeddable**: Clean API for integration into any Go application
 - **Type-Safe Data**: Optional generic typed keys (`Key[T]`) over the shared data store for compile-time-checked producer/consumer contracts
 - **Resilient**: Per-node continue-on-error lets selected steps fail without halting the workflow (default is fail-fast)
+- **Conditional Branching**: True workflow-level branching — a `ChoiceNode` routes to exactly one branch (first-match, data-driven predicate) and marks the rest `Bypassed` (they do not run); a `MergeNode` OR-joins the branches. Structured and declared (no dynamic graph mutation, no determinism tax), and the branching semantics are machine-checked in TLA+
 - **Rigorously Tested & Formally Modeled**: Property-based tests (gopter) over random DAGs plus a TLC-checked TLA+ model of the executor verify the core invariants
 
 ## Quick Start
@@ -41,15 +43,15 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.9.0-alpha`** (the M9 durable execution core:
-> crash-resume via the optional `Checkpointer` interface, per-level checkpointing, the
-> at-least-once contract + `IdempotencyKey`, atomic writes, and a TLA+-verified resume-equivalence
-> model — on top of the M1–M8 work). Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.9.0-alpha`** — so the command above is
-> correct. Pinning the exact version (`@v0.9.0-alpha`) is optional but recommended for
-> reproducibility, and the API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
-> The in-code version (`pkg/workflow.Version`) reads `0.9.0-alpha`. See
-> [CHANGELOG.md](CHANGELOG.md).
+> **no stable (`v1`+) release**. The latest is **`v0.11.0-alpha`** (M11 conditional branching —
+> `ChoiceNode` + OR-join `MergeNode` + the `Bypassed` status — on top of M10 durable continuations
+> (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status) and the M9
+> durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
+> work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
+> currently **`v0.11.0-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.11.0-alpha`) is optional but recommended for reproducibility, and the API may change between
+> alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) reads
+> `0.11.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -287,6 +289,50 @@ See the [Persistence guide → Durability & Idempotency](docs/guides/persistence
 for the worked detail and the [API reference](docs/reference/api-reference.md#durable-crash-resume-added-v090)
 for the durable surface.
 
+## Conditional Branching
+
+A workflow can route execution down exactly **one** of several branches with a
+`ChoiceNode`, and reconverge them with an **OR-join** `MergeNode`. Unlike faking
+branches inside actions ("run every node, decide inside"), a not-taken branch genuinely
+**does not run** — its nodes become `Bypassed` (a 7th `NodeStatus`, terminal and distinct
+from `Skipped` so the "an upstream you needed failed" signal stays honest). The structure
+is static and declared — no dynamic graph mutation, no determinism tax — and the branching
+semantics are machine-checked in TLA+.
+
+```go
+builder.AddStartNode("classify").
+    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+        data.Set("amount", 2500) // determined from input
+        return nil
+    })
+
+// Route to exactly one branch, first-match wins; the rest are Bypassed.
+builder.AddChoice("route").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 1000 }, "manual-review").
+    When(func(d *workflow.WorkflowData) bool { amt, _ := d.GetInt("amount"); return amt > 0 },    "auto-approve").
+    Otherwise("reject").
+    DependsOn("classify")
+
+builder.AddNode("manual-review").WithAction(reviewAction)
+builder.AddNode("auto-approve").WithAction(approveAction)
+builder.AddNode("reject").WithAction(rejectAction)
+
+// OR-join: fires on whichever single branch was taken.
+builder.AddMerge("settle").From("manual-review", "auto-approve", "reject")
+builder.AddNode("notify").WithAction(notifyAction).DependsOn("settle")
+```
+
+Predicates are **data-only** (`func(*WorkflowData) bool`, reading guaranteed-run-ancestor
+or seed keys); evaluation is **first-match, declared order**; no match with no `Otherwise`
+surfaces a typed `ErrNoBranchMatched` rather than hanging. The OR-join is deliberately
+**structured** — only single-`ChoiceNode`, local reconvergence is expressible. Unstructured
+(van der Aalst) OR-joins, cross-choice merges, empty-branch merges, and loops are **not
+supported** and are rejected at `Build()`.
+
+See the [Workflow patterns guide → True Conditional Branching](docs/guides/workflow-patterns.md#true-conditional-branching-choicenode--mergenode),
+the [API reference → Conditional branching](docs/reference/api-reference.md#conditional-branching),
+and [ADR-0010](docs/architecture/adr/0010-conditional-branching-bypassed-status.md).
+
 ## Architecture
 
 Flow Orchestrator is designed with a modular architecture that separates concerns and enables extensibility. For a comprehensive overview of the system architecture, see our [Architecture Overview](docs/architecture/overview.md) documentation.
@@ -442,18 +488,34 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.9.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.9.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.11.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.11.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap
 
-- **Shipped (M9, durable execution core):** crash-resume via the optional
-  `Checkpointer` interface — per-level checkpointing, resume from the last completed
-  level, the at-least-once contract + `IdempotencyKey`, atomic writes, and a
-  TLA+-machine-checked resume-equivalence model.
-- **Future (not yet shipped):** Tier-2 *suspend-resume* — durable timers, signals,
-  and waiting for external events. These require a re-entrant execution model and are
-  a deliberate future direction, **not** part of the current release.
+**Shipped:**
+- **M9 — durable execution core:** crash-resume via the optional `Checkpointer`
+  interface — per-level checkpointing, resume from the last completed level, the
+  at-least-once contract + `IdempotencyKey`, atomic writes, and a TLA+-machine-checked
+  resume-equivalence model.
+- **M10 — durable continuations (Tier-2 suspend-resume):** a workflow can suspend on an
+  external event and resume later — durable timers (`AddTimer`), wait-for-signal
+  (`AddWaitForSignal`) and wait-for-condition, the non-terminal `Waiting` status, and
+  `ErrSuspended` at the level barrier. Still no server, no DB, no determinism tax; the
+  suspend/resume model is machine-checked in TLA+.
+- **M11 — conditional branching:** true workflow-level branching — `ChoiceNode` (first-match,
+  data-driven routing) + OR-join `MergeNode` + the 7th `Bypassed` status; structured,
+  declared, TLA+-verified.
+
+**Future (not yet shipped):**
+- **M12 — saga / compensation:** durable rollback — `WithCompensation` reverse-order undo
+  for partially-completed workflows, plus retry-policy hardening.
+- **Further out / deferred:** an exactly-once same-transaction (SQLite) store, and a
+  query / visibility API.
+
+**Deliberately out of scope (protecting the moat):** unstructured (van der Aalst) OR-joins,
+loops, arbitrary code-as-workflow / replay, and any mandatory distribution or server —
+these would forfeit the embeddable, zero-infra, formally-verified, no-determinism-tax niche.
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.
 

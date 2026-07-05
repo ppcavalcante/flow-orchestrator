@@ -141,6 +141,7 @@ const (
     Failed    NodeStatus = "failed"
     Skipped   NodeStatus = "skipped"
     Waiting   NodeStatus = "waiting"  // parked on an external event (timer/signal); non-terminal, non-failing (added v0.10.0)
+    Bypassed  NodeStatus = "bypassed" // not-taken branch of a ChoiceNode; terminal, not a failure (added v0.11.0)
 )
 ```
 
@@ -219,6 +220,7 @@ const (
     Failed    NodeStatus = "failed"
     Skipped   NodeStatus = "skipped"
     Waiting   NodeStatus = "waiting"  // parked on an external event; non-terminal (added v0.10.0)
+    Bypassed  NodeStatus = "bypassed" // not-taken branch of a ChoiceNode; terminal, not a failure (added v0.11.0)
 )
 
 // Default per-level execution concurrency (pkg/workflow/parallel_execution.go)

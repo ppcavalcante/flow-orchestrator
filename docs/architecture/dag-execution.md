@@ -61,7 +61,8 @@ During execution, a node transitions through several states:
 stateDiagram-v2
     [*] --> Pending
     Pending --> Running: When dependencies resolved
-    Pending --> Skipped: A non-resolving dependency (Failed non-coe, or Skipped) blocks it
+    Pending --> Skipped: A failure/skip-cause dependency (Failed non-coe, or Skipped) blocks it
+    Pending --> Bypassed: Not-taken branch of a ChoiceNode (only a Bypassed cause)
     Running --> Completed: Successful execution
     Running --> Failed: Error occurs (after retries)
     Failed --> Running: Retry available
@@ -71,6 +72,7 @@ stateDiagram-v2
     Completed --> [*]
     Failed --> [*]
     Skipped --> [*]
+    Bypassed --> [*]
 
     state Running {
         [*] --> Executing
@@ -102,6 +104,20 @@ stateDiagram-v2
 > dependents to be `Skipped`; on the next resume/`Tick`/signal it re-runs and either
 > re-parks or converges. See [Suspend and resume](#suspend-and-resume-durable-continuations)
 > below.
+>
+> `Bypassed` (added v0.11.0) is the **not-taken branch** state. When a `ChoiceNode`
+> routes to one branch, every other branch entry — and its whole subgraph — is recorded
+> `Bypassed`. The launch gate is **cause-aware**: a node that cannot launch is `Skipped`
+> if any dependency is a failure/skip-cause (a non-coe `Failed` or a `Skipped`), and
+> `Bypassed` only if its blocking cause is purely a `Bypassed` branch. A `Waiting`
+> dependency is **not** a terminal cause (the node revisits on a later pass, staying
+> `Pending`). **Diamond rule:** a node with both a `Bypassed` dependency and a surviving
+> taken (`Completed`, or coe-`Failed`) ancestor is `Skipped`, not `Bypassed` — the taken
+> path wins. This one cause-aware classifier (`classifyBlockedStatus`) is shared by the
+> in-level launch gate and the post-halt sweep, so the two cannot drift. A `MergeNode`
+> OR-joins branches: it fires iff ≥1 taken branch-tail `Completed`, and is itself
+> `Bypassed` when every branch was bypassed. See
+> [Conditional branching](../reference/api-reference.md#conditional-branching).
 
 ## Building a DAG
 
