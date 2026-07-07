@@ -35,6 +35,13 @@ type Workflow struct {
 	// to coordinate across *Workflow instances, or a future cross-process Locker
 	// (SQLite claimed_at) for multi-process serialization.
 	Locker Locker
+
+	// RollbackTimeout bounds a saga rollback (M12 ph47, DEC-M12-P47-DEADLINE). When
+	// zero it defaults to DefaultRollbackTimeout; a negative value makes the rollback
+	// explicitly unbounded. The whole reverse compensation pass shares this deadline;
+	// a compensation still blocked past it is recorded CompensationFailed so a hung
+	// compensation never hangs the run. Set via WithRollbackTimeout.
+	RollbackTimeout time.Duration
 }
 
 // NewWorkflow creates a new workflow with the given workflow store
@@ -80,6 +87,81 @@ func (w *Workflow) WithClock(c Clock) *Workflow {
 func (w *Workflow) WithLocker(l Locker) *Workflow {
 	w.Locker = l
 	return w
+}
+
+// WithRollbackTimeout sets the scoped deadline for a saga rollback (M12 ph47). Zero
+// restores DefaultRollbackTimeout; a negative duration makes the rollback explicitly
+// unbounded. Returns the workflow for method chaining.
+func (w *Workflow) WithRollbackTimeout(d time.Duration) *Workflow {
+	w.RollbackTimeout = d
+	return w
+}
+
+// finishRollback drives the compensation pass, persists the compensated state, and
+// composes the honest outcome (M12 ph47/48). The rollback pass checkpoints after each
+// reverse level (§1), so on a resume it re-runs only the still-Completed compensable
+// nodes. The final partition is RECONSTRUCTED from DURABLE statuses (§2) — not just the
+// nodes this drive processed — so a resumed rollback reports the whole run's honest
+// partition and is NEVER nil (resolves ph47-F5). `cause` is the trigger failure on the
+// fail path, or nil on a resume-into-rollback (then reconstructed from persisted Failed
+// nodes). When >=1 compensation failed it returns a *SagaError enumerating the exact
+// {compensated, failed, skipped} partition wrapping the cause (errors.As reaches both);
+// otherwise it returns the (reconstructed) cause — never a false *SagaError, and never
+// nil for a rolled-back run. A re-drive of a fully-rolled-back run is a no-op returning
+// the reconstructed outcome (§3 rollback-complete = no Completed compensable remains).
+func (w *Workflow) finishRollback(data *WorkflowData, cause error) error {
+	fresh := w.driveRollback(data)
+
+	// Final authoritative Save (also the ph47-F2 partition-carrying persist). The final
+	// Save persists the whole `data`, so a clean final Save subsumes any per-level
+	// checkpoint error (fresh.saveErr) — a transient mid-pass checkpoint failure on a
+	// fully-persisted run is NOT surfaced (review ph48-F3). Only when the final Save
+	// ITSELF fails does the persist genuinely fail.
+	var saveErr error
+	if w.Store != nil {
+		saveErr = w.Store.Save(data)
+	}
+
+	// §2 reconstruct the full partition + the forward cause from durable statuses.
+	out := w.reconstructOutcome(data, fresh)
+	effectiveCause := cause
+	if effectiveCause == nil {
+		effectiveCause = reconstructCause(data, w.DAG) // resume path: cause was a prior run
+	}
+	// Never-nil floor (review ph48-F1): a rolled-back run whose trigger cause is not
+	// reconstructable (a caller-cancel/deadline leaves no Failed node, and the trigger
+	// cause is not journaled) still MUST NOT report success. finishRollback is only ever
+	// reached for a rolled-back run, so a nil cause here means "rolled back, cause not
+	// journaled" — surface the sentinel, never nil. (Faithful cancel-vs-fail cause
+	// recovery across a crash needs a journaled trigger cause — ph48-F2, routed UP.)
+	if effectiveCause == nil {
+		effectiveCause = ErrRolledBack
+	}
+
+	// A partial rollback ALWAYS surfaces as a *SagaError so the operator-critical
+	// partition survives — even when a persist fails (ph47-F2): the save error is
+	// folded into Cause rather than replacing the partition.
+	if len(out.failedToCompensate) > 0 {
+		if saveErr != nil {
+			effectiveCause = errors.Join(effectiveCause, fmt.Errorf("failed to save rollback state: %w", saveErr))
+		}
+		return &SagaError{
+			Cause:              effectiveCause,
+			Compensated:        out.compensated,
+			FailedToCompensate: out.failedToCompensate,
+			Skipped:            out.skipped,
+		}
+	}
+
+	// Clean rollback: a persist failure surfaces. Otherwise return the (reconstructed)
+	// cause — NEVER nil for a rolled-back run (§2 / ph47-F5).
+	if saveErr != nil {
+		if effectiveCause != nil {
+			return fmt.Errorf("%w (additionally, failed to save rollback state: %w)", effectiveCause, saveErr)
+		}
+		return fmt.Errorf("failed to save rollback state: %w", saveErr)
+	}
+	return effectiveCause
 }
 
 // locker resolves the drive lease: the workflow's own Locker, or the process-wide
@@ -171,6 +253,20 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 		return fmt.Errorf("workflow validation failed: %w", err)
 	}
 
+	// M12 saga forward-vs-rollback switch. A run persisted mid-rollback (its
+	// rolling_back marker set by the trigger below) resumes into the ROLLBACK drive
+	// instead of the forward DAG.Execute — the durable re-entry seam. In ph46/47 this
+	// branch is exercised WITHOUT a crash (a direct "load a rolling_back snapshot ->
+	// resume compensates, does NOT re-run forward" test); ph48 adds the crash points
+	// that make a real resume land here. finishRollback runs the compensation pass,
+	// persists the compensated state, and returns a *SagaError if any compensation
+	// failed (nil cause — the original trigger failure was a prior run). Placed before
+	// the forward-only checkpointer/signal wiring (a rollback neither per-level
+	// checkpoints nor consumes signals).
+	if data.IsRollingBack() {
+		return w.finishRollback(data, nil)
+	}
+
 	// Wire durable mid-run checkpointing when the Store supports it (M9). A Store
 	// that implements Checkpointer gets a per-level checkpoint flush inside
 	// DAG.Execute; a Store that does not is unaffected (no callback injected →
@@ -238,10 +334,60 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 			ackConsumed()
 			return err
 		}
-		// Save failed state. Do NOT ack here: the run failed, so a consumed signal
-		// stays INERT in the mailbox (the node is Completed in the saved state; a
-		// retry skips it — no re-consume, no double-apply). It is reclaimed by
-		// Store.Delete (no background GC; ph37 F2).
+
+		// M12 saga trigger (§4, red-team MAJOR-1). Rollback fires ONLY on a HARD
+		// node failure — a *ExecutionError from fail-fast — OR a caller-cancel
+		// (context.Canceled/DeadlineExceeded; a mid-level cancel surfaces a ctx
+		// error, not an *ExecutionError — DEC-M12-TRIGGER). It deliberately does NOT
+		// fire on: ErrSuspended (handled above — the run intends to resume); a
+		// coe-only run (DAG.Execute returns nil, so we never reach this err block); a
+		// checkpoint-flush error (a Save/IO error, not an *ExecutionError, so
+		// errors.As misses it); a corrupt/IO load error or a validation error (both
+		// return BEFORE DAG.Execute). "Execute returned non-nil" is NOT the trigger.
+		// hasCompensations gate: a NON-saga DAG (no compensation declared anywhere)
+		// takes exactly the pre-M12 failed-state path below — byte-for-byte, no
+		// rolling_back marker, a single save (the moat: the machinery is inert unless
+		// the workflow actually declares a saga).
+		var execErr *ExecutionError
+		triggersRollback := errors.As(err, &execErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		if triggersRollback && w.hasCompensations() {
+			// Set + PERSIST the rolling_back marker BEFORE compensating, so a crash
+			// between here and the rollback resumes into the rollback drive (ph48),
+			// never re-runs forward. Then run the compensation pass and persist the
+			// compensated state. The run still FAILED: return the original error
+			// (ph47: finishRollback returns a typed *SagaError if any compensation
+			// failed, else the original err — never a false-clean).
+			data.SetRollingBack(true)
+			// M12 ph49: journal WHY we are rolling back, in the SAME snapshot as the
+			// marker (resolves ph48-F2). err is already classified above; a *ExecutionError
+			// is a node failure, else a ctx Canceled/DeadlineExceeded. On resume,
+			// reconstructCause reads this to return the TRUE cause (a cancel as a cancel),
+			// not a node-failure inferred from an incidental Failed node.
+			switch {
+			case execErr != nil:
+				data.SetTriggerCause(TriggerFailure)
+			case errors.Is(err, context.Canceled):
+				data.SetTriggerCause(TriggerCanceled)
+			case errors.Is(err, context.DeadlineExceeded):
+				data.SetTriggerCause(TriggerDeadlineExceeded)
+			}
+			if w.Store != nil {
+				if saveErr := w.Store.Save(data); saveErr != nil {
+					return fmt.Errorf("%w (additionally, failed to persist rollback marker: %w)", err, saveErr)
+				}
+			}
+			// finishRollback drives best-effort compensation, persists the compensated
+			// state, and composes the honest outcome: a *SagaError enumerating the exact
+			// {compensated, failed, skipped} partition when >=1 compensation failed, or
+			// the original err (`cause`) on a fully-clean rollback.
+			return w.finishRollback(data, err)
+		}
+
+		// Non-triggering failure (e.g. a checkpoint-flush error): save the failed
+		// state, unchanged from the pre-M12 path. Do NOT ack here: the run failed, so
+		// a consumed signal stays INERT in the mailbox (the node is Completed in the
+		// saved state; a retry skips it — no re-consume, no double-apply). It is
+		// reclaimed by Store.Delete (no background GC; ph37 F2).
 		if w.Store != nil {
 			if saveErr := w.Store.Save(data); saveErr != nil {
 				return fmt.Errorf("%w (additionally, failed to save state: %w)", err, saveErr)

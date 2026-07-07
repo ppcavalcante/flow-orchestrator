@@ -394,98 +394,104 @@ start → risky-operation → handle-error → complete
 - Consider using middleware for retries on transient failures
 - Use different strategies for different error types
 
-### Compensation Pattern (Saga-like)
+### Saga / Compensation (durable rollback)
 
-This pattern implements rollback behavior similar to the distributed Saga pattern, but within a single process. It allows you to define compensating actions that undo previous steps when a later step fails.
-
-> **Note:** the steps whose failure triggers a compensation (`process-payment`,
-> `create-shipment`) are marked `WithContinueOnError()` so their compensation nodes
-> run after they fail. Under the default fail-fast behavior, the first failure
-> halts the workflow before any compensation node runs. See
-> [Continue-on-Error](./error-handling.md#3-continue-on-error).
+Added in **v0.12.0**, a node can declare a **compensating action** with
+`WithCompensation`. If the run fails with a hard error (or the caller cancels /
+the context deadline fires), the engine **rolls back**: it invokes the compensation
+of every node that had `Completed`, in **reverse-topological order**, to durably undo
+their effects. This is first-class, crash-safe undo — the rollback itself is
+checkpointed, so a crash *during* rollback resumes and finishes — and it replaces the
+manual "check `GetNodeStatus` in a downstream node" workaround shown in earlier versions.
 
 ```go
 builder := workflow.NewWorkflowBuilder().
-    WithWorkflowID("compensation-workflow")
+    WithWorkflowID("order-saga").
+    WithStore(store) // a Checkpointer store makes the rollback itself crash-safe
 
-// Step 1: Reserve inventory
 builder.AddStartNode("reserve-inventory").
-    WithAction(reserveInventoryAction)
+    WithAction(reserveInventoryAction).
+    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+        id, _ := data.GetString("reservation_id")
+        // Undo the reservation. MUST be idempotent — see below.
+        return releaseReservation(ctx, id)
+    })
 
-// Step 2: Process payment — continue-on-error so rollback-inventory runs on failure.
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
-    WithContinueOnError().
+    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+        pid, _ := data.GetString("payment_id")
+        return refundPayment(ctx, pid)
+    }).
     DependsOn("reserve-inventory")
 
-// Compensation step for inventory if payment fails
-builder.AddNode("rollback-inventory").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
-        // Check if payment failed
-        paymentStatus, _ := data.GetNodeStatus("process-payment")
-        
-        if paymentStatus == workflow.Failed {
-            // Get reservation ID
-            reservationID, _ := data.GetString("inventory_reservation_id")
-            
-            // Cancel reservation
-            fmt.Printf("Canceling inventory reservation: %s\n", reservationID)
-            data.Set("inventory_rolled_back", true)
-        }
-        
-        return nil
-    }).
-    DependsOn("process-payment")
-
-// Step 3: Create shipment (only if previous steps succeeded) — continue-on-error
-// so refund-payment runs if this step fails.
 builder.AddNode("create-shipment").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
-        // Check previous steps status
-        paymentStatus, _ := data.GetNodeStatus("process-payment")
-        
-        if paymentStatus != workflow.Completed {
-            // Skip this step if payment failed
-            return nil
-        }
-        
-        // Create shipment
-        return createShipmentAction.Execute(ctx, data)
-    }).
-    WithContinueOnError().
-    DependsOn("rollback-inventory")
-
-// Compensation step for payment if shipment fails
-builder.AddNode("refund-payment").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
-        shipmentStatus, _ := data.GetNodeStatus("create-shipment")
-        paymentStatus, _ := data.GetNodeStatus("process-payment")
-        
-        // If shipment failed but payment succeeded, refund
-        if shipmentStatus == workflow.Failed && paymentStatus == workflow.Completed {
-            paymentID, _ := data.GetString("payment_id")
-            fmt.Printf("Refunding payment: %s\n", paymentID)
-            data.Set("payment_refunded", true)
-        }
-        
-        return nil
-    }).
-    DependsOn("create-shipment")
+    WithAction(createShipmentAction). // if this fails, the run rolls back:
+    DependsOn("process-payment")      // process-payment then reserve-inventory are compensated
 ```
 
-**Visual Representation:**
+**Semantics to know:**
+- **Trigger.** Rollback fires when `Execute` returns a hard `*ExecutionError` (a
+  fail-fast node failure) **or** the caller's context is canceled / its deadline
+  exceeded — *and* the DAG declares at least one compensation. It does **not** fire on
+  a suspension (`ErrSuspended`), a continue-on-error-only run (which returns `nil`), or
+  a persistence/validation error. A workflow with no `WithCompensation` anywhere takes
+  the exact pre-saga failure path (zero overhead).
+- **Only Completed compensable nodes are compensated**, in reverse-topological order
+  (within a level, concurrently, bounded by `MaxConcurrency`). A `Bypassed` / `Skipped`
+  / `Waiting` / `Failed` / never-run node has no successful effect to undo and is never
+  compensated. A `Completed` node with no compensation is a rollback no-op.
+- **Compensations MUST be idempotent** — a crash mid-rollback re-runs the level
+  (at-least-once). The engine passes a stable dedup handle; see
+  [The compensation idempotency contract](#the-compensation-idempotency-contract) below.
+- **Best-effort, honest outcome.** A compensation that fails (after its `WithRetries`
+  count) does not abort the rollback — the node is marked `CompensationFailed`, every
+  other compensation still runs, and `Execute` returns a typed
+  [`*SagaError`](../reference/api-reference.md#saga--compensation-added-v0120) reporting
+  the exact `{compensated, failedToCompensate, skipped}` partition. A rollback where
+  every compensation succeeded returns the original trigger error, not a `SagaError` —
+  so a caller can always tell a clean rollback from a partial one.
+- **Bounded.** The whole rollback shares a deadline (`WithRollbackTimeout`, default 5
+  minutes; negative = unbounded) so a hung compensation can never hang the run.
 
-```
-reserve-inventory → process-payment → rollback-inventory → create-shipment → refund-payment
+**Statuses:** a compensated node ends `Compensated` (8th `NodeStatus`); one whose
+compensation failed ends `CompensationFailed` (9th) — both terminal, neither a forward
+failure. The whole model is machine-checked in TLA+ (the compensation/abort arm,
+exhaustive under crashes), with zero determinism tax.
+
+#### The compensation idempotency contract
+
+Rollback is **at-least-once**: if the process crashes partway through the reverse pass,
+resuming re-runs the compensations of any node still `Completed` — so a compensation can
+be invoked **more than once** for the same node. Compensating actions **must be
+idempotent** (releasing an already-released reservation, refunding an already-refunded
+payment, etc. must be safe no-ops the second time). This is a **correctness contract,
+not a nicety** — a non-idempotent compensation can double-undo across a crash.
+
+The engine gives you a stable dedup handle to drive downstream idempotency. Inside a
+compensation, read it with `CompensationIdempotencyKey(ctx)`:
+
+```go
+WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+    key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
+    pid, _ := data.GetString("payment_id")
+    return refundPaymentIdempotent(ctx, pid, key)      // downstream dedupes on key
+})
 ```
 
-**Important Note:** This is not a true distributed Saga implementation. It operates within a single process and doesn't provide distributed transaction guarantees. It models Saga-like behavior for local workflows.
+The key is `IdempotencyKey(data, nodeName)` — derived only from the workflow ID and node
+name, so it is **byte-identical across a resume**; the downstream system dedupes the
+re-invocation as one logical undo. (Same guarantee, and same handle, as the forward
+at-least-once crash-resume contract.)
 
 **Best Practices:**
-- Add explicit compensation steps after each operation that might need rollback
-- Use node status checking to determine if compensation is needed
-- Store operation IDs and other context needed for compensation
-- Consider timeouts for long-running operations
+- Declare a compensation on every node whose forward effect has an external side effect
+  that must be undone; leave read-only / pure nodes without one.
+- Make every compensation idempotent and drive it with `CompensationIdempotencyKey`.
+- Use `WithRetries` on a node to retry its compensation on transient faults; set
+  `WithRollbackTimeout` if the default 5-minute rollback bound is wrong for your undos.
+- Persist with a `Checkpointer` store so the rollback is crash-safe; inspect the returned
+  `*SagaError` to alert on any `CompensationFailed` node (its effect is NOT undone).
 
 ## Custom Action Patterns
 

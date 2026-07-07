@@ -282,6 +282,22 @@ unambiguous (so `("ab","c")` and `("a","bc")` cannot collide). Downstream system
 may recompute this, so the construction will not change across versions without a
 deliberate, documented break.
 
+### Saga rollback is crash-safe — and also at-least-once
+
+Added in **v0.12.0**, a saga rollback (see the
+[Saga / Compensation pattern](./workflow-patterns.md#saga--compensation-durable-rollback))
+runs on the same durable seam. When a run fails and compensations are declared, the engine
+persists a durable `rolling_back` marker (and the trigger cause) **before** compensating,
+then checkpoints after each reverse level. So a crash **during** rollback resumes straight
+back into the rollback drive — never re-running the forward DAG — and finishes the
+compensations that had not yet completed.
+
+That makes rollback **at-least-once too**: a compensation for a node still `Completed` at
+the crash re-runs on resume, so — exactly like forward side effects — **compensations must
+be idempotent**. Read the stable dedup handle inside a compensation with
+`CompensationIdempotencyKey(ctx)` (it returns the same `IdempotencyKey(data, nodeName)`,
+byte-identical across the resume) and drive downstream dedup with it.
+
 ## Durable Continuations (suspend & resume)
 
 Added in **v0.10.0**, a workflow can **suspend** on an external event and **resume**

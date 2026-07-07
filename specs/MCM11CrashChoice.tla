@@ -33,10 +33,15 @@ MCChoiceBranches == [x \in {c} |-> {bA, bB}]
 MCChosenBranch   == [x \in {c} |-> pick]
 MCMergeTails     == [x \in {m} |-> {bA, bB}]
 
+MCSagaNodes    == {}
+MCCompFailSet  == {}
+MCSagaTrigger  == "none"
+
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause
 
 INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
     ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
-    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails
+    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
+    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger
 =============================================================================

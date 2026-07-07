@@ -528,106 +528,42 @@ func deadLetterAction(ctx context.Context, data *workflow.WorkflowData) error {
 }
 ```
 
-### 2. Compensating Transactions
+### 2. Saga / Compensation (first-class, since v0.12.0)
 
-Implement compensating actions to roll back partial work:
+Since v0.12.0, compensation is **built in**: declare a compensating action on a node with
+`WithCompensation`, and if the run fails (a hard error, or a caller-cancel/deadline) the
+engine automatically rolls back — invoking the compensation of every `Completed` node in
+**reverse-topological order** to durably undo its effect. You no longer need to hand-roll a
+saga runner or check `GetNodeStatus` in a downstream node.
 
 ```go
-// Step 1: Book hotel
-builder.AddNode("book-hotel").
-    WithAction(bookHotelAction)
+builder.AddNode("reserve-inventory").
+    WithAction(reserveInventoryAction).
+    WithCompensation(cancelInventoryAction)
 
-// Step 2: Book flight 
-builder.AddNode("book-flight").
-    WithAction(bookFlightAction).
-    DependsOn("book-hotel")
-
-// Compensation: Cancel hotel if flight booking fails
-builder.AddNode("cancel-hotel-if-needed").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
-        flightStatus, _ := data.GetNodeStatus("book-flight")
-        
-        if flightStatus == workflow.Failed {
-            // Flight booking failed, need to cancel hotel
-            hotelBookingID, _ := data.GetString("hotel_booking_id")
-            
-            // Call hotel cancellation API
-            err := cancelHotelBooking(hotelBookingID)
-            if err != nil {
-                // Log but don't fail - we still want to continue the error path
-                fmt.Printf("Warning: Failed to cancel hotel: %v\n", err)
-            } else {
-                data.Set("hotel_cancelled", true)
-            }
-        }
-        
-        return nil
+builder.AddNode("process-payment").
+    WithAction(processPaymentAction).
+    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+        key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
+        pid, _ := data.GetString("payment_id")
+        return refundPayment(ctx, pid, key)                // MUST be idempotent
     }).
-    DependsOn("book-flight")
+    DependsOn("reserve-inventory")
+
+builder.AddNode("create-shipment").
+    WithAction(createShipmentAction). // if this fails, payment then inventory are compensated
+    DependsOn("process-payment")
 ```
 
-### 3. Saga Pattern
-
-For distributed transactions, implement a saga pattern with coordinated compensating actions:
-
-```go
-// Define action with compensation
-type compensatableAction struct {
-    action       workflow.Action
-    compensation workflow.Action
-}
-
-// Execute a saga with compensation on failure
-func executeSaga(ctx context.Context, data *workflow.WorkflowData, 
-                 actions []compensatableAction) error {
-    completedActions := 0
-    
-    // Execute each action in sequence
-    for i, step := range actions {
-        // Execute the action
-        err := step.action.Execute(ctx, data)
-        if err != nil {
-            // Action failed, execute compensations in reverse order
-            for j := completedActions - 1; j >= 0; j-- {
-                compensationErr := actions[j].compensation.Execute(ctx, data)
-                if compensationErr != nil {
-                    // Log compensation error but continue
-                    fmt.Printf("Compensation %d failed: %v\n", j, compensationErr)
-                }
-            }
-            return fmt.Errorf("saga failed at step %d: %w", i, err)
-        }
-        
-        completedActions++
-    }
-    
-    return nil
-}
-
-// Usage in workflow
-sagaAction := workflow.ActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
-    saga := []compensatableAction{
-        {
-            action: reserveInventoryAction,
-            compensation: cancelInventoryAction,
-        },
-        {
-            action: processPaymentAction,
-            compensation: refundPaymentAction,
-        },
-        {
-            action: createShipmentAction,
-            compensation: cancelShipmentAction,
-        },
-    }
-    
-    return executeSaga(ctx, data, saga)
-})
-
-// Use in workflow
-builder.AddNode("process-order").
-    WithAction(sagaAction)
-```
+The rollback is **crash-safe** (checkpointed per reverse level) and therefore
+**at-least-once** — **compensations must be idempotent**; the engine passes a stable
+`CompensationIdempotencyKey` handle to drive downstream dedup. It is **best-effort**: a
+compensation that fails (after the node's `WithRetries`) is recorded `CompensationFailed`
+and the rest still run, with the exact `{compensated, failedToCompensate, skipped}` partition
+returned as a typed `*SagaError`. See the
+[Saga / Compensation pattern](./workflow-patterns.md#saga--compensation-durable-rollback)
+and the [API reference → Saga / Compensation](../reference/api-reference.md#saga--compensation-added-v0120)
+for the full contract.
 
 ## Monitoring and Debugging Errors
 

@@ -261,6 +261,10 @@ func (b *NodeBuilder) WithTimeout(timeout time.Duration) *NodeBuilder
 // See "Failure Semantics" below.
 func (b *NodeBuilder) WithContinueOnError() *NodeBuilder
 
+// WithCompensation sets the node's compensating action for saga rollback (added v0.12.0).
+// See "Saga / Compensation" below.
+func (b *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder
+
 // DependsOn adds dependencies
 func (b *NodeBuilder) DependsOn(nodeNames ...string) *NodeBuilder
 ```
@@ -631,6 +635,87 @@ runtime semantics and the exhaustive verification moat):
   **Workaround:** put a pass-through node on the branch and merge from that.
 - **Loops / cycles** — a DAG cannot contain cycles; branching does not add looping.
 
+## Saga / Compensation (added v0.12.0)
+
+<a id="saga--compensation-added-v0120"></a>
+<a id="saga-compensation"></a>
+
+A node can declare a **compensating action**; when the run fails, the engine rolls back by
+invoking the compensations of `Completed` nodes in **reverse-topological order** to durably
+undo their effects. The rollback is itself crash-safe (checkpointed per reverse level), and
+the outcome is reported honestly via a typed `*SagaError`.
+
+### Declaring a compensation — `WithCompensation`
+
+```go
+func (b *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder
+```
+
+Sets the compensating action for a node (accepts an `Action` or a
+`func(context.Context, *WorkflowData) error`, the same forms as `WithAction`; an
+unsupported type is reported by `Build()`). A node with no compensation is a rollback
+no-op. The compensation is exposed on `Node.Compensation`.
+
+### Rollback trigger and scope
+
+- **Triggers** iff `Execute` returns a hard `*ExecutionError` (fail-fast node failure)
+  **or** the caller's context is canceled / deadline-exceeded — *and* the DAG declares at
+  least one compensation. Does **not** trigger on `ErrSuspended`, a continue-on-error-only
+  run (returns `nil`), a persistence/checkpoint error, or a validation/load error. A DAG
+  with no compensation anywhere takes the exact pre-saga failure path (zero overhead).
+- **Scope:** only a `Completed` node that declares a compensation is compensated, in
+  reverse-topological order (within a level, concurrently, bounded by `MaxConcurrency`),
+  under a **fresh context** (a caller-cancel triggers rollback but does not abort it). A
+  `Bypassed` / `Skipped` / `Waiting` / `Failed` / never-run node is never compensated.
+- **Bounded:** the whole reverse pass shares a deadline so a hung compensation cannot hang
+  the run.
+
+```go
+func (w *Workflow) WithRollbackTimeout(d time.Duration) *Workflow // 0 => DefaultRollbackTimeout (5m); negative => unbounded
+```
+
+### At-least-once — compensations MUST be idempotent
+
+Rollback is **at-least-once**: a crash mid-rollback re-runs the compensations of any node
+still `Completed`, so a compensation can be invoked more than once. **Compensating actions
+must be idempotent.** The engine supplies a stable dedup handle, read inside a compensation:
+
+```go
+func CompensationIdempotencyKey(ctx context.Context) (key string, ok bool)
+```
+
+The key is `IdempotencyKey(data, nodeName)` (derived only from workflow ID + node name, so
+**byte-identical across a resume**); drive downstream deduplication with it so the
+re-invocation is one logical undo.
+
+### The outcome — `SagaError`
+
+Rollback is **best-effort**: a compensation that fails (after the node's `WithRetries`
+count) does not abort the pass — the node is marked `CompensationFailed`, every other
+compensation still runs, and `Execute` returns a `*SagaError`:
+
+```go
+type SagaError struct {
+    Cause              error       // the failure/cancel that triggered the rollback
+    Compensated        []string    // compensation ran and succeeded (effect undone)
+    FailedToCompensate []NodeError // compensation attempted and FAILED (effect NOT undone)
+    Skipped            []string    // Completed but declared no compensation (nothing to undo)
+}
+func (e *SagaError) Unwrap() error // returns Cause — errors.As reaches BOTH the *SagaError and the *ExecutionError cause
+```
+
+A `*SagaError` is returned **only** when `FailedToCompensate` is non-empty. A rollback in
+which every compensation succeeded returns the **original trigger error**, not a
+`SagaError` — so a caller can always distinguish a clean rollback from a partial one. A
+rolled-back run is **never** reported as success (`nil`); if the trigger cause cannot be
+reconstructed after a crash it surfaces as `ErrRolledBack`.
+
+The compensation/abort semantics — reverse-topological order, every-Completed-compensated-once,
+crash-safe rollback, and the honest partition — are machine-checked in TLA+ (exhaustive under
+crashes), with zero determinism tax. See
+[ADR-0011](../architecture/adr/0011-saga-compensation-durable-rollback.md) and the
+[Saga / Compensation pattern](../guides/workflow-patterns.md#saga--compensation-durable-rollback).
+
 ## Node Status
 
 ```go
@@ -644,6 +729,8 @@ const (
     Skipped   NodeStatus = "skipped"    // a non-resolving dependency (Failed non-coe, or Skipped) blocked it
     Waiting   NodeStatus = "waiting"    // parked on an external event (timer/signal); NON-TERMINAL, NON-FAILING (added v0.10.0)
     Bypassed  NodeStatus = "bypassed"   // the not-taken branch of a ChoiceNode; TERMINAL, NOT a failure (added v0.11.0)
+    Compensated        NodeStatus = "compensated"          // a Completed node durably undone by its compensation in a saga rollback; TERMINAL (added v0.12.0)
+    CompensationFailed NodeStatus = "compensation_failed"  // a Completed node whose compensation was attempted and FAILED; TERMINAL; effect NOT undone (added v0.12.0)
 )
 ```
 
@@ -665,6 +752,14 @@ const (
 > `Bypassed` nodes never appear in an `ExecutionError`. **Diamond rule:** a node with a
 > `Bypassed` dependency that **also** has a surviving taken/`Completed` (or
 > continue-on-error `Failed`) ancestor is `Skipped`, not `Bypassed` — the taken path wins.
+
+> **`Compensated` / `CompensationFailed` (added v0.12.0) are the saga-rollback terminals.**
+> When a run rolls back (see [Saga / Compensation](#saga--compensation-added-v0120)), each
+> `Completed` node with a compensation is compensated: `Compensated` if its compensating
+> action succeeded (effect undone), `CompensationFailed` if it was attempted and failed
+> (effect **not** undone — needs operator attention). Both are terminal and are reached only
+> from `Completed`; neither is a forward failure, and neither appears in an `ExecutionError`
+> (the partial-rollback outcome is a [`*SagaError`](#saga--compensation-added-v0120) instead).
 
 ## Failure Semantics
 
@@ -800,6 +895,20 @@ case errors.Is(err, workflow.ErrCorruptData): // file present but undecodable
 case errors.Is(err, workflow.ErrIO):          // transient I/O — safe to retry
 }
 ```
+
+### Saga / rollback domain (added v0.12.0)
+
+```go
+// ErrRolledBack: a rolled-back run whose trigger cause could not be reconstructed
+// from durable state on resume (a caller-cancel/deadline leaves no persisted Failed
+// node). It is the never-nil floor — a rolled-back run is NEVER reported as success.
+var ErrRolledBack = errors.New("workflow rolled back (trigger cause not journaled)")
+```
+
+The partial-rollback outcome itself is the typed
+[`*SagaError`](#saga--compensation-added-v0120) (returned only when ≥1 compensation
+failed); it `Unwrap`s to the original trigger cause, so `errors.As` reaches both the
+`*SagaError` and, e.g., the `*ExecutionError` that triggered the rollback.
 
 ## Aggregate Execution Error
 

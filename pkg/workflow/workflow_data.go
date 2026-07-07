@@ -32,6 +32,23 @@ type WorkflowData struct {
 	// FlatBuffers (value_long-style long) and JSON (UseNumber) paths.
 	waits map[string]int64
 
+	// rollingBack is the run-level saga rollback marker (M12): once a hard failure
+	// triggers compensation, the drive sets this true and persists it in the SAME
+	// snapshot as node statuses, so a crash mid-rollback re-loads a rolling_back run
+	// and re-enters the rollback drive (never the forward path). A single bool —
+	// the whole run is either rolling forward or rolling back — mirrors the `waits`
+	// durable-field lifecycle but is not per-node (DEC-M12-STATE: no per-node
+	// Compensating status). Rides the atomic WorkflowData write across all 3 stores.
+	rollingBack bool
+
+	// triggerCause is the durable discriminator of WHY the run is rolling back (M12
+	// ph49, resolves ph48-F2): TriggerFailure / TriggerCanceled / TriggerDeadlineExceeded,
+	// or TriggerNone when not rolling back. Journaled in the SAME snapshot as
+	// rollingBack, so a resumed rollback recovers the TRUE cause across a crash — a
+	// cancel stays a cancel, never a spurious node-failure reconstructed from an
+	// incidental Failed node. Written only at the rollback trigger.
+	triggerCause TriggerCause
+
 	// Keep the ID and metrics configuration
 	ID      string
 	metrics *metrics.MetricsCollector
@@ -116,6 +133,44 @@ func (w *WorkflowData) ForEachWait(fn func(nodeName string, fireAt int64)) {
 	for k, v := range w.waits {
 		fn(k, v)
 	}
+}
+
+// SetRollingBack sets the run-level saga rollback marker (M12). The saga trigger
+// calls SetRollingBack(true) after a hard failure and persists the snapshot; on a
+// later resume, executeLocked reads IsRollingBack to switch to the rollback drive
+// instead of the forward DAG.Execute.
+func (w *WorkflowData) SetRollingBack(rollingBack bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rollingBack = rollingBack
+}
+
+// IsRollingBack reports whether this run is in saga rollback (M12) — i.e. a hard
+// failure has triggered compensation. Persisted in the snapshot, so it survives a
+// crash and drives the forward-vs-rollback switch on resume.
+func (w *WorkflowData) IsRollingBack() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.rollingBack
+}
+
+// SetTriggerCause journals WHY the run rolled back (M12 ph49). The saga trigger calls
+// it alongside SetRollingBack(true), in the same persisted snapshot, so a resumed
+// rollback recovers the true cause across a crash (resolves ph48-F2).
+func (w *WorkflowData) SetTriggerCause(cause TriggerCause) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.triggerCause = cause
+}
+
+// TriggerCause reports the journaled rollback trigger cause (M12 ph49), or
+// TriggerNone when the run is not rolling back (or a pre-ph49 snapshot). reconstructCause
+// reads it on resume to return the honest cause (a cancel as a cancel, a deadline as a
+// deadline) instead of inferring a node-failure from an incidental Failed node.
+func (w *WorkflowData) TriggerCause() TriggerCause {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.triggerCause
 }
 
 // Set stores a value in the workflow data.
@@ -409,6 +464,17 @@ func (w *WorkflowData) createSnapshot() ([]byte, error) {
 	if len(w.waits) > 0 {
 		snapshot["waits"] = w.waits
 	}
+	// M12: run-level saga rollback marker. Omitted when false so a non-saga run (or
+	// a forward run) serializes byte-identically to its pre-M12 form (additive,
+	// backward-compatible — the same discipline as `waits`).
+	if w.rollingBack {
+		snapshot["rolling_back"] = w.rollingBack
+	}
+	// M12 ph49: the durable rollback trigger cause. Omitted when TriggerNone (not
+	// rolling back) so a non-saga/forward run stays byte-identical (additive).
+	if w.triggerCause != TriggerNone {
+		snapshot["trigger_cause"] = uint8(w.triggerCause)
+	}
 
 	// Serialize to JSON
 	return json.Marshal(snapshot)
@@ -532,6 +598,27 @@ func (w *WorkflowData) loadSnapshotInternal(data []byte) error {
 		}
 	}
 
+	// M12: run-level saga rollback marker. Always reset first so a resume that is no
+	// longer rolling back clears any stale marker (symmetric with the waits reset);
+	// absent in a pre-M12 or forward snapshot -> stays false.
+	w.rollingBack = false
+	if rb, ok := snapshot["rolling_back"].(bool); ok {
+		w.rollingBack = rb
+	}
+
+	// M12 ph49: the durable rollback trigger cause. Reset first (a resume that is no
+	// longer rolling back clears it); absent in a pre-ph49 snapshot -> TriggerNone. With
+	// UseNumber the value arrives as a json.Number.
+	w.triggerCause = TriggerNone
+	if tc, ok := snapshot["trigger_cause"].(json.Number); ok {
+		// Bounds-guard the conversion: a valid cause is 0..TriggerDeadlineExceeded; a
+		// malformed/forged value stays TriggerNone (reconstructCause then infers). This
+		// also satisfies gosec G115 (int64->uint8) with a real range check.
+		if n, err := tc.Int64(); err == nil && n >= 0 && n <= int64(TriggerDeadlineExceeded) {
+			w.triggerCause = TriggerCause(n)
+		}
+	}
+
 	return nil
 }
 
@@ -608,6 +695,8 @@ func (w *WorkflowData) Clone() *WorkflowData {
 		nodeStatus:     make(map[string]NodeStatus, len(w.nodeStatus)),
 		outputs:        make(map[string]interface{}, len(w.outputs)),
 		waits:          make(map[string]int64, len(w.waits)),
+		rollingBack:    w.rollingBack,  // M12: run-level saga marker (value type — a full copy)
+		triggerCause:   w.triggerCause, // M12 ph49: durable rollback trigger cause (value type)
 		stringInterner: newStringInterner(),
 	}
 

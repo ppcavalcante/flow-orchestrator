@@ -351,5 +351,5 @@ func classifyBlockedStatus(node *Node, data *WorkflowData, role depRole) (NodeSt
 // isTerminalStatus reports whether a node has reached a terminal state and will
 // not transition further within a run.
 func isTerminalStatus(status NodeStatus) bool {
-	return status == Completed || status == Failed || status == Skipped || status == Bypassed
+	return status == Completed || status == Failed || status == Skipped || status == Bypassed || status == Compensated || status == CompensationFailed
 }

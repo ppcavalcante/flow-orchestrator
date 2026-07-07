@@ -18,6 +18,8 @@ type NodeBuilder struct {
 	retryCount      int
 	timeout         time.Duration
 	continueOnError bool
+	compensation    Action // M12 saga: optional compensating action (WithCompensation)
+	compensationErr error  // stores error if WithCompensation received an unsupported type
 	workflow        *WorkflowBuilder
 }
 
@@ -205,6 +207,27 @@ func (n *NodeBuilder) WithContinueOnError() *NodeBuilder {
 	return n
 }
 
+// WithCompensation sets the compensating action for this node (M12 saga). If the
+// workflow fails with a hard error and rolls back, a Completed node's compensation
+// is invoked in reverse-topological order under a FRESH context to durably undo its
+// effect, and the node is then marked Compensated. Accepts an Action or a
+// func(ctx, *WorkflowData) error (the same forms as WithAction). An unsupported
+// type is recorded and reported by Build(). A compensation MUST be idempotent — it
+// may be re-invoked after a crash mid-rollback (at-least-once); the executor passes
+// it a stable IdempotencyKey handle. A node with no compensation is a rollback
+// no-op. Returns the builder for method chaining.
+func (n *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder {
+	switch a := action.(type) {
+	case Action:
+		n.compensation = a
+	case func(ctx context.Context, data *WorkflowData) error:
+		n.compensation = ActionFunc(a)
+	default:
+		n.compensationErr = fmt.Errorf("unsupported compensation type: %T", action)
+	}
+	return n
+}
+
 // Build creates a DAG from the workflow definition.
 // Returns an error if the workflow definition is invalid (e.g., has cycles).
 func (b *WorkflowBuilder) Build() (*DAG, error) {
@@ -269,6 +292,9 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 		if builder.actionErr != nil {
 			return nil, fmt.Errorf("node %s has invalid action: %w", builder.name, builder.actionErr)
 		}
+		if builder.compensationErr != nil {
+			return nil, fmt.Errorf("node %s has invalid compensation: %w", builder.name, builder.compensationErr)
+		}
 		if builder.action == nil {
 			return nil, fmt.Errorf("node %s has no action defined", builder.name)
 		}
@@ -286,6 +312,7 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 		if builder.continueOnError {
 			node.WithContinueOnError()
 		}
+		node.Compensation = builder.compensation // M12 saga: nil when no WithCompensation
 
 		// Add node to DAG
 		if err := dag.AddNode(node); err != nil {

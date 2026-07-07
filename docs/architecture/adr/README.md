@@ -56,6 +56,7 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 | [0008](0008-layered-bounds-guard-trust-reratify.md) | Layered bounds guard for FlatBuffers Load; trust re-ratification | Accepted | M4 |
 | [0009](0009-durable-continuations-waiting-status.md) | Durable continuations — the `Waiting` status and "suspend is a crash you chose" | Accepted | M10 |
 | [0010](0010-conditional-branching-bypassed-status.md) | Conditional branching — the `Bypassed` status, structured `ChoiceNode`/`MergeNode`, and the cause-aware gate | Accepted | M11 |
+| [0011](0011-saga-compensation-durable-rollback.md) | Saga / compensation — durable rollback, reverse-topological order, and the honest `SagaError` partition | Accepted | M12 |
 
 ## How to Create a New ADR
 

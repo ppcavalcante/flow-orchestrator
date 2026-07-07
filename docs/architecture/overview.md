@@ -12,9 +12,15 @@ Flow Orchestrator was created with several core design goals:
 4. **Durable Continuations**: Suspend on an external event (a durable timer, an
    inbound signal, or a data condition) and resume later — with no mandatory
    background service and no determinism tax (added v0.10.0)
-5. **Observability**: Comprehensive metrics for monitoring and optimization
-6. **Extensibility**: Support for multiple orchestration patterns
-7. **Embeddability**: Clean API for integration into any Go application
+5. **Conditional Branching**: True workflow-level branching — a `ChoiceNode` routes to
+   one branch (the rest `Bypassed`) and a `MergeNode` OR-joins them; structured and
+   formally verified (added v0.11.0)
+6. **Saga / Compensation**: Durable rollback — declare a compensating action with
+   `WithCompensation`, and on failure the engine undoes `Completed` nodes in
+   reverse-topological order, crash-safe and best-effort (added v0.12.0)
+7. **Observability**: Comprehensive metrics for monitoring and optimization
+8. **Extensibility**: Support for multiple orchestration patterns
+9. **Embeddability**: Clean API for integration into any Go application
 
 ## Core Architecture
 

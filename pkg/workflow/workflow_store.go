@@ -750,6 +750,15 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 		fb.WorkflowStateAddWaits(builder, waitsVector)
 	}
 
+	// M12: run-level saga rollback marker. Additive scalar bool (field id 9), rides
+	// the SAME atomic snapshot as node statuses — one write commits state + the
+	// forward-vs-rollback intent with no torn write. Old buffers read false.
+	fb.WorkflowStateAddRollingBack(builder, data.IsRollingBack())
+
+	// M12 ph49: the rollback trigger cause. Additive scalar ubyte (field id 10), rides
+	// the same atomic snapshot. Old buffers read 0 = TriggerNone.
+	fb.WorkflowStateAddTriggerCause(builder, byte(data.TriggerCause()))
+
 	workflowState := fb.WorkflowStateEnd(builder)
 
 	// Finish the buffer
@@ -963,6 +972,19 @@ func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err erro
 		}
 	}
 
+	// M12: run-level saga rollback marker (additive scalar bool, field id 9). Absent
+	// in pre-M12 buffers -> RollingBack() returns the false default -> a forward run,
+	// loaded unchanged. A rolling_back run re-enters the rollback drive on resume.
+	data.SetRollingBack(fbState.RollingBack())
+
+	// M12 ph49: the rollback trigger cause (additive scalar ubyte, field id 10). Absent
+	// in pre-ph49 buffers -> 0 = TriggerNone -> reconstructCause falls to inference.
+	// Bounds-guarded for decoder symmetry with the JSON path (review ph49-F1): an
+	// out-of-range byte from a corrupt/forged buffer leaves TriggerNone.
+	if b := fbState.TriggerCause(); b <= byte(TriggerDeadlineExceeded) {
+		data.SetTriggerCause(TriggerCause(b))
+	}
+
 	return data, nil
 }
 
@@ -1037,6 +1059,10 @@ func fbStatusToNodeStatus(status fb.NodeStatus) NodeStatus {
 		return Waiting
 	case fb.NodeStatusBypassed:
 		return Bypassed
+	case fb.NodeStatusCompensated:
+		return Compensated
+	case fb.NodeStatusCompensationFailed:
+		return CompensationFailed
 	default:
 		return Pending
 	}
@@ -1153,6 +1179,10 @@ func statusToFBStatus(status NodeStatus) fb.NodeStatus {
 		return fb.NodeStatusWaiting
 	case Bypassed:
 		return fb.NodeStatusBypassed
+	case Compensated:
+		return fb.NodeStatusCompensated
+	case CompensationFailed:
+		return fb.NodeStatusCompensationFailed
 	default:
 		return fb.NodeStatusPending
 	}

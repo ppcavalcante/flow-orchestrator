@@ -201,8 +201,32 @@ func (rcv *WorkflowState) WaitsLength() int {
 	return 0
 }
 
+func (rcv *WorkflowState) RollingBack() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *WorkflowState) MutateRollingBack(n bool) bool {
+	return rcv._tab.MutateBoolSlot(22, n)
+}
+
+func (rcv *WorkflowState) TriggerCause() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *WorkflowState) MutateTriggerCause(n byte) bool {
+	return rcv._tab.MutateByteSlot(24, n)
+}
+
 func WorkflowStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(11)
 }
 func WorkflowStateAddWorkflowId(builder *flatbuffers.Builder, workflowId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(workflowId), 0)
@@ -251,6 +275,12 @@ func WorkflowStateAddWaits(builder *flatbuffers.Builder, waits flatbuffers.UOffs
 }
 func WorkflowStateStartWaitsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func WorkflowStateAddRollingBack(builder *flatbuffers.Builder, rollingBack bool) {
+	builder.PrependBoolSlot(9, rollingBack, false)
+}
+func WorkflowStateAddTriggerCause(builder *flatbuffers.Builder, triggerCause byte) {
+	builder.PrependByteSlot(10, triggerCause, 0)
 }
 func WorkflowStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -7,33 +7,39 @@ import "strconv"
 type NodeStatus int8
 
 const (
-	NodeStatusPending   NodeStatus = 0
-	NodeStatusRunning   NodeStatus = 1
-	NodeStatusCompleted NodeStatus = 2
-	NodeStatusFailed    NodeStatus = 3
-	NodeStatusSkipped   NodeStatus = 4
-	NodeStatusWaiting   NodeStatus = 5
-	NodeStatusBypassed  NodeStatus = 6
+	NodeStatusPending            NodeStatus = 0
+	NodeStatusRunning            NodeStatus = 1
+	NodeStatusCompleted          NodeStatus = 2
+	NodeStatusFailed             NodeStatus = 3
+	NodeStatusSkipped            NodeStatus = 4
+	NodeStatusWaiting            NodeStatus = 5
+	NodeStatusBypassed           NodeStatus = 6
+	NodeStatusCompensated        NodeStatus = 7
+	NodeStatusCompensationFailed NodeStatus = 8
 )
 
 var EnumNamesNodeStatus = map[NodeStatus]string{
-	NodeStatusPending:   "Pending",
-	NodeStatusRunning:   "Running",
-	NodeStatusCompleted: "Completed",
-	NodeStatusFailed:    "Failed",
-	NodeStatusSkipped:   "Skipped",
-	NodeStatusWaiting:   "Waiting",
-	NodeStatusBypassed:  "Bypassed",
+	NodeStatusPending:            "Pending",
+	NodeStatusRunning:            "Running",
+	NodeStatusCompleted:          "Completed",
+	NodeStatusFailed:             "Failed",
+	NodeStatusSkipped:            "Skipped",
+	NodeStatusWaiting:            "Waiting",
+	NodeStatusBypassed:           "Bypassed",
+	NodeStatusCompensated:        "Compensated",
+	NodeStatusCompensationFailed: "CompensationFailed",
 }
 
 var EnumValuesNodeStatus = map[string]NodeStatus{
-	"Pending":   NodeStatusPending,
-	"Running":   NodeStatusRunning,
-	"Completed": NodeStatusCompleted,
-	"Failed":    NodeStatusFailed,
-	"Skipped":   NodeStatusSkipped,
-	"Waiting":   NodeStatusWaiting,
-	"Bypassed":  NodeStatusBypassed,
+	"Pending":            NodeStatusPending,
+	"Running":            NodeStatusRunning,
+	"Completed":          NodeStatusCompleted,
+	"Failed":             NodeStatusFailed,
+	"Skipped":            NodeStatusSkipped,
+	"Waiting":            NodeStatusWaiting,
+	"Bypassed":           NodeStatusBypassed,
+	"Compensated":        NodeStatusCompensated,
+	"CompensationFailed": NodeStatusCompensationFailed,
 }
 
 func (v NodeStatus) String() string {

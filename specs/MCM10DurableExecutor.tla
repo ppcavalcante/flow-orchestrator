@@ -27,7 +27,7 @@ MCDeps  == { <<n1,n2>>, <<n1,n3>>, <<n2,n4>>, <<n3,n4>> }
 MCFireAt == [n \in MCNodes |-> IF n = n2 THEN 2 ELSE 0]
 
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause
 
 \* M11 OR-join topology is EMPTY for the M10 diamond config — the OR-join arm is
 \* inert, so this config re-runs the extended spec byte-behaviour-unchanged
@@ -39,8 +39,13 @@ MCMergeNodes     == {}
 MCChoiceBranches == [c \in {} |-> {}]
 MCChosenBranch   == [c \in {} |-> n1]
 MCMergeTails     == [m \in {} |-> {}]
+\* M12 saga arm empty -> inert -> M10 re-runs byte-behaviour-unchanged (preservation).
+MCSagaNodes    == {}
+MCCompFailSet  == {}
+MCSagaTrigger  == "none"
 
 INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
     ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
-    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails
+    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
+    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger
 =============================================================================

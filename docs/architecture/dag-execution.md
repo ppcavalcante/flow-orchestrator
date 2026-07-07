@@ -68,11 +68,15 @@ stateDiagram-v2
     Failed --> Running: Retry available
     Running --> Waiting: Suspension node parks (external event not ready)
     Waiting --> Running: Resume / Tick / signal delivery re-runs the node
+    Completed --> Compensated: Saga rollback undoes the node's effect
+    Completed --> CompensationFailed: Saga rollback attempted the compensation, it failed
 
     Completed --> [*]
     Failed --> [*]
     Skipped --> [*]
     Bypassed --> [*]
+    Compensated --> [*]
+    CompensationFailed --> [*]
 
     state Running {
         [*] --> Executing
@@ -118,6 +122,17 @@ stateDiagram-v2
 > OR-joins branches: it fires iff ≥1 taken branch-tail `Completed`, and is itself
 > `Bypassed` when every branch was bypassed. See
 > [Conditional branching](../reference/api-reference.md#conditional-branching).
+>
+> `Compensated` / `CompensationFailed` (added v0.12.0) are the **saga-rollback** terminals,
+> reached only from `Completed`. When a run fails (a hard `*ExecutionError` or a
+> caller-cancel/deadline) and the DAG declares compensations, the engine rolls back —
+> invoking each `Completed` node's compensation in reverse-topological order — and records
+> each `Compensated` (effect undone) or `CompensationFailed` (compensation attempted, failed;
+> effect NOT undone). Both are terminal and neither is a forward failure. A node that never
+> ran successfully (`Failed`/`Bypassed`/`Skipped`/`Waiting`/never-run) is never compensated.
+> The rollback is crash-safe (checkpointed per reverse level) and its honest partition is a
+> [`*SagaError`](../reference/api-reference.md#saga--compensation-added-v0120). See
+> [Saga / Compensation](../reference/api-reference.md#saga--compensation-added-v0120).
 
 ## Building a DAG
 

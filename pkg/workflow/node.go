@@ -46,6 +46,25 @@ const (
 	// that ALSO has a surviving taken (resolved) ancestor is Skipped, not
 	// Bypassed (the taken path wins — DEC-M11-P41-DIAMOND). (M11.)
 	Bypassed NodeStatus = "bypassed"
+	// Compensated indicates a node that Completed successfully and whose effect has
+	// since been durably UNDONE by its compensating action during a saga rollback
+	// (M12). It is TERMINAL: a compensated node never re-runs. It is reached ONLY
+	// from Completed — the rollback drive runs the compensation of each Completed
+	// compensable node in reverse-topological order and marks it Compensated on
+	// success. Distinct from Failed (the node's own action never failed) and from
+	// Skipped/Bypassed (those never ran at all); a Bypassed/Skipped/Waiting/never-run
+	// node is never compensated. (M12.)
+	Compensated NodeStatus = "compensated"
+	// CompensationFailed indicates a Completed node whose compensating action was
+	// attempted during a saga rollback and FAILED (after honoring RetryCount). It is
+	// TERMINAL. It is the honest counterpart of Compensated: best-effort rollback
+	// records each attempted node as Compensated (undo succeeded) or CompensationFailed
+	// (undo failed), and the aggregate *SagaError enumerates both. A saga that
+	// half-rolls-back must SAY so — a CompensationFailed node means its effect is NOT
+	// undone and needs operator attention. Durable (FB wire 8) so a crash after a
+	// failed compensation survives into ph48's resume without a silent re-attempt-clean.
+	// (M12 ph47.)
+	CompensationFailed NodeStatus = "compensation_failed"
 )
 
 // Node represents a unit of work in a workflow.
@@ -73,6 +92,15 @@ type Node struct {
 	// rest of the DAG continue, and dependents may inspect this node's Failed
 	// status and branch on it. Default false preserves fail-fast.
 	ContinueOnError bool
+
+	// Compensation is the optional compensating action for a saga (M12). When set,
+	// a run that fails with a hard error rolls back: after this node has Completed,
+	// its Compensation is invoked (reverse-topological order, fresh context) to
+	// durably undo the node's effect, and the node is then marked Compensated. Nil
+	// means nothing to undo — the node is a rollback no-op. A compensation MUST be
+	// idempotent: it may be re-invoked after a crash mid-rollback (at-least-once,
+	// M12 ph48), and the executor passes it a stable IdempotencyKey handle.
+	Compensation Action
 }
 
 // NewNode creates a new node with the given name and action

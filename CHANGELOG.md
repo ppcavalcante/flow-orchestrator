@@ -5,6 +5,68 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0-alpha]
+
+**M12 — Saga / Compensation (durable rollback).** A workflow can now *undo itself*: any node
+may declare a compensating action via `NodeBuilder.WithCompensation(action)`, and when the run
+fails (a hard node failure) or is canceled/times out, the engine runs each **`Completed`** node's
+compensation in **reverse-topological order** — unwinding the successful work back-to-front. The
+rollback is **crash-safe**: it checkpoints after each reverse level, and a crash *mid-rollback*
+resumes into the rollback drive (never re-running forward) and finishes exactly once. It is
+**honest**: a typed `SagaError` enumerates the exact partition of the run's completed work —
+`{compensated ⊎ failedToCompensate ⊎ skipped}` — so a rollback where a compensation itself fails
+never masquerades as clean, and a rolled-back run is never reported successful. The whole
+milestone is **ADDITIVE — NO breaking changes**: two new terminal statuses (`Compensated` wire 7,
+`CompensationFailed` wire 8), new durable fields (`rolling_back`, `trigger_cause`), and new
+builder/API surface (`WithCompensation`, `WithRollbackTimeout`, `SagaError`,
+`CompensationIdempotencyKey`, `ErrRolledBack`); existing DAGs, stores, and `DAG.Execute`'s
+signature are unchanged, and a workflow that declares **no** compensation takes the pre-M12 path
+**byte-for-byte** (the failure trigger is inert). The moat holds: **no determinism tax** (the
+non-saga hot path benchmarks identically to the frozen pre-M12 baseline — 283/277 allocs, ±0%),
+and the compensation/abort semantics — reverse-topological order, the honest partition, crash-safe
+rollback, and trigger-cause fidelity across a crash — are **machine-checked exhaustively in TLA+**
+(6 bite-proven invariants over a diamond saga under `MaxCrashes=1`). The in-code version constant
+is `0.12.0-alpha`; every tag is a pre-release, so `go get @latest` resolves to it. See
+[docs/guides/workflow-patterns.md](docs/guides/workflow-patterns.md),
+[docs/architecture/adr/0011-saga-compensation-durable-rollback.md](docs/architecture/adr/0011-saga-compensation-durable-rollback.md),
+and [specs/README.md](specs/README.md).
+
+> **Operator note (trust boundary):** compensation runs your declared undo code on the rollback
+> path. As with all persisted state (the M9 durable threat model, T5), the store is a trusted
+> input — a forged `rolling_back` marker in the store can drive a spurious rollback, and the
+> idempotency contract bounds *double*-apply, not a spurious *first* trigger. Protect the store
+> (the library sets `0600`; ensure directory ownership/integrity for the embedded/single-tenant
+> deployment model). See ADR-0011 and the security notes.
+
+### Added (0.12.0-alpha — M12)
+- **`WithCompensation(action)` on `NodeBuilder`** — declare a node's compensating (undo) action.
+  A node with a compensation that `Completed` is compensated on rollback; without one it is a
+  rollback no-op (nothing to undo).
+- **`Compensated` (8th) and `CompensationFailed` (9th) terminal `NodeStatus` values** — additive
+  FlatBuffers wire slots 7 and 8. `Compensated` = the node's effect was successfully undone;
+  `CompensationFailed` = the compensation itself failed (best-effort continues; the effect is
+  **not** undone and the `SagaError` surfaces it).
+- **`SagaError`** — a typed error enumerating the exact `{Compensated, FailedToCompensate,
+  Skipped}` partition of the run's completed nodes, wrapping the trigger `Cause` (`errors.As`
+  reaches both). Returned when ≥1 compensation failed; a clean rollback returns the trigger cause,
+  never a false-clean nil.
+- **`WithRollbackTimeout(d)`** — a scoped deadline bounding the rollback (default 5m; negative =
+  unbounded). A hung compensation can never hang the run — past the deadline the node is recorded
+  `CompensationFailed` and the rollback proceeds.
+- **`CompensationIdempotencyKey(ctx)`** — the stable per-node dedup handle a compensation reads.
+  Rollback is **at-least-once** (a crash mid-rollback re-runs the level); the key is byte-identical
+  across the re-run so a downstream system can dedupe. **Compensations MUST be idempotent** — this
+  is a correctness contract, not a nicety.
+- **`ErrRolledBack`** — the never-nil floor: a rolled-back run whose trigger cause is not
+  reconstructable still surfaces this sentinel, never `nil` (a rolled-back run is never reported
+  successful).
+- **Durable `trigger_cause` discriminator** — journals *why* a rollback was triggered
+  (failure / canceled / deadline) so a resumed rollback recovers the true cause across a crash
+  (a cancel stays a cancel, not a mis-inferred node failure).
+- **Formal + property verification** — a TLA+ compensation/abort arm (6 bite-proven invariants,
+  exhaustive under `MaxCrashes=1`) and gopter properties over saga DAGs (reverse-topo order, the
+  honest partition, crash-at-every-position resume).
+
 ## [0.11.0-alpha]
 
 **M11 — Conditional Branching (ChoiceNode + OR-join).** A workflow can now *branch on
@@ -533,7 +595,8 @@ plus the M1 correctness/security fixes that were never recorded in this file.
 - Limited persistence options
 - Documentation is being improved
 
-[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.11.0-alpha...HEAD
+[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.12.0-alpha...HEAD
+[0.12.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.12.0-alpha
 [0.11.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.11.0-alpha
 [0.7.2-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.2-alpha
 [0.7.1-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.1-alpha

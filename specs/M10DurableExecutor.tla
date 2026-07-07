@@ -70,9 +70,17 @@ CONSTANTS
                      \* then bypass it after a crash reverts an un-checkpointed decision -> exec>0 for a
                      \* bypassed node), violating the resume-determinism ph43 §1 proved. Explore multiple
                      \* routes by running the config once per ChosenBranch value.
-    MergeTails       \* [MergeNodes -> SUBSET Nodes]: the branch-TAIL predecessors the merge OR-joins (the
+    MergeTails,      \* [MergeNodes -> SUBSET Nodes]: the branch-TAIL predecessors the merge OR-joins (the
                      \* count set). The structural always-`done` Choice-dep is a dep of the merge but is
                      \* NOT in MergeTails, so it is EXCLUDED from the taken count (anti-vacuity, MAJOR-1)
+    \* --- M12 saga compensation/abort arm (phase 50). ALL default to {} / "none" for the
+    \* M10/M11 configs, so the saga arm is INERT and M10/M11 re-run byte-behaviour-unchanged
+    \* (preservation-by-re-verification, DEC-M12-P50-PRESERVE). ---
+    SagaNodes,       \* subset of Nodes that DECLARE a compensation (compensable). A run rolls back only
+                     \* when SagaNodes # {} (hasCompensations). Empty -> the saga arm never fires.
+    CompFailSet,     \* subset of SagaNodes whose COMPENSATION fails when run (best-effort -> CompensationFailed)
+    SagaTrigger      \* the trigger cause to model for this config: "failure" (a FailSet node fails) or
+                     \* "canceled"/"deadline" (a caller-cancel/deadline aborts the run). "none" = no saga.
 
 VARIABLES
     status,    \* status[n]: in-memory status in {pending,running,done,failed,skipped,waiting}
@@ -89,10 +97,16 @@ VARIABLES
     delivered, \* delivered[n]: a signal was EVER delivered for n (monotone, never cleared by Ack;
                \* durable). NoSignalLost keys off this: an apply implies a real delivery.
     applied,   \* applied[n]: how many times n's signal was CONSUMED/applied (count; for NoSignalLost)
-    recorded   \* recorded[n]: the RECORDED VALUE of n's applied signal — 0 (unset) or ApplyVal (the
+    recorded,  \* recorded[n]: the RECORDED VALUE of n's applied signal — 0 (unset) or ApplyVal (the
                \* one canonical value). The apply OVERWRITES to ApplyVal (set-not-accumulate), so it
                \* stays ApplyVal across any number of crash re-applies. NoDoubleApply (restated, ph39)
                \* is observable-idempotence over THIS value, not the apply count. (ph39 F3 closure.)
+    rollingBack, \* M12 (ph50): the durable run-level saga rollback marker. Set at the trigger and
+                 \* PERSISTED before any compensation, so it survives a crash (UNCHANGED on Crash/Recover
+                 \* — durable-directly, faithful to the marker-Save-before-drive ordering, ph46/48).
+    triggerCause \* M12 (ph50, ph49): the durable rollback trigger discriminator in {"none","failure",
+                 \* "canceled","deadline"}. Journaled WITH rollingBack; a resumed rollback recovers the
+                 \* TRUE cause from it, not an inference (TriggerCauseFidelity — the ph48-F2 shape).
 
 \* ApplyVal is the single canonical value a signal apply records — a constant, NOT a
 \* counter. An idempotent apply sets recorded[n] := ApplyVal every time; the recorded
@@ -101,7 +115,11 @@ VARIABLES
 \* falsifies NoDoubleApply — the anti-vacuity teeth.
 ApplyVal == 1
 
-vars == <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+\* M12 saga variables (phase 50). rollingBack: the durable run-level rollback marker;
+\* triggerCause: the journaled discriminator (ph49). Both are CONSTANT (false / "none")
+\* for the M10/M11 configs (SagaNodes = {} -> the saga arm is inert), so they add NO
+\* distinct states and M10/M11 re-run byte-behaviour-unchanged (DEC-M12-P50-PRESERVE).
+vars == <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 \* A node may run up to twice per (crash-reverted) attempt: once to park, once to
 \* complete after waking. Bounds exec finitely.
@@ -112,12 +130,17 @@ MaxRuns == 2 * (MaxCrashes + 1)
 \* upstream you needed failed). For an AND node a bypassed dep is neither Resolved
 \* nor a SkipCause — it is a distinct BYPASS cause (the Bypass/DiamondSkip actions);
 \* for a MergeNode a bypassed predecessor is SATISFIED (MergeResolved), not blocking.
-Statuses == {"pending","running","done","failed","skipped","waiting","bypassed"}
+\* 8th/9th statuses "compensated"/"compensation_failed" (M12 ph47/50): a Completed node
+\* whose compensating action was run during a saga rollback and SUCCEEDED (its effect is
+\* undone) resp. FAILED (its effect is NOT undone — best-effort). Both terminal; reached
+\* ONLY from "done" via the reverse-topological compensation pass.
+Statuses == {"pending","running","done","failed","skipped","waiting","bypassed",
+             "compensated","compensation_failed"}
 
 ------------------------------------------------------------------------
 (* Base scheduling helpers — mirror DurableExecutor.tla / Executor.tla.      *)
 
-Terminal == {"done", "failed", "skipped", "bypassed"}
+Terminal == {"done", "failed", "skipped", "bypassed", "compensated", "compensation_failed"}
 
 DepsOf(n) == { d \in Nodes : <<d, n>> \in Deps }
 
@@ -151,6 +174,8 @@ TypeOK ==
     /\ delivered \in [Nodes -> BOOLEAN]
     /\ applied   \in [Nodes -> 0..MaxRuns]
     /\ recorded  \in [Nodes -> 0..(ApplyVal * MaxRuns)]
+    /\ rollingBack  \in BOOLEAN
+    /\ triggerCause \in {"none","failure","canceled","deadline"}
 
 Init ==
     /\ status    = [n \in Nodes |-> "pending"]
@@ -166,6 +191,8 @@ Init ==
     /\ delivered = [n \in Nodes |-> FALSE]
     /\ applied   = [n \in Nodes |-> 0]
     /\ recorded  = [n \in Nodes |-> 0]
+    /\ rollingBack  = FALSE
+    /\ triggerCause = "none"
 
 ------------------------------------------------------------------------
 (* RUN actions (require the process to be up). *)
@@ -178,7 +205,7 @@ Start(n) ==
     /\ DepsResolved(n)
     /\ Cardinality(Running) < MaxConc
     /\ status' = [status EXCEPT ![n] = "running"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 (* Finish: a running node's action runs to completion. A SUSPENDABLE node may   *)
 (* COMPLETE here only once its wake event has fired; while ~wakeReady it parks   *)
@@ -195,7 +222,7 @@ Finish(n) ==
               /\ halted' = (halted \/ (n \notin ContinueOnError))
          ELSE /\ status' = [status EXCEPT ![n] = "done"]
               /\ UNCHANGED halted
-    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 (* Suspend: a running suspendable node whose wake event has NOT fired PARKS —    *)
 (* the non-terminal "waiting" status (the action ran and returned ErrSuspended,  *)
@@ -208,7 +235,7 @@ Suspend(n) ==
     /\ ~wakeReady[n]
     /\ status' = [status EXCEPT ![n] = "waiting"]
     /\ exec' = [exec EXCEPT ![n] = exec[n] + 1]
-    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 (* SendSignal: the external SIGNAL is DELIVERED to a non-timer suspendable node's   *)
 (* durable mailbox (the phase-37 enqueue, D37-03). UNFAIR + monotone (~delivered    *)
@@ -226,7 +253,7 @@ SendSignal(n) ==
     /\ ~delivered[n]
     /\ mailbox'   = [mailbox   EXCEPT ![n] = TRUE]
     /\ delivered' = [delivered EXCEPT ![n] = TRUE]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, applied, recorded>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, applied, recorded, rollingBack, triggerCause>>
 
 (* Consume: a signal node TAKES its mailbox and APPLIES the payload — the take→apply  *)
 (* step (D37-04). Enabled while the node is running or parked (waiting) AND its signal *)
@@ -250,7 +277,7 @@ Consume(n) ==
     \* a crash re-apply, writes the SAME ApplyVal, so recorded[n] is invariant. This is
     \* the observable-idempotence the restated NoDoubleApply asserts. (ph39 F3.)
     /\ recorded'  = [recorded  EXCEPT ![n] = ApplyVal]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, fireCount, mailbox, delivered>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, fireCount, mailbox, delivered, rollingBack, triggerCause>>
 
 (* Ack: drain the consumed signal from the mailbox — ONLY after the consuming        *)
 (* completion is DURABLE (journal[n] = "done"), the take→apply→Completed→checkpoint→  *)
@@ -264,7 +291,7 @@ Ack(n) ==
     /\ journal[n] = "done"
     /\ mailbox[n]
     /\ mailbox' = [mailbox EXCEPT ![n] = FALSE]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, delivered, applied, recorded>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, delivered, applied, recorded, rollingBack, triggerCause>>
 
 (* Wake: a waiting node whose event has fired RE-ENTERS (status -> pending) — the *)
 (* M9 resume path re-entered. The executor then re-runs it, and it completes      *)
@@ -275,14 +302,14 @@ Wake(n) ==
     /\ status[n] = "waiting"
     /\ wakeReady[n]
     /\ status' = [status EXCEPT ![n] = "pending"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 Skip(n) ==
     /\ up
     /\ status[n] = "pending"
     /\ HasSkipCauseDep(n)
     /\ status' = [status EXCEPT ![n] = "skipped"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 ------------------------------------------------------------------------
 (* M11 OR-JOIN actions (phase 44 — the ChoiceNode + MergeNode arm).           *)
@@ -322,7 +349,7 @@ ChoiceFinish(c) ==
                     IF nn = c THEN "done"
                     ELSE IF nn \in (ChoiceBranches[c] \ {ChosenBranch[c]}) THEN "bypassed"
                     ELSE status[nn]]
-    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 \* ChoiceFail (ph41 / 41-F1, phase-44 review 44-F1): a ChoiceNode with NO matching
 \* branch and NO default FAILS (non-coe -> halts the attempt) and leaves its branch
@@ -339,7 +366,7 @@ ChoiceFail(c) ==
     /\ exec'   = [exec   EXCEPT ![c] = exec[c] + 1]
     /\ status' = [status EXCEPT ![c] = "failed"]      \* branches left untouched (Pending) -> cascade Skips them
     /\ halted' = (halted \/ (c \notin ContinueOnError))
-    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 \* Bypass (classifyBlockedStatus rule 4): a non-merge node blocked SOLELY by
 \* bypassed dep(s) — all deps settled, >=1 bypassed, NONE a skip-cause, NONE
@@ -355,7 +382,7 @@ Bypass(n) ==
     /\ ~HasSkipCauseDep(n)
     /\ ~(\E d \in DepsOf(n) : Resolved(d))
     /\ status' = [status EXCEPT ![n] = "bypassed"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 \* DiamondSkip (rule 3 / D-03 / DEC-M11-P41-DIAMOND): a non-merge node with a
 \* bypassed dep AND a surviving taken (Resolved) ancestor is SKIPPED, not bypassed
@@ -369,7 +396,7 @@ DiamondSkip(n) ==
     /\ ~HasSkipCauseDep(n)
     /\ \E d \in DepsOf(n) : Resolved(d)
     /\ status' = [status EXCEPT ![n] = "skipped"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 \* MergeStart (ph42 launch-eligibility): a Merge is launch-eligible once ALL its
 \* predecessors are resolved-for-merge (a bypassed tail SATISFIES). It FIRES (runs,
@@ -385,7 +412,7 @@ MergeStart(m) ==
     /\ TakenTails(m) # {}
     /\ Cardinality(Running) < MaxConc
     /\ status' = [status EXCEPT ![m] = "running"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 \* MergeBypass (ph42 MH-2): a Merge whose every branch-tail is bypassed (0 taken) is
 \* itself bypassed (composes downward — the nested all-bypassed case).
@@ -405,7 +432,7 @@ MergeBypass(m) ==
     \* for safety proofs. Gating on ~halted here would MASK the separator bite (a
     \* failed-tail scenario is always halted), hiding the anti-vacuity teeth.
     /\ status' = [status EXCEPT ![m] = "bypassed"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 ------------------------------------------------------------------------
 (* DURABILITY actions (inherited from the M9 model). *)
@@ -418,14 +445,14 @@ Checkpoint ==
     /\ Running = {}
     /\ journal # status
     /\ journal' = status
-    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 Crash ==
     /\ up
     /\ crashes < MaxCrashes
     /\ up' = FALSE
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<status, halted, journal, exec, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<status, halted, journal, exec, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 (* Recover restores in-memory status from the journal AND RE-DERIVES wakeReady +     *)
 (* recorded from the DURABLE SUBSTRATE — crash-faithful (ph39 F3 closure, D39-02).   *)
@@ -465,7 +492,7 @@ Recover ==
                        IF n \in Suspendable /\ n \notin TimerNodes /\ journal[n] # "done"
                        THEN 0
                        ELSE recorded[n]]
-    /\ UNCHANGED <<journal, exec, crashes, clock, fireCount, mailbox, delivered, applied>>
+    /\ UNCHANGED <<journal, exec, crashes, clock, fireCount, mailbox, delivered, applied, rollingBack, triggerCause>>
 
 ------------------------------------------------------------------------
 (* TIMER actions (the phase-36 durable-timer dimension). *)
@@ -481,7 +508,7 @@ Recover ==
 Tick ==
     /\ clock < MaxTick
     /\ clock' = clock + 1
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 (* FireTimer: a timer node becomes DUE — the clock has reached its absolute         *)
 (* FireAt. This is the timer analog of FireEvent, but DETERMINISTIC and GUARANTEED  *)
@@ -499,7 +526,7 @@ FireTimer(n) ==
     /\ clock >= FireAt[n]
     /\ wakeReady' = [wakeReady EXCEPT ![n] = TRUE]
     /\ fireCount' = [fireCount EXCEPT ![n] = fireCount[n] + 1]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
 
 ------------------------------------------------------------------------
 (* Liveness scaffolding. *)
@@ -543,6 +570,116 @@ Settled == up /\ (\A n \in Nodes : ~Stuck(n))
 
 Done == Settled /\ UNCHANGED vars
 
+------------------------------------------------------------------------
+(* M12 SAGA compensation/abort arm (phase 50). INERT when SagaNodes = {} (the M10/M11 *)
+(* configs), so those re-run byte-behaviour-unchanged (DEC-M12-P50-PRESERVE). Models   *)
+(* the ph46-49 Go saga: a hard failure OR a caller-cancel arms a durable rolling_back   *)
+(* marker + journals the triggerCause; a REVERSE-topological, Completed-only pass       *)
+(* compensates each done compensable node (best-effort). Per-level checkpoint = the M10 *)
+(* journal (a non-checkpointed compensation reverts to `done` on Recover -> re-runs,    *)
+(* the LIVE-Completed guard, no phantom). rollingBack/triggerCause are durable-directly  *)
+(* (persisted at the trigger before any compensation -> UNCHANGED on Crash/Recover).    *)
+(*                                                                                       *)
+(* SUPERSET (intentional over-approximation, review 50-F1; the M9/M10/M11 discipline):   *)
+(* the forward Start action is gated on ~halted, NOT ~rollingBack, and Recover resets    *)
+(* halted -> a RESUMED rollback MAY start a still-pending forward node that the Go        *)
+(* executeLocked forward-vs-rollback switch forbids (it drives ONLY driveRollback on     *)
+(* resume). The model behaviours are therefore a SUPERSET of the code's; every SAFETY    *)
+(* invariant proven over the superset holds for the code. The extra states appear only    *)
+(* post-resume in the cancel config, where the COMPLETENESS liveness is NOT checked (it   *)
+(* is a failure/compfail-config property), so no liveness claim is distorted.            *)
+
+DependentsOf(n) == { m \in Nodes : <<n, m>> \in Deps }
+
+\* Reverse-topological readiness: n may compensate only once every node that DEPENDS on n
+\* is no longer forward-live (not `done`/`running`) — its dependents are undone first.
+DownReady(n) == \A m \in DependentsOf(n) : status[m] \notin {"done", "running"}
+
+\* A hard (non-coe) failure that is DURABLE — present in status (fresh, this attempt) OR in
+\* the journal (reloaded by Recover into a fresh attempt where `halted` has reset). The trigger
+\* keys off THIS, not the in-memory `halted`: on resume the executor re-detects the failure from
+\* the durable journal and re-enters the rollback (a crash between fail and trigger must NOT lose
+\* the rollback — the ph50 liveness bug this fixes). Mirrors HardFailureHalts's durable/fresh split.
+HardFailurePresent ==
+    \E n \in Nodes : n \notin ContinueOnError /\ (status[n] = "failed" \/ journal[n] = "failed")
+
+\* TriggerRollback: a hard (non-coe) failure (fresh or reloaded) with a saga declared -> arm the
+\* durable rollback with cause "failure". Journals the cause with the marker (ph49). Only when
+\* SagaTrigger models a failure.
+TriggerRollback ==
+    /\ up /\ ~rollingBack
+    /\ SagaNodes # {}
+    /\ SagaTrigger = "failure"
+    /\ HardFailurePresent
+    /\ rollingBack'  = TRUE
+    /\ triggerCause' = "failure"
+    \* The rolling_back-marker Save persists the CURRENT state (all completed statuses +
+    \* the marker) — modelling that the forward run's per-level checkpoints have already
+    \* made every completed node DURABLE by the time the failing level triggers rollback.
+    \* Without this a crash mid-rollback could revert a done node to its stale pending
+    \* journal, orphaning it (neither re-runnable — its dep is compensated — nor
+    \* compensable — it is not done); the flush is the faithful per-level-checkpoint model.
+    /\ journal' = status
+    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* Cancel: a caller-cancel / deadline aborts a still-forward run -> arm rollback with the
+\* ctx cause. It marks ONE running node `failed` (the mid-level-cancel witness — the node
+\* whose action returned ctx.Err(); ph48-F2), so a Failed node exists WITH cause # failure
+\* — the exact shape TriggerCauseFidelity pins. Requires a `done` node to have something
+\* to roll back.
+Cancel ==
+    /\ up /\ ~rollingBack /\ ~halted
+    /\ SagaNodes # {}
+    /\ SagaTrigger \in {"canceled", "deadline"}
+    /\ \E d \in Nodes : status[d] = "done"
+    /\ \E r \in Nodes :
+         /\ status[r] = "running"
+         /\ status'  = [status EXCEPT ![r] = "failed"]
+         \* Save persists the post-cancel state (completed nodes durable + r failed) — the
+         \* same per-level-checkpoint flush as TriggerRollback, so a crash mid-rollback
+         \* reverts to the durable completions, not a stale pending journal.
+         /\ journal' = [status EXCEPT ![r] = "failed"]
+         \* The cancelled node's action RAN (it returned ctx.Err() before failing), so it
+         \* executed — exec++ keeps ExecFidelity (a failed node executed at least once), the
+         \* faithfulness the review-50-F2 M10-suite re-check surfaced.
+         /\ exec'    = [exec EXCEPT ![r] = exec[r] + 1]
+    /\ rollingBack'  = TRUE
+    /\ triggerCause' = SagaTrigger
+    /\ halted' = TRUE
+    /\ UNCHANGED <<up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+
+\* Compensate: a rolling-back run undoes a `done` compensable node whose compensation
+\* SUCCEEDS. LIVE-Completed guard (status = "done", not journal — a crash-reverted node is
+\* re-driven); reverse-topological (DownReady). Marks "compensated" AND bumps exec (the
+\* effect) ATOMICALLY — mark-and-effect together is what makes CrashSafeRollback hold.
+Compensate(n) ==
+    /\ up /\ rollingBack
+    /\ n \in SagaNodes /\ n \notin CompFailSet
+    /\ status[n] = "done"
+    /\ DownReady(n)
+    /\ status' = [status EXCEPT ![n] = "compensated"]
+    /\ exec'   = [exec EXCEPT ![n] = exec[n] + 1]
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+
+\* CompensateFail: a compensation that FAILS (best-effort) -> "compensation_failed"; the
+\* pass continues (other nodes still compensate). exec bumps (the attempt ran).
+CompensateFail(n) ==
+    /\ up /\ rollingBack
+    /\ n \in SagaNodes /\ n \in CompFailSet
+    /\ status[n] = "done"
+    /\ DownReady(n)
+    /\ status' = [status EXCEPT ![n] = "compensation_failed"]
+    /\ exec'   = [exec EXCEPT ![n] = exec[n] + 1]
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+
+------------------------------------------------------------------------
+
+\* Each core forward/durable/OR-join action leaves the saga markers UNCHANGED in its OWN
+\* body (the `, rollingBack, triggerCause` appended to every UNCHANGED tuple above), so the
+\* RAW actions fully assign all 15 vars. This is load-bearing for LIVENESS: Fairness's
+\* WF_vars references the raw actions, and TLC's `<<A>>_vars` reads vars' — an action that
+\* left a saga var unconstrained would break the liveness read (the ph50 root cause). Inert
+\* for M10/M11 (SagaNodes = {} -> the saga vars never change), so those re-run unchanged.
 Next == \/ \E n \in Nodes : (Start(n) \/ Finish(n) \/ Skip(n) \/ Suspend(n) \/ Wake(n))
         \/ \E n \in Nodes : (SendSignal(n) \/ Consume(n) \/ Ack(n))
         \/ \E n \in Nodes : FireTimer(n)
@@ -554,7 +691,81 @@ Next == \/ \E n \in Nodes : (Start(n) \/ Finish(n) \/ Skip(n) \/ Suspend(n) \/ W
         \/ Checkpoint
         \/ Crash
         \/ Recover
+        \* M12 saga actions (inert when SagaNodes = {}).
+        \/ TriggerRollback
+        \/ Cancel
+        \/ \E n \in Nodes : Compensate(n)
+        \/ \E n \in Nodes : CompensateFail(n)
         \/ Done
+
+------------------------------------------------------------------------
+(* M12 SAGA safety invariants (phase 50) — each with an ISOLATED falsifying bite   *)
+(* (falsify->restore; qa re-runs on a scratch extract). VACUOUS for M10/M11         *)
+(* (SagaNodes = {} -> no node ever compensated -> the antecedents never fire).      *)
+
+\* A COMPLETABLE saga node: compensable AND its forward action succeeds (not in FailSet),
+\* so it reaches "done" and HAS an effect to undo. In the diamond config: {s, a, b}.
+CompletableSaga(n) == n \in SagaNodes /\ n \notin FailSet
+
+\* Every completable saga node has reached a compensation terminal (the drained-rollback
+\* shape). Mid-rollback this is FALSE (a not-yet-compensated node is still "done"); it
+\* becomes permanently true only once the drive completes — hence a LIVENESS property.
+AllCompletableCompensated ==
+    \A n \in Nodes : CompletableSaga(n) => status[n] \in {"compensated","compensation_failed"}
+
+(* Inv 1 — EveryCompletedCompensableCompensatedOnce (LIVENESS). The rollback DRAINS: *)
+(* eventually-always every completable saga node is Compensated/CompensationFailed —  *)
+(* none is skipped by the drive, and (status being terminal) each is reached once.    *)
+(* This is a final-state property, NOT per-state safety (mid-rollback a node is still  *)
+(* legitimately "done"). Bite: guard Compensate/CompensateFail on a STRICT SUBSET of   *)
+(* SagaNodes (skip a node) -> that node never compensates -> <>[] never holds -> RED.  *)
+EveryCompletedCompensableCompensatedOnce == <>[]AllCompletableCompensated
+
+(* Inv 2 — ReverseTopoOrderRespected. A compensated node's dependents are ALREADY undone     *)
+(* (none still forward-live). Bite: replace DownReady with TRUE (forward order — compensate  *)
+(* s while a,b still "done") -> a compensated node with a live dependent -> FALSIFIES.        *)
+ReverseTopoOrderRespected ==
+    \A n \in Nodes :
+        status[n] \in {"compensated","compensation_failed"} =>
+            (\A m \in DependentsOf(n) : status[m] \notin {"done","running"})
+
+(* Inv 3 — NoUncompletedNodeCompensated. ONLY a completable saga node (one that reached      *)
+(* "done") is ever compensated; a FailSet node (failed forward, no effect) or a non-saga     *)
+(* node never is. Bite: drop the `status = "done"` guard in Compensate -> the Failed node t  *)
+(* compensates -> a FailSet node shows compensated -> FALSIFIES.                              *)
+NoUncompletedNodeCompensated ==
+    \A n \in Nodes :
+        status[n] \in {"compensated","compensation_failed"} => CompletableSaga(n)
+
+(* Inv 4 — CrashSafeRollback. A DURABLY-compensated node's effect RAN: exec >= 2 = forward   *)
+(* completion (>=1) + the compensation (+1), marked-and-effected ATOMICALLY. Bite: mark       *)
+(* Compensated BEFORE the effect (drop the exec bump in Compensate) -> a journalled-           *)
+(* compensated node with exec < 2 -> FALSIFIES (a crash would lose the effect, keep the mark). *)
+CrashSafeRollback ==
+    \A n \in Nodes :
+        journal[n] \in {"compensated","compensation_failed"} => exec[n] >= 2
+
+(* Inv 5 — HonestPartition (SAFETY). The best-effort partition is HONESTLY LABELLED: a node   *)
+(* whose compensation SUCCEEDED is "compensated" (its comp did NOT fail — n \notin CompFailSet), *)
+(* and a node marked "compensation_failed" is one whose comp DID fail (n \in CompFailSet). The   *)
+(* success/failure buckets are never conflated — a rolled-back run's report distinguishes an    *)
+(* undone effect from a stuck one. (Distinct from NoUncompletedNodeCompensated, which is "no     *)
+(* phantom member"; this is "no MIS-labelled member".) Bite: make CompensateFail mark            *)
+(* "compensated" (report a FAILED compensation as a success) -> a CompFailSet node shows         *)
+(* compensated -> FALSIFIES. Needs the CompFailSet # {} config to be non-vacuous.                *)
+HonestPartition ==
+    /\ (\A n \in Nodes : status[n] = "compensated"          => n \notin CompFailSet)
+    /\ (\A n \in Nodes : status[n] = "compensation_failed" => n \in CompFailSet)
+
+(* Inv 6 — TriggerCauseFidelity (NEW, ph49). The RECOVERED cause reads the JOURNAL             *)
+(* (triggerCause), matching the actual trigger (SagaTrigger) — never relabeled. RecoveredCause *)
+(* is the faithful reader. Bite: reconstruct the cause from Failed nodes ignoring the journal  *)
+(* (RecoveredCause == IF \E n : status[n]="failed" THEN "failure" ELSE triggerCause) -> a      *)
+(* CANCELED run with a Failed node resolves to "failure" != triggerCause -> FALSIFIES (the     *)
+(* ph48-F2 shape, caught formally in the cancel config).                                       *)
+RecoveredCause == triggerCause
+TriggerCauseFidelity ==
+    rollingBack => (RecoveredCause = triggerCause /\ triggerCause = SagaTrigger)
 
 (* Engine obligations are weak-fair; FireEvent, Crash, Checkpoint are UNFAIR      *)
 (* (environment / optional). Wake's WF and Tick's WF are each broken out on their  *)
@@ -572,6 +783,12 @@ Fairness ==
     /\ \A c \in ChoiceNodes : WF_vars(ChoiceFinish(c) \/ ChoiceFail(c))
     /\ \A n \in Nodes : WF_vars(Bypass(n) \/ DiamondSkip(n))
     /\ \A m \in MergeNodes : WF_vars(MergeStart(m) \/ MergeBypass(m))
+    \* M12 saga engine obligations are weak-fair (inert when SagaNodes = {}): a hard
+    \* failure eventually arms rollback, and a rolling-back run eventually compensates
+    \* every done compensable node -> the run drains. Cancel is UNFAIR (an environment
+    \* abort, like a signal — it may or may not happen).
+    /\ WF_vars(TriggerRollback)
+    /\ \A n \in Nodes : WF_vars(Compensate(n) \/ CompensateFail(n))
     /\ \A n \in Nodes : WF_vars(Wake(n))
     /\ \A n \in Nodes : WF_vars(FireTimer(n))
     /\ \A n \in Nodes : WF_vars(Consume(n))
@@ -642,6 +859,16 @@ ExecFidelity ==
 NoDoubleCommit ==
     \A n \in Nodes :
         (journal[n] = "done") => (status[n] = "done")
+
+\* NoDoubleCommitSaga (ph50, review 50-F2): the saga-restated form of NoDoubleCommit. A
+\* durably-committed ("done") node's in-memory status stays a COMMITTED lineage — still
+\* "done", or advanced by the rollback to "compensated"/"compensation_failed" (never reverts
+\* to a pre-commit status). The plain NoDoubleCommit is FALSE under compensation (a done node
+\* becomes "compensated" while its journal still reads "done" until the next Checkpoint); this
+\* is the faithful restatement checked in the saga configs (M10/M11 keep the strict form).
+NoDoubleCommitSaga ==
+    \A n \in Nodes :
+        (journal[n] = "done") => (status[n] \in {"done","compensated","compensation_failed"})
 
 ------------------------------------------------------------------------
 (* SAFETY — NEW M10 claims. *)

@@ -2,7 +2,7 @@
 
 namespace workflow;
 
-enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4, Waiting = 5, Bypassed = 6 }
+enum NodeStatus:byte { Pending = 0, Running = 1, Completed = 2, Failed = 3, Skipped = 4, Waiting = 5, Bypassed = 6, Compensated = 7, CompensationFailed = 8 }
 
 table KeyValueString {
   key:string;
@@ -61,7 +61,9 @@ table WorkflowState {
   node_statuses:[NodeStatusEntry];
   node_outputs:[NodeOutputEntry];
   timestamp:long; // Unix timestamp in milliseconds
-  waits:[TimerWaitEntry]; // M10 additive: durable timer fireAt per parked node (highest field id)
+  waits:[TimerWaitEntry]; // M10 additive: durable timer fireAt per parked node
+  rolling_back:bool; // M12 additive: run-level saga rollback marker
+  trigger_cause:ubyte; // M12 ph49 additive: rollback trigger cause {none=0,failure,canceled,deadline} (highest field id; old buffers read 0=none)
 }
 
 root_type WorkflowState; 

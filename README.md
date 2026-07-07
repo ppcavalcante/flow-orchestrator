@@ -32,6 +32,7 @@ It is a **durable execution core**: a workflow that crashes mid-run can be resum
 - **Type-Safe Data**: Optional generic typed keys (`Key[T]`) over the shared data store for compile-time-checked producer/consumer contracts
 - **Resilient**: Per-node continue-on-error lets selected steps fail without halting the workflow (default is fail-fast)
 - **Conditional Branching**: True workflow-level branching — a `ChoiceNode` routes to exactly one branch (first-match, data-driven predicate) and marks the rest `Bypassed` (they do not run); a `MergeNode` OR-joins the branches. Structured and declared (no dynamic graph mutation, no determinism tax), and the branching semantics are machine-checked in TLA+
+- **Saga / Compensation**: Durable rollback — declare a compensating action with `WithCompensation`, and on failure (or caller-cancel) the engine undoes the `Completed` nodes in reverse-topological order. Crash-safe (the rollback itself resumes after a crash), best-effort with a typed `SagaError` partition, and machine-checked in TLA+
 - **Rigorously Tested & Formally Modeled**: Property-based tests (gopter) over random DAGs plus a TLC-checked TLA+ model of the executor verify the core invariants
 
 ## Quick Start
@@ -43,15 +44,17 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.11.0-alpha`** (M11 conditional branching —
-> `ChoiceNode` + OR-join `MergeNode` + the `Bypassed` status — on top of M10 durable continuations
-> (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status) and the M9
+> **no stable (`v1`+) release**. The latest is **`v0.12.0-alpha`** (M12 saga / compensation —
+> durable reverse-order rollback with `WithCompensation`, the `Compensated` / `CompensationFailed`
+> statuses, and a typed `SagaError`, crash-safe mid-rollback — on top of M11 conditional branching
+> (`ChoiceNode` + OR-join `MergeNode` + the `Bypassed` status), M10 durable continuations
+> (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status), the M9
 > durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
 > work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
-> currently **`v0.11.0-alpha`** — so the command above is correct. Pinning the exact version
-> (`@v0.11.0-alpha`) is optional but recommended for reproducibility, and the API may change between
+> currently **`v0.12.0-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.12.0-alpha`) is optional but recommended for reproducibility, and the API may change between
 > alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) reads
-> `0.11.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
+> `0.12.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -333,6 +336,48 @@ See the [Workflow patterns guide → True Conditional Branching](docs/guides/wor
 the [API reference → Conditional branching](docs/reference/api-reference.md#conditional-branching),
 and [ADR-0010](docs/architecture/adr/0010-conditional-branching-bypassed-status.md).
 
+## Saga / Compensation
+
+A node can declare a **compensating action** with `WithCompensation`. If the run fails with
+a hard error — or the caller cancels / the context deadline fires — the engine **rolls
+back**: it invokes the compensation of every `Completed` node in **reverse-topological
+order** to durably undo their effects, marking each `Compensated` or `CompensationFailed`.
+This completes the durable-workflow arc: forward durability + branching + **undo**.
+
+```go
+builder.AddNode("reserve-inventory").
+    WithAction(reserveInventoryAction).
+    WithCompensation(cancelInventoryAction)
+
+builder.AddNode("process-payment").
+    WithAction(processPaymentAction).
+    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+        key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
+        pid, _ := data.GetString("payment_id")
+        return refundPayment(ctx, pid, key)                // MUST be idempotent
+    }).
+    DependsOn("reserve-inventory")
+
+builder.AddNode("create-shipment").
+    WithAction(createShipmentAction). // if this fails, payment then inventory are compensated
+    DependsOn("process-payment")
+```
+
+Only `Completed` compensable nodes are compensated (a `Bypassed`/`Skipped`/never-run node
+has nothing to undo). The rollback is **crash-safe** — it persists a durable `rolling_back`
+marker and checkpoints per reverse level, so a crash *during* rollback resumes and finishes
+— and therefore **at-least-once**: **compensations must be idempotent**, and the engine
+supplies a stable `CompensationIdempotencyKey` handle to drive downstream dedup. It is
+**best-effort**: a compensation that fails (after `WithRetries`) is recorded
+`CompensationFailed` and the rest still run, with the exact
+`{compensated, failedToCompensate, skipped}` partition returned as a typed `SagaError`. The
+whole reverse pass is bounded by `WithRollbackTimeout` (default 5 minutes). The
+compensation/abort semantics are machine-checked in TLA+, with zero determinism tax.
+
+See the [Workflow patterns guide → Saga / Compensation](docs/guides/workflow-patterns.md#saga--compensation-durable-rollback),
+the [API reference → Saga / Compensation](docs/reference/api-reference.md#saga--compensation-added-v0120),
+and [ADR-0011](docs/architecture/adr/0011-saga-compensation-durable-rollback.md).
+
 ## Architecture
 
 Flow Orchestrator is designed with a modular architecture that separates concerns and enables extensibility. For a comprehensive overview of the system architecture, see our [Architecture Overview](docs/architecture/overview.md) documentation.
@@ -488,7 +533,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.11.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.11.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.12.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.12.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap
@@ -506,12 +551,15 @@ Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 - **M11 — conditional branching:** true workflow-level branching — `ChoiceNode` (first-match,
   data-driven routing) + OR-join `MergeNode` + the 7th `Bypassed` status; structured,
   declared, TLA+-verified.
+- **M12 — saga / compensation:** durable rollback — declare a compensating action with
+  `WithCompensation`, and on failure (or caller-cancel) the engine undoes the `Completed`
+  nodes in reverse-topological order; crash-safe, best-effort with a typed `SagaError`
+  partition, 8th/9th `Compensated`/`CompensationFailed` statuses; TLA+-verified.
 
 **Future (not yet shipped):**
-- **M12 — saga / compensation:** durable rollback — `WithCompensation` reverse-order undo
-  for partially-completed workflows, plus retry-policy hardening.
-- **Further out / deferred:** an exactly-once same-transaction (SQLite) store, and a
-  query / visibility API.
+- **Retry-policy hardening:** capped backoff, jitter, and non-retryable classification for
+  node (and compensation) retries — deferred from M12.
+- **Exactly-once** via a same-transaction (SQLite) store, and a **query / visibility API**.
 
 **Deliberately out of scope (protecting the moat):** unstructured (van der Aalst) OR-joins,
 loops, arbitrary code-as-workflow / replay, and any mandatory distribution or server —

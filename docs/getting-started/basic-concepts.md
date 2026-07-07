@@ -239,6 +239,16 @@ Nodes have several possible status values that track their execution state:
   dependency that **also** has a surviving taken/`Completed` ancestor is `Skipped`, not
   `Bypassed`; the taken path wins.) See [conditional branching](#conditional-branching)
   below.
+- `Compensated` (added v0.12.0): The node had `Completed`, and its effect has since been
+  durably **undone** by its compensating action during a saga rollback. `Compensated` is
+  **terminal** and is reached only from `Completed` (a node that never ran successfully is
+  never compensated). It is not a failure. See [conditional branching](#conditional-branching)
+  and the [Saga / Compensation](../guides/workflow-patterns.md#saga--compensation-durable-rollback) pattern.
+- `CompensationFailed` (added v0.12.0): The node had `Completed`, but its compensating
+  action was attempted during rollback and **failed** (after honoring `WithRetries`). It is
+  **terminal**, and is the honest counterpart of `Compensated`: its effect is **not** undone
+  and needs operator attention. Best-effort rollback records each attempted node as one or
+  the other, and the aggregate `SagaError` enumerates both.
 
 ```go
 // Get a node's status
@@ -375,6 +385,41 @@ Only **structured, single-`ChoiceNode`, local** OR-joins are expressible — the
 rejects unstructured reconvergence at `Build()` time (see the
 [API reference → Conditional branching](../reference/api-reference.md#conditional-branching)
 and [ADR-0010](../architecture/adr/0010-conditional-branching-bypassed-status.md)).
+
+## Saga / Compensation
+
+<a id="saga-compensation"></a>
+
+Added in **v0.12.0**, a node can declare a **compensating action** with
+`WithCompensation`. If the run fails with a hard error — or the caller cancels / the
+context deadline fires — the engine **rolls back**: it invokes the compensation of every
+`Completed` node in **reverse-topological order** to durably undo their effects, marking
+each `Compensated` (or `CompensationFailed`). This completes the durable-workflow arc:
+forward durability (M9/M10) + branching (M11) + **undo** (M12).
+
+```go
+builder.AddNode("process-payment").
+    WithAction(processPaymentAction).
+    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+        pid, _ := data.GetString("payment_id")
+        key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
+        return refundPayment(ctx, pid, key)                // MUST be idempotent
+    }).
+    DependsOn("reserve-inventory")
+```
+
+Key points: only `Completed` compensable nodes are compensated (a `Bypassed` / `Skipped`
+/ never-run node has nothing to undo); rollback is **best-effort** and reports the exact
+`{compensated, failedToCompensate, skipped}` partition via a typed `SagaError`; the
+rollback is itself **crash-safe** (checkpointed per reverse level), so it is
+**at-least-once** — **compensations must be idempotent**, and the engine supplies a stable
+`CompensationIdempotencyKey` handle to drive downstream dedup. The whole reverse pass is
+bounded by `WithRollbackTimeout` (default 5 minutes). The compensation/abort semantics are
+machine-checked in TLA+, with zero determinism tax.
+
+See the [Saga / Compensation pattern](../guides/workflow-patterns.md#saga--compensation-durable-rollback),
+the [API reference → Saga / Compensation](../reference/api-reference.md#saga--compensation-added-v0120),
+and [ADR-0011](../architecture/adr/0011-saga-compensation-durable-rollback.md).
 
 ## Next Steps
 
