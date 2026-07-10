@@ -211,8 +211,25 @@ if err != nil {
 }
 defer bridge.Shutdown(context.Background())
 
-// ...run the workflow against `data`; the SDK reader pulls metrics on its cadence.
+// ...run the DAG against `data`; the SDK reader pulls metrics on its cadence.
+dag.Execute(context.Background(), data)
 ```
+
+> **Enabling metrics on the two entry points.** Operation metrics are recorded into the
+> collector on the `WorkflowData` instance the engine executes against. On the lower-level
+> `DAG.Execute(ctx, data)` path, you own that `data` — pass a metrics-enabled one (above).
+> On the higher-level `Workflow.Execute(ctx)` drive (the persistence / durable / saga entry
+> point), the `WorkflowData` is built internally — **set `Workflow.MetricsConfig`** (added
+> v0.13.0 / REM-02) to opt it into collection, then read the stats after `Execute` with
+> `Workflow.GetMetrics()` or export them through the bridge. (Before v0.13.0 the
+> `Workflow.Execute` path had no such hook and metrics were effectively off there.)
+>
+> ```go
+> wf, _ := workflow.FromBuilder(builder)
+> wf.MetricsConfig = metrics.NewConfig().WithEnabled(true)
+> _ = wf.Execute(context.Background())
+> collected := wf.GetMetrics() // per-operation stats after the run
+> ```
 
 The collector you pass to `NewOTelBridge` is the instance collector returned by
 `WorkflowData.GetMetrics()`
@@ -276,7 +293,8 @@ three equivalent injection points; pick the one that fits how you build:
 import "go.opentelemetry.io/otel/trace"
 
 // On the builder (applied to the DAG that Build produces):
-dag, _ := workflow.NewWorkflowBuilder("my-workflow").
+dag, _ := workflow.NewWorkflowBuilder().
+    WithWorkflowID("my-workflow").
     // ...AddNode(...)...
     WithTracerProvider(tp). // tp is your *sdktrace.TracerProvider (a trace.TracerProvider)
     Build()

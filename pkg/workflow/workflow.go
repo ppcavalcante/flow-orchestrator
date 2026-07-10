@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow/metrics"
 )
 
 // Workflow represents a workflow execution.
@@ -42,6 +44,21 @@ type Workflow struct {
 	// a compensation still blocked past it is recorded CompensationFailed so a hung
 	// compensation never hangs the run. Set via WithRollbackTimeout.
 	RollbackTimeout time.Duration
+
+	// MetricsConfig opts this workflow's internally-built WorkflowData into metrics
+	// collection (M14 ph60 / REM-02). When nil (the default) metrics stay disabled
+	// — the frozen zero-tax hot path is unchanged. When set (e.g.
+	// metrics.ProductionConfig() or metrics.NewConfig().WithEnabled(true)), the
+	// WorkflowData created by Execute collects operation stats, readable after the
+	// run via GetMetrics() and exportable through metrics.OTelBridge. Set via
+	// WithMetrics on the builder or directly on the struct.
+	MetricsConfig *metrics.Config
+
+	// metrics retains the last run's collector so a caller reaching only the
+	// Execute(ctx) API can read stats back via GetMetrics() after Execute. Written
+	// once per drive at data construction; a nil MetricsConfig leaves it holding a
+	// disabled collector (GetMetrics still returns non-nil, stats simply zero).
+	metrics *metrics.MetricsCollector
 }
 
 // NewWorkflow creates a new workflow with the given workflow store
@@ -153,15 +170,26 @@ func (w *Workflow) finishRollback(data *WorkflowData, cause error) error {
 		}
 	}
 
-	// Clean rollback: a persist failure surfaces. Otherwise return the (reconstructed)
-	// cause — NEVER nil for a rolled-back run (§2 / ph47-F5).
-	if saveErr != nil {
-		if effectiveCause != nil {
-			return fmt.Errorf("%w (additionally, failed to save rollback state: %w)", effectiveCause, saveErr)
-		}
-		return fmt.Errorf("failed to save rollback state: %w", saveErr)
+	// Clean rollback (no compensation failed): mark the return so a caller can detect
+	// "this run ROLLED BACK" from the error alone (REM-03 / DEC-M13-V1 Option C).
+	// Wrap the reconstructed cause as `ErrRolledBack: cause` (Go 1.20 multi-%w) so
+	// BOTH errors.Is(err, ErrRolledBack) AND errors.As(err, &ExecutionError) reach
+	// through — a clean rollback with a real cause is no longer indistinguishable
+	// from a plain failure. When the cause already IS ErrRolledBack (the un-journaled
+	// path @ :155) there is nothing to wrap — it already satisfies Is. The never-nil
+	// floor holds (effectiveCause is never nil here). The partial-rollback SagaError
+	// path above is UNCHANGED (it carries its own Cause + partition).
+	rolledBack := effectiveCause
+	if !errors.Is(rolledBack, ErrRolledBack) {
+		rolledBack = fmt.Errorf("%w: %w", ErrRolledBack, effectiveCause)
 	}
-	return effectiveCause
+
+	// A persist failure on the clean path still surfaces, folded into the rolled-back
+	// error so Is(ErrRolledBack) AND the save error both remain reachable.
+	if saveErr != nil {
+		return fmt.Errorf("%w (additionally, failed to save rollback state: %w)", rolledBack, saveErr)
+	}
+	return rolledBack
 }
 
 // locker resolves the drive lease: the workflow's own Locker, or the process-wide
@@ -192,6 +220,36 @@ func (w *Workflow) Execute(ctx context.Context) error {
 	return w.executeLocked(ctx)
 }
 
+// disabledMetricsSentinel is the non-nil, disabled collector GetMetrics returns
+// when this workflow never enabled metrics (M14 ph61 F2). It is package-level and
+// effectively immutable (a disabled collector's TrackOperation is a no-op and its
+// stats read zero, so a caller cannot meaningfully mutate it), so sharing it is
+// race-free and preserves GetMetrics's documented "non-nil, disabled, stats read
+// zero" contract without the per-Execute field write that would race under
+// lease-less concurrent Execute.
+var disabledMetricsSentinel = metrics.NewMetricsCollectorWithConfig(
+	metrics.NewConfig().WithEnabled(false).GetInternalConfig(),
+)
+
+// GetMetrics returns the metrics collector of the most recent Execute drive
+// (REM-02). When MetricsConfig was set the collector holds real operation stats
+// (readable via its GetAllOperationStats / exportable through metrics.OTelBridge).
+// When MetricsConfig was nil (the default), it returns a NON-NIL disabled collector
+// whose stats read zero — never nil — so a caller can always dereference it. Reading
+// it after a run lets an Execute(ctx)-only consumer reach observability without
+// touching the data layer.
+//
+// Call GetMetrics AFTER Execute returns. On the ENABLED path it reads a field
+// written during the drive without synchronization, so calling it concurrently with
+// an in-flight Execute on the same *Workflow is a data race; the intended contract
+// is read-after-run. (The disabled default writes no field — race-free.)
+func (w *Workflow) GetMetrics() *metrics.MetricsCollector {
+	if w.metrics == nil {
+		return disabledMetricsSentinel
+	}
+	return w.metrics
+}
+
 // executeLocked is the drive body — load → run the DAG → checkpoint/save → ack —
 // WITHOUT acquiring the lease. Callers (Execute, Tick, DeliverAndResume) hold the
 // per-WorkflowID lease for its duration. It is the single funnel so the lease is
@@ -210,8 +268,17 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 		ctx = withClock(ctx, clock)
 	}
 
-	// Create workflow data
-	data := NewWorkflowData(w.WorkflowID)
+	// Create workflow data. When MetricsConfig is set (REM-02 enable-hook), thread
+	// it into the internally-built WorkflowData so an Execute(ctx)-only consumer can
+	// enable metrics without reaching the data layer directly; retain the collector
+	// on the Workflow so GetMetrics() reads real stats back after the run. A nil
+	// MetricsConfig keeps the frozen disabled default (zero determinism tax).
+	var data *WorkflowData
+	if w.MetricsConfig != nil {
+		data = NewWorkflowDataWithConfig(w.WorkflowID, DefaultWorkflowDataConfig().WithMetricsConfig(w.MetricsConfig))
+	} else {
+		data = NewWorkflowData(w.WorkflowID)
+	}
 
 	// Load existing state if available.
 	//
@@ -248,6 +315,24 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 		}
 	}
 
+	// Retain the collector of the data actually driven this run (fresh OR loaded)
+	// so GetMetrics() reads it back after Execute (REM-02). On the InMemoryStore
+	// resume path the loaded data's collector is the Clone()-preserved one, so the
+	// enabled STATE survives the checkpoint (the N1 invariant — the resumed run's
+	// tracking is not silently skipped; stats are per-drive, not cumulative, since
+	// Clone resets the counters). FB/JSON do not persist metrics, so a loaded run
+	// there starts a fresh collector matching the loaded data's config.
+	//
+	// Guarded on MetricsConfig != nil: the retention is only meaningful when metrics
+	// are enabled, and skipping the field write on the disabled default means two
+	// deliberately-lease-less concurrent Execute (the adversarial double-apply tests)
+	// do not write-race on w.metrics — the field is untouched unless the caller opted
+	// into metrics (in which case GetMetrics-after-Execute is the documented,
+	// non-concurrent contract). (M14 ph61: closes the ph60 F1 race on the default path.)
+	if w.MetricsConfig != nil {
+		w.metrics = data.GetMetrics()
+	}
+
 	// Validate DAG
 	if err := w.DAG.Validate(); err != nil {
 		return fmt.Errorf("workflow validation failed: %w", err)
@@ -281,6 +366,17 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 		ctx = withCheckpoint(ctx, func(d *WorkflowData) error {
 			return cp.SaveCheckpoint(d)
 		})
+	}
+
+	// M14 ph61: inject the durability-floor callback when the Store is a Syncer
+	// (group-commit). The park forces it so a suspended run is fsync-durable even
+	// under Batched(K). A NON-Syncer store injects nothing (syncFrom → nil). A Strict
+	// FlatBuffersStore IS a Syncer, so the callback IS injected — but its Sync()
+	// no-ops (nothing is ever deferred under Strict), so the floor is preserved at
+	// negligible cost. (Completion goes through Save, which is always fsync-durable.)
+	if sy, ok := w.Store.(Syncer); ok {
+		wfID := w.WorkflowID
+		ctx = withSync(ctx, func() error { return sy.Sync(wfID) })
 	}
 
 	// Wire the durable signal mailbox when the Store supports it (M10 ph37). The
@@ -435,7 +531,10 @@ func (w *Workflow) checkGraphIdentity(data *WorkflowData) error {
 // FromBuilder creates a workflow from a builder.
 // Returns an error if the workflow definition is invalid.
 func FromBuilder(builder *WorkflowBuilder) (*Workflow, error) {
-	dag, err := builder.Build()
+	// Use the guard-free build(): FromBuilder carries builder.store forward onto the
+	// *Workflow below, so the store is NOT lost here — the public Build()'s
+	// store-set guard (REM-04) would be wrong on this path. (M14 ph62.)
+	dag, err := builder.build()
 	if err != nil {
 		return nil, err
 	}

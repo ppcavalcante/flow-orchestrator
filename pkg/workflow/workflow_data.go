@@ -687,17 +687,36 @@ func (w *WorkflowData) Clone() *WorkflowData {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
-	// Create a new WorkflowData with independent metrics and interning
+	// The clone's interner is right-sized to the keys this clone actually holds,
+	// NOT the eager 10k-capacity default (newStringInterner → make(map,10000) ≈
+	// 641 KB/clone). InMemoryStore.Save→Clone() runs this per level, so the eager
+	// pre-alloc was the inmem deep-1000 cost center (752 MB; M14 ph60/REM-01). A
+	// clone's key universe is bounded by its data+status+output keys; sizing to
+	// that keeps per-instance isolation (sound — never shared, internKey mutates
+	// its cache on the hot path) while dropping the waste. commonStringsCount is
+	// ignored by the underlying interner, so any value is fine.
+	internCap := len(w.data) + len(w.nodeStatus) + len(w.outputs)
+
+	// Preserve the SOURCE's metrics enable-STATE (N1). The prior code always built
+	// a fresh ENABLED collector (metrics.NewMetricsCollector sets Enabled=true), so
+	// a clone of metrics-DISABLED data silently became enabled, and an enabled
+	// source's collection state was not carried honestly. Rebuilding from the
+	// source's own config makes the clone track the source: disabled→disabled
+	// (the frozen fast path stays a no-op, 0 alloc), enabled→enabled. NOTE: only the
+	// enabled STATE carries — NewMetricsCollectorWithConfig Reset()s the counters, so
+	// the clone starts at zero stats and re-accrues; a resumed enabled run measures
+	// its own drive (not cumulative across resumes). That is the property bite #5
+	// checks: the resumed run's tracking is not silently skipped.
 	clone := &WorkflowData{
 		ID:             w.ID,
-		metrics:        metrics.NewMetricsCollector(),
+		metrics:        metrics.NewMetricsCollectorWithConfig(w.metrics.GetConfig().GetInternalConfig()),
 		data:           make(map[string]interface{}, len(w.data)),
 		nodeStatus:     make(map[string]NodeStatus, len(w.nodeStatus)),
 		outputs:        make(map[string]interface{}, len(w.outputs)),
 		waits:          make(map[string]int64, len(w.waits)),
 		rollingBack:    w.rollingBack,  // M12: run-level saga marker (value type — a full copy)
 		triggerCause:   w.triggerCause, // M12 ph49: durable rollback trigger cause (value type)
-		stringInterner: newStringInterner(),
+		stringInterner: newStringInternerWithCapacity(internCap, 0),
 	}
 
 	// Copy data

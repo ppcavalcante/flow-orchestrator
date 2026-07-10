@@ -38,3 +38,27 @@ func checkpointFrom(ctx context.Context) func(data *WorkflowData) error {
 	}
 	return nil
 }
+
+// syncCtxKey carries the per-invocation durability-floor callback (M14 ph61). Under
+// group-commit (Batched(K)) an ordinary checkpoint may DEFER its fsync; the park
+// (D-10/D-11) and run-completion MUST be fsync-durable regardless of mode, so they
+// force this callback after their checkpoint. Injected only when the Store implements
+// Syncer; carried on ctx for the same concurrency-safety reason as the checkpoint
+// callback. A Strict store's sync is a no-op (every checkpoint already fsync'd).
+type syncCtxKey struct{}
+
+// withSync returns a child context carrying sync as the durability-floor callback.
+func withSync(ctx context.Context, sync func() error) context.Context {
+	return context.WithValue(ctx, syncCtxKey{}, sync)
+}
+
+// syncFrom extracts the durability-floor callback, returning nil when none was
+// injected (a non-Syncer store, or a Strict store — either way the caller skips it;
+// a nil sync at a park means the checkpoint was already durable). NOT semantically
+// load-bearing like checkpointFrom: a nil sync is "nothing to force," not an error.
+func syncFrom(ctx context.Context) func() error {
+	if sync, ok := ctx.Value(syncCtxKey{}).(func() error); ok {
+		return sync
+	}
+	return nil
+}

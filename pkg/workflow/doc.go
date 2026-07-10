@@ -21,7 +21,14 @@ The recommended way to create workflows is using the fluent builder API:
 		WithTimeout(5 * time.Second).
 		DependsOn("fetch-data")
 
-	dag, err := builder.Build()
+	// Build a durable, store-backed *Workflow with FromBuilder. (A bare Build()
+	// returns a *DAG, which cannot carry a store — Build() errors if WithStore was
+	// set, so a store-configured run is never silently non-durable.)
+	wf, err := workflow.FromBuilder(builder)
+	err = wf.Execute(ctx)
+
+For a NON-durable, in-memory run, omit WithStore and build a bare DAG with Build(),
+then run it directly with dag.Execute(ctx, data).
 
 # Actions
 

@@ -364,6 +364,12 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 	// nil here means no Checkpointer Store was wired (the semantics the park /
 	// level-barrier flush sites below depend on).
 	checkpoint := checkpointFrom(ctx)
+	// M14 ph61: the durability-floor callback (group-commit). nil only for a
+	// NON-Syncer store. A Syncer store (incl. a Strict FlatBuffersStore) injects a
+	// non-nil callback that the park forces after its checkpoint so a suspend is
+	// fsync-durable even under Batched(K); under Strict that call is a cheap no-op
+	// (pending is always empty) — the per-park lock is intentional and negligible.
+	forceSync := syncFrom(ctx)
 
 	// Suspend chokepoint — the SINGLE enforcement point of the suspend
 	// durability invariant: a node is persisted Waiting IFF this Execute returned
@@ -494,6 +500,16 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 				// The flush errored — the durable park did NOT succeed, so this is a
 				// failure, not a suspend. (FIND-M10-P35-N2.)
 				return fmt.Errorf("workflow checkpoint failed while suspending after level %d: %w", levelIndex, err)
+			}
+			// M14 ph61 durability floor: a park MUST be fsync-durable even under
+			// group-commit (D-10/D-11 — "the park IS a checkpoint" only if persisted).
+			// Under Batched(K) the checkpoint above may have DEFERRED its fsync; force
+			// it now so a crash right after the park still finds it on resume. Strict /
+			// non-Syncer stores have forceSync==nil (already durable) → skipped.
+			if forceSync != nil {
+				if err := forceSync(); err != nil {
+					return fmt.Errorf("workflow durability sync failed while suspending after level %d: %w", levelIndex, err)
+				}
 			}
 			// The ONE exit that legitimately keeps Waiting: a durable park happened.
 			return ErrSuspended

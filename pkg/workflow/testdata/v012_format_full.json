@@ -1,0 +1,1 @@
+{"data":{"balance_cents":9007199254740993,"rate":3.14159,"region":"eu-west","vip":true},"id":"v012_format_full","nodeStatus":{"bypassed_node":"bypassed","compensated_node":"compensated","compfailed_node":"compensation_failed","done_node":"completed","waiting_node":"waiting"},"outputs":{},"rolling_back":true,"trigger_cause":2,"waits":{"waiting_node":1893456000000}}

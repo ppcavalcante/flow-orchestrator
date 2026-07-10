@@ -582,16 +582,25 @@ builder.AddNode("api-call").
 
 ### Error Metrics
 
-Collect error metrics for monitoring:
+Metrics are a first-class `Workflow` concern, not a middleware wrap (the no-op
+`MetricsMiddleware()` was removed in v0.13.0). Enable operation metrics on the
+workflow and read them back after `Execute`:
 
 ```go
-// Create metrics middleware
-metricsMiddleware := workflow.MetricsMiddleware()
+wf, err := workflow.FromBuilder(builder)
+if err != nil {
+    log.Fatal(err)
+}
+wf.MetricsConfig = metrics.NewConfig().WithEnabled(true) // enable operation metrics
 
-// Apply to a node
-builder.AddNode("api-call").
-    WithAction(metricsMiddleware(apiCallAction))
+_ = wf.Execute(context.Background())
+
+// Read per-operation stats (counts, durations) after the run:
+collected := wf.GetMetrics()
 ```
+
+See the [Observability guide](./observability.md) for exporting these via the
+OpenTelemetry bridge.
 
 ### Debugging Failed Workflows
 

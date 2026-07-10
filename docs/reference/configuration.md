@@ -145,8 +145,8 @@ workflow.RetryMiddleware(3, 500*time.Millisecond)
 // Timeout — configure timeout duration
 workflow.TimeoutMiddleware(5 * time.Second)
 
-// Metrics — no configuration
-workflow.MetricsMiddleware()
+// (Metrics are NOT middleware — enable via Workflow.MetricsConfig; see the
+//  Observability guide. The no-op MetricsMiddleware was removed in v0.13.0.)
 
 // Validation — provide a validator function
 workflow.ValidationMiddleware(func(data *workflow.WorkflowData) error {
@@ -203,4 +203,12 @@ completed level barrier; non-completed nodes re-run on resume). See the
 builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("my-workflow").
     WithStore(store)
+
+// The store reaches execution via FromBuilder (→ *Workflow), NOT Build() (→ store-less *DAG):
+wf, err := workflow.FromBuilder(builder)
 ```
+
+> `builder.Build()` returns a `*DAG` that carries no store — persistence and
+> crash-safe rollback engage only when the workflow is run via `FromBuilder`.
+> Since **v0.13.0 (REM-04)**, calling `Build()` with a store set returns an error
+> rather than silently running non-durable.

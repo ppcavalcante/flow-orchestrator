@@ -53,14 +53,14 @@ if err != nil {
 }
 
 // Create workflow with the store
-workflow := &workflow.Workflow{
+wf := &workflow.Workflow{
     DAG:        dag,
     WorkflowID: "my-workflow",
     Store:      store,
 }
 
 // Execute with persistence
-err = workflow.Execute(context.Background())
+err = wf.Execute(context.Background())
 ```
 
 ### Adding Logging

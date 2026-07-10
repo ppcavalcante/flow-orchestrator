@@ -37,3 +37,9 @@ playground/
 
 # TLC model-checker scratch output (timestamped run dirs under specs/)
 specs/states/
+
+# Doc-sample gate temp build dirs (internal/doctest buildAndRun)
+.doctest*
+
+# Local dogfood harness (dev-only, never shipped)
+_local/

@@ -7,15 +7,19 @@ import (
 	"strings"
 )
 
-// ErrRolledBack is returned by a rolled-back run whose trigger cause cannot be
-// reconstructed from durable state on resume (M12 ph48, review ph48-F1). A
-// caller-cancel / deadline trigger leaves NO persisted Failed node (unlike a hard
-// *ExecutionError), and the trigger cause itself is not journaled — so after a crash
-// the resume path has no durable witness of WHY the run rolled back, only THAT it did
-// (the durable rolling_back marker). This sentinel is the never-nil floor: a rolled-back
-// run is NEVER reported as success. (Faithfully recovering the cancel-vs-failure cause
-// across a crash needs a journaled trigger cause — routed UP as ph48-F2.)
-var ErrRolledBack = errors.New("workflow rolled back (trigger cause not journaled)")
+// ErrRolledBack marks a saga run that ROLLED BACK. Since M14 ph61/REM-03 it is the
+// universal rollback discriminator: EVERY clean (fully-compensated) rollback wraps its
+// cause as `fmt.Errorf("%w: %w", ErrRolledBack, cause)`, so a caller can detect the
+// rollback from the error alone — `errors.Is(err, ErrRolledBack)` is true, and
+// `errors.As(err, &execErr)` still reaches the underlying cause. (A PARTIAL rollback
+// — at least one compensation failed — surfaces as a *SagaError instead, carrying the
+// exact partition; it does NOT wrap ErrRolledBack.) It also remains the never-nil
+// floor: a rolled-back run whose trigger cause cannot be reconstructed from durable
+// state on resume (a caller-cancel/deadline leaves no persisted Failed node and the
+// trigger cause is not journaled — M12 ph48/ph48-F1) is reported as ErrRolledBack
+// alone, NEVER as success. (Faithfully recovering the cancel-vs-failure cause across a
+// crash needs a journaled trigger cause — routed UP as ph48-F2.)
+var ErrRolledBack = errors.New("workflow rolled back")
 
 // SagaError is the honest outcome of a saga rollback in which AT LEAST ONE
 // compensation failed (M12 ph47). It reports the EXACT partition of the run's

@@ -29,22 +29,22 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.12.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.13.0-alpha
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release and there is
-> **no stable (`v1`+) release**. The latest is **`v0.12.0-alpha`** (the M12 saga / compensation
+> **no stable (`v1`+) release**. The latest is **`v0.13.0-alpha`** (the M12 saga / compensation
 > layer: durable reverse-order rollback via `WithCompensation`, the `Compensated` /
 > `CompensationFailed` statuses, a typed `SagaError`, and crash-safe mid-rollback resume — built
 > on M11 conditional branching (`ChoiceNode` + OR-join), the M10 durable-continuations core
 > (suspend/resume, durable timers, wait-for-signal/condition, the `Waiting` status), and the M9
 > crash-resume core, all with no determinism tax).
 > Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.12.0-alpha`** — so the command above is
+> resolves to the highest pre-release — currently **`v0.13.0-alpha`** — so the command above is
 > correct. Pinning the exact version
-> (`go get github.com/ppcavalcante/flow-orchestrator@v0.12.0-alpha`) is optional but recommended
+> (`go get github.com/ppcavalcante/flow-orchestrator@v0.13.0-alpha`) is optional but recommended
 > for reproducibility, and the API may change between alpha minors. The in-code version
-> (`pkg/workflow.Version`) reads `0.12.0-alpha`. See
+> (`pkg/workflow.Version`) reads `0.13.0-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH
@@ -171,7 +171,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.12.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.13.0-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

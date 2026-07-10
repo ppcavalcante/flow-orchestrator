@@ -10,13 +10,21 @@ The `Workflow` type represents a complete workflow execution unit:
 
 ```go
 type Workflow struct {
-    DAG        *DAG           // The workflow structure
-    WorkflowID string         // Unique identifier
-    Store      WorkflowStore  // Optional persistence layer
+    DAG        *DAG            // The workflow structure
+    WorkflowID string          // Unique identifier
+    Store      WorkflowStore   // Optional persistence layer
+    // MetricsConfig opts the internally-built WorkflowData into operation-metrics
+    // collection (added v0.13.0 / REM-02). nil (default) = metrics off, zero-tax
+    // hot path unchanged. Set e.g. metrics.NewConfig().WithEnabled(true).
+    MetricsConfig *metrics.Config
 }
 
 // Execute runs the workflow
 func (w *Workflow) Execute(ctx context.Context) error
+
+// GetMetrics returns the collected operation metrics after Execute (non-nil even
+// on the disabled default). Call after Execute returns; concurrent-with-Execute is a race.
+func (w *Workflow) GetMetrics() *metrics.MetricsCollector
 ```
 
 ### DAG (Directed Acyclic Graph)
@@ -222,7 +230,10 @@ func NewWorkflowBuilder() *WorkflowBuilder
 // WithWorkflowID sets the workflow ID
 func (b *WorkflowBuilder) WithWorkflowID(id string) *WorkflowBuilder
 
-// WithStore sets the persistence store
+// WithStore sets the persistence store. The store reaches execution only via
+// FromBuilder (which builds a *Workflow carrying the store); a bare Build() returns
+// a store-less *DAG. Since v0.13.0 (REM-04), Build() with a store set returns an
+// error — use FromBuilder for a persistent, crash-safe run.
 func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder
 
 // AddStartNode adds a start node (no dependencies)
@@ -289,8 +300,8 @@ func RetryMiddleware(maxRetries int, backoff time.Duration) Middleware
 // TimeoutMiddleware adds a timeout to actions
 func TimeoutMiddleware(timeout time.Duration) Middleware
 
-// MetricsMiddleware collects execution metrics
-func MetricsMiddleware() Middleware
+// NOTE: there is no MetricsMiddleware (the no-op stub was removed in v0.13.0).
+// Enable metrics via Workflow.MetricsConfig + read with Workflow.GetMetrics().
 
 // ValidationMiddleware validates workflow data before executing
 func ValidationMiddleware(validator func(*WorkflowData) error) Middleware
@@ -349,8 +360,10 @@ func NewInMemoryStore() *InMemoryStore
 // use FlatBuffersStore for the faster binary format)
 func NewJSONFileStore(baseDir string) (*JSONFileStore, error)
 
-// NewFlatBuffersStore creates a FlatBuffers-based store
-func NewFlatBuffersStore(baseDir string) (*FlatBuffersStore, error)
+// NewFlatBuffersStore creates a FlatBuffers-based store. Variadic options configure
+// the durability-flush mode (added v0.13.0); with no options the default is Strict
+// (the pre-v0.13 durable contract). See "Durability modes" below.
+func NewFlatBuffersStore(baseDir string, opts ...func(*FlatBuffersStore)) (*FlatBuffersStore, error)
 ```
 
 ### Durable crash-resume (added v0.9.0)
@@ -367,6 +380,30 @@ into durable mid-run checkpointing. All three built-in stores implement it.
 type Checkpointer interface {
     // SaveCheckpoint atomically and durably persists the current workflow state.
     SaveCheckpoint(data *WorkflowData) error
+}
+```
+
+#### Durability modes (added v0.13.0)
+
+`FlatBuffersStore` supports two checkpoint-flush cadences, selected with the variadic
+`WithDurabilityMode` option. Default `Strict` is bit-identical to the pre-v0.13 durable
+contract; `Batched(K)` group-commits (fsync every `K`th checkpoint) for deep durable runs,
+trading a ≤`K`-level power-loss window (the lost levels re-run, safe under the at-least-once
+idempotency contract) for a large speedup. Only `FlatBuffersStore` batches. See the
+[Persistence guide](../guides/persistence.md#durability-modes-strict-vs-batched).
+
+```go
+// WithDurabilityMode selects the flush cadence (default: Strict).
+func WithDurabilityMode(opt DurabilityOption) func(*FlatBuffersStore)
+
+func Strict() DurabilityOption    // one fsync per completed level (the default)
+func Batched(k uint) DurabilityOption // group commit: fsync every kth checkpoint (k<1 == Strict)
+
+// Syncer is an optional store capability: force an immediate durable flush.
+// FlatBuffersStore implements it; suspend and completion floors call it so a
+// parked/finished run is durable even under Batched.
+type Syncer interface {
+    Sync(workflowID string) error
 }
 ```
 
@@ -705,10 +742,11 @@ func (e *SagaError) Unwrap() error // returns Cause — errors.As reaches BOTH t
 ```
 
 A `*SagaError` is returned **only** when `FailedToCompensate` is non-empty. A rollback in
-which every compensation succeeded returns the **original trigger error**, not a
-`SagaError` — so a caller can always distinguish a clean rollback from a partial one. A
-rolled-back run is **never** reported as success (`nil`); if the trigger cause cannot be
-reconstructed after a crash it surfaces as `ErrRolledBack`.
+which every compensation succeeded returns the trigger cause **wrapped behind
+`ErrRolledBack`** (since v0.13.0 / REM-03), not a `SagaError` — so `errors.Is(err,
+ErrRolledBack)` distinguishes any rollback, and `errors.As(err, &execErr)` still reaches the
+cause. A rolled-back run is **never** reported as success (`nil`); if the trigger cause
+cannot be reconstructed after a crash, the bare `ErrRolledBack` sentinel surfaces.
 
 The compensation/abort semantics — reverse-topological order, every-Completed-compensated-once,
 crash-safe rollback, and the honest partition — are machine-checked in TLA+ (exhaustive under
@@ -899,11 +937,21 @@ case errors.Is(err, workflow.ErrIO):          // transient I/O — safe to retry
 ### Saga / rollback domain (added v0.12.0)
 
 ```go
-// ErrRolledBack: a rolled-back run whose trigger cause could not be reconstructed
-// from durable state on resume (a caller-cancel/deadline leaves no persisted Failed
-// node). It is the never-nil floor — a rolled-back run is NEVER reported as success.
-var ErrRolledBack = errors.New("workflow rolled back (trigger cause not journaled)")
+// ErrRolledBack marks ANY rolled-back run (since v0.13.0 / REM-03). A clean
+// rollback wraps its trigger cause as fmt.Errorf("%w: %w", ErrRolledBack, cause),
+// so errors.Is(err, ErrRolledBack) is TRUE for every rollback (clean or the
+// crash-un-journaled sentinel case) while errors.As(err, &execErr) still reaches
+// the underlying *ExecutionError cause. It is the never-nil floor — a rolled-back
+// run is NEVER reported as success.
+var ErrRolledBack = errors.New("workflow rolled back")
 ```
+
+> **Breaking (v0.13.0, REM-03):** before, a clean (fully-compensated) rollback returned
+> the bare `*ExecutionError` cause — indistinguishable by error from a plain node failure.
+> Now it wraps the cause behind `ErrRolledBack`, so a caller can detect a rollback with
+> `errors.Is(err, ErrRolledBack)`. Code that did a bare `err.(*ExecutionError)` type-assert
+> on the rollback path must switch to `errors.As(err, &ee)` (which still reaches the cause).
+> A **partial** rollback still returns `*SagaError` (unchanged).
 
 The partial-rollback outcome itself is the typed
 [`*SagaError`](#saga--compensation-added-v0120) (returned only when ≥1 compensation

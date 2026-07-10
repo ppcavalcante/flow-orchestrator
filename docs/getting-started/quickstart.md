@@ -11,8 +11,8 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** every published tag is a pre-release (alpha; no stable `v1`+ release yet), so
-> `@latest` resolves to the highest pre-release — currently **`v0.12.0-alpha`** — which the command
-> above installs. Pinning `@v0.12.0-alpha` is optional but recommended for reproducibility; the API
+> `@latest` resolves to the highest pre-release — currently **`v0.13.0-alpha`** — which the command
+> above installs. Pinning `@v0.13.0-alpha` is optional but recommended for reproducibility; the API
 > may change between alpha minors. See [CHANGELOG](../../CHANGELOG.md) and
 > [STABILITY.md](../../STABILITY.md).
 
@@ -148,14 +148,14 @@ You can persist workflow state using the built-in storage implementations:
 store := workflow.NewInMemoryStore()
 
 // Create a workflow with the store
-workflow := &workflow.Workflow{
+wf := &workflow.Workflow{
 	DAG:        dag,
 	WorkflowID: "simple-workflow",
 	Store:      store,
 }
 
 // Execute the workflow with persistence
-err = workflow.Execute(context.Background())
+err = wf.Execute(context.Background())
 ```
 
 For file-based persistence:

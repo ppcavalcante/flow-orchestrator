@@ -217,25 +217,6 @@ func NoDelayRetryMiddleware(maxRetries int, verbose ...bool) Middleware {
 	}
 }
 
-// MetricsMiddleware creates middleware that collects metrics about action execution.
-// It records execution time and success/failure counts.
-func MetricsMiddleware() Middleware {
-	return func(next Action) Action {
-		return ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			startTime := time.Now()
-
-			// Execute the wrapped action
-			err := next.Execute(ctx, data)
-
-			// Record metrics (in a real implementation, this would use a metrics system)
-			duration := time.Since(startTime)
-			_ = duration // Use metrics system instead
-
-			return err
-		})
-	}
-}
-
 // ValidationMiddleware creates middleware that validates workflow data before executing the action.
 // If validation fails, the action is not executed.
 func ValidationMiddleware(validator func(*WorkflowData) error) Middleware {

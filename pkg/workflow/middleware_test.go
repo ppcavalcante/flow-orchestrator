@@ -220,33 +220,6 @@ func TestRetryMiddleware(t *testing.T) {
 	})
 }
 
-func TestMetricsMiddleware(t *testing.T) {
-	t.Run("Records execution time", func(t *testing.T) {
-		middleware := MetricsMiddleware()
-
-		// Create a simple action with a delay
-		action := ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			time.Sleep(50 * time.Millisecond)
-			return nil
-		})
-
-		// Apply middleware
-		wrapped := middleware(action)
-
-		// Execute action with middleware
-		data := NewWorkflowData("test-metrics")
-		err := wrapped.Execute(context.Background(), data)
-
-		// Just verify it executes without error
-		if err != nil {
-			t.Errorf("Expected no error, got %v", err)
-		}
-
-		// Note: In a real implementation, this would check that metrics were recorded
-		// but the current implementation just calculates duration without logging
-	})
-}
-
 func TestValidationMiddleware(t *testing.T) {
 	// Create a test action
 	actionCalled := false

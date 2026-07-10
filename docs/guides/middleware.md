@@ -144,14 +144,15 @@ Adds a timeout to action execution:
 action := workflow.TimeoutMiddleware(5 * time.Second)(myAction)
 ```
 
-### Metrics Middleware
+### Metrics
 
-Collects metrics about action execution, including counts and timing:
-
-```go
-// Basic usage — records execution time
-action := workflow.MetricsMiddleware()(myAction)
-```
+There is **no metrics middleware.** The no-op `MetricsMiddleware()` placeholder was
+**removed in v0.13.0** (it measured a duration and discarded it — it never recorded
+anywhere). Real per-operation metrics are a first-class `Workflow` concern, not a
+middleware wrap: set `Workflow.MetricsConfig` to enable operation metrics on the
+workflow's internally-built `WorkflowData`, then read them back with
+`Workflow.GetMetrics()` after `Execute` returns, or export them through the
+OpenTelemetry bridge. See the [Observability guide](./observability.md).
 
 ### Validation Middleware
 
@@ -409,22 +410,22 @@ The execution flow would be:
 A general recommended ordering for common middleware:
 
 1. **Logging** (outermost) - To log everything including other middleware
-2. **Metrics** - To measure performance including retries
-3. **Timeout** - To set overall timeout
-4. **Validation** - To validate before expensive operations
-5. **Retry** (innermost) - To retry the core action
+2. **Timeout** - To set overall timeout
+3. **Validation** - To validate before expensive operations
+4. **Retry** (innermost) - To retry the core action
+
+(Metrics are not middleware — see [Metrics](#metrics) above; enable them via
+`Workflow.MetricsConfig`.)
 
 ```go
 action := LoggingMiddleware()(
-    MetricsMiddleware()(
-        TimeoutMiddleware(5 * time.Second)(
-            ValidationMiddleware(validator)(
-                RetryMiddleware(3, time.Second)(
-                    myAction
-                )
-            )
-        )
-    )
+    TimeoutMiddleware(5 * time.Second)(
+        ValidationMiddleware(validator)(
+            RetryMiddleware(3, time.Second)(
+                myAction,
+            ),
+        ),
+    ),
 )
 ```
 

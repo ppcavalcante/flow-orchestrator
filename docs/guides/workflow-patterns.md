@@ -408,6 +408,9 @@ manual "check `GetNodeStatus` in a downstream node" workaround shown in earlier 
 builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("order-saga").
     WithStore(store) // a Checkpointer store makes the rollback itself crash-safe
+                     // — run via workflow.FromBuilder(builder) (a *Workflow carries
+                     // the store). Since v0.13.0, builder.Build() with a store set
+                     // returns an error (a bare *DAG cannot carry a store).
 
 builder.AddStartNode("reserve-inventory").
     WithAction(reserveInventoryAction).

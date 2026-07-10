@@ -44,17 +44,17 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.12.0-alpha`** (M12 saga / compensation —
+> **no stable (`v1`+) release**. The latest is **`v0.13.0-alpha`** (M12 saga / compensation —
 > durable reverse-order rollback with `WithCompensation`, the `Compensated` / `CompensationFailed`
 > statuses, and a typed `SagaError`, crash-safe mid-rollback — on top of M11 conditional branching
 > (`ChoiceNode` + OR-join `MergeNode` + the `Bypassed` status), M10 durable continuations
 > (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status), the M9
 > durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
 > work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
-> currently **`v0.12.0-alpha`** — so the command above is correct. Pinning the exact version
-> (`@v0.12.0-alpha`) is optional but recommended for reproducibility, and the API may change between
+> currently **`v0.13.0-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.13.0-alpha`) is optional but recommended for reproducibility, and the API may change between
 > alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) reads
-> `0.12.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
+> `0.13.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -533,7 +533,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.12.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.12.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.13.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.13.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap

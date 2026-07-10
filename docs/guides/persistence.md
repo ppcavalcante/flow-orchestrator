@@ -72,7 +72,9 @@ if err != nil {
 }
 ```
 
-**Best for**: Production use, high-performance needs
+**Best for**: Production use, high-performance needs. For deep durable workflows,
+see [Durability modes: Strict vs Batched](#durability-modes-strict-vs-batched)
+(`WithDurabilityMode(Batched(K))` group-commit).
 
 ## Trust & Safety
 
@@ -154,14 +156,14 @@ if err != nil {
 }
 
 // Create a workflow with the DAG and store
-workflow := &workflow.Workflow{
+wf := &workflow.Workflow{
     DAG:        dag,
     WorkflowID: "order-processing",
     Store:      store,
 }
 
 // Execute the workflow with persistence
-err = workflow.Execute(context.Background())
+err = wf.Execute(context.Background())
 ```
 
 ### Resuming Workflows
@@ -184,14 +186,14 @@ func resumeWorkflow(workflowID string) error {
     dag := rebuildWorkflowDAG()
     
     // Create a workflow with the existing state
-    workflow := &workflow.Workflow{
+    wf := &workflow.Workflow{
         DAG:        dag,
         WorkflowID: workflowID,
         Store:      store,
     }
     
     // Resume the workflow
-    return workflow.Execute(context.Background())
+    return wf.Execute(context.Background())
 }
 ```
 
@@ -221,6 +223,23 @@ into its map (useful for tests, but not durable across process death).
 
 A store that does **not** implement `Checkpointer` keeps the prior behavior
 exactly — state is saved only at run boundaries — with zero overhead.
+
+> **Cost of durability scales with depth (v0.12.0 measured).** Each completed level
+> barrier triggers a checkpoint that atomically writes the **whole** workflow state, so
+> the checkpointing cost grows with the number of levels (the DAG's *depth*) and the
+> state size. In the default **`Strict`** mode this is cheap for typical shallow/wide
+> DAGs, but material for very deep ones: a **1000-level** durable workflow measured
+> around **~10.6s**, dominated not by bytes but by one `fsync` per level (~10ms fixed).
+> Durable execution is **not free at depth** — prefer shallow/wide graphs when you can.
+>
+> **`Batched(K)` (added v0.13.0) removes the per-level `fsync` cost for deep runs:** it
+> fsyncs a full snapshot only every `K`th checkpoint (group commit), taking the same
+> 1000-level run from ~10.6s (`Strict`) to **~0.25s at `Batched(64)` — ≈43-48×**
+> (hardware-varying). See
+> [Durability modes](#durability-modes-strict-vs-batched) below. A residual
+> `O(N²)`-serialize tail only bites past ~3k sequential levels (pathological for a
+> width-parallel engine); a delta/WAL is a possible post-1.0 option if deeper scale is
+> needed.
 
 **Resume is just re-running `Execute`** with the same `WorkflowID`, the same store,
 and the same DAG (the `resumeWorkflow` example above already does this). On resume:
@@ -281,6 +300,44 @@ characters. The length-frame on the workflow ID makes the field boundary
 unambiguous (so `("ab","c")` and `("a","bc")` cannot collide). Downstream systems
 may recompute this, so the construction will not change across versions without a
 deliberate, documented break.
+
+### Durability modes: Strict vs Batched
+
+`FlatBuffersStore` supports two checkpoint-flush cadences, selected at construction
+with the additive **`WithDurabilityMode`** option (added v0.13.0):
+
+```go
+// Strict (the default) — one fsync per completed level. Bit-identical to the
+// pre-v0.13 durable contract; omit the option entirely for this behavior.
+store, err := workflow.NewFlatBuffersStore(dir) // == WithDurabilityMode(workflow.Strict())
+
+// Batched(K) — group commit: fsync a full snapshot only every Kth checkpoint.
+// Removes the per-level fsync cost for deep runs (see the depth-cost note above).
+store, err := workflow.NewFlatBuffersStore(dir, workflow.WithDurabilityMode(workflow.Batched(64)))
+```
+
+**The tradeoff (choose deliberately — this is a durability contract):**
+
+| | `Strict` (default) | `Batched(K)` |
+|---|---|---|
+| fsync cadence | every completed level | every `K`th checkpoint |
+| deep-run cost | ~10.6s at 1000 levels | ~0.25s at `Batched(64)` (≈43-48×) |
+| power-loss loss window | **zero** completed levels | **up to `K`** completed levels |
+
+- **`Batched(K)` weakens power-loss durability by design:** a crash can lose up to
+  `K` levels of completed-but-not-yet-fsynced progress. Those levels **re-run** on
+  resume — safe because the [at-least-once idempotency contract](#the-at-least-once-contract--side-effects-must-be-idempotent)
+  already requires side effects to be idempotent, so re-running ≤`K` levels is
+  harmless when you honor that contract. `Batched` is **not** a torn-file risk: the
+  only on-disk writes are complete, fsync'd snapshots — a power loss never finds a
+  partial file.
+- **Floors stay durable regardless of mode:** a **suspend** (`WaitForSignal` /
+  `WaitForCondition` park) and a **run completion** force an immediate `fsync` even
+  under `Batched`, so a parked or finished run is always durable on disk.
+- **`Strict` is the default and the frozen contract** — if you do not opt into
+  `Batched`, durability is exactly as it was before v0.13.0 (byte-identical on disk).
+- **Only `FlatBuffersStore` batches.** `JSONFileStore` is always full-snapshot,
+  `Strict`-only (it is not the deep-durable performance path).
 
 ### Saga rollback is crash-safe — and also at-least-once
 

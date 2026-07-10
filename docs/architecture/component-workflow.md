@@ -288,14 +288,14 @@ The engine is optimized for:
 
 ```go
 // Create a workflow
-workflow := &workflow.Workflow{
+wf := &workflow.Workflow{
     DAG:        dag,
     WorkflowID: "order-processing",
     Store:      store,
 }
 
 // Execute the workflow
-err := workflow.Execute(context.Background())
+err := wf.Execute(context.Background())
 ```
 
 ### With custom concurrency
@@ -304,18 +304,23 @@ Concurrency is configured with an `ExecutionConfig` on the builder (or directly
 on the DAG):
 
 ```go
-dag, err := workflow.NewWorkflowBuilder().
+wf, err := workflow.FromBuilder(workflow.NewWorkflowBuilder().
     WithWorkflowID("order-processing").
     WithStore(store).
-    WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 10}).
-    Build()
+    WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: 10}))
 if err != nil {
     log.Fatal(err)
 }
 
-data := workflow.NewWorkflowData("order-processing")
-err = dag.Execute(context.Background(), data)
+err = wf.Execute(context.Background())
 ```
+
+> **`WithStore` reaches execution only via `FromBuilder`.** `Build()` returns a
+> store-less `*DAG` (a DAG carries no store by design), so a store set with
+> `WithStore` rides to execution only through `FromBuilder` (which builds a
+> `*Workflow` carrying the store). Since **v0.13.0 (REM-04)**,
+> `builder.WithStore(s).Build()` **returns an error** rather than silently running
+> non-durable — the guard directs you to `FromBuilder`.
 
 ### With metrics enabled
 

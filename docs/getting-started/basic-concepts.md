@@ -14,7 +14,7 @@ A workflow is the top-level container for a set of coordinated tasks. In Flow Or
 - Maintains state across executions
 
 ```go
-workflow := &workflow.Workflow{
+wf := &workflow.Workflow{
     DAG:        dag,
     WorkflowID: "my-workflow",
     Store:      store,
@@ -199,9 +199,16 @@ builder.AddNode("process-payment").
     WithAction(processPaymentAction).
     DependsOn("validate-order")
 
-// Build the DAG
-dag, err := builder.Build()
+// A store-backed workflow is built with FromBuilder (carries the store to execution):
+wf, err := workflow.FromBuilder(builder)
 ```
+
+> **Note on `WithStore`.** A store reaches execution only via
+> `workflow.FromBuilder(builder)`, which produces a `*Workflow` that carries the
+> store (and its durability). `builder.Build()` returns a store-less `*DAG`, so
+> since **v0.13.0 (REM-04)** calling `Build()` with a store set **returns an error**
+> — use `FromBuilder` for a persistent, crash-safe run, or omit `WithStore` for a
+> plain in-memory `Build()`.
 
 ### Node Status
 

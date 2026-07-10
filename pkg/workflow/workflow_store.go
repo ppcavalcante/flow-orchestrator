@@ -487,21 +487,72 @@ func readBoundedFile(path string) (data []byte, err error) {
 type FlatBuffersStore struct {
 	baseDir string
 	mu      sync.RWMutex
+
+	// M14 ph61 group-commit (DEC-M14-GROUPCOMMIT). batchK is the durability batch
+	// window: 1 = Strict (fsync every checkpoint, today's contract bit-identical);
+	// >1 = Batched(K) (write+fsync only every Kth SaveCheckpoint, strategy (d) — a
+	// crash loses ≤K un-checkpointed levels, re-run idempotently). ckptCount is the
+	// per-workflowID checkpoint counter driving the batch cadence. Both guarded by mu.
+	batchK    uint
+	ckptCount map[string]uint
+	// pending holds the last deferred (un-fsync'd) checkpoint per workflowID under
+	// Batched(K) — strategy (d) retains the live state so a forced Sync() (the
+	// suspend/completion floor) can flush it. A Clone (clone-on-save discipline).
+	pending map[string]*WorkflowData
+}
+
+// DurabilityOption configures a FlatBuffersStore's durability mode (M14 ph61).
+type DurabilityOption func(*FlatBuffersStore)
+
+// WithDurabilityMode sets the store's fsync batching (M14 ph61, DEC-M14-GROUPCOMMIT).
+// Pass Strict() (the default — every checkpoint is fsync-durable, bit-identical to
+// pre-M14) or Batched(k) (fsync every k-th checkpoint; a power/process crash loses
+// ≤k un-fsync'd levels, which resume re-runs idempotently — the deep-durable perf
+// mode). The suspend/completion durability floor stays fsync-durable in EITHER mode.
+func WithDurabilityMode(opt DurabilityOption) func(*FlatBuffersStore) {
+	return opt
+}
+
+// Strict is the default durability mode: every SaveCheckpoint is fsync-durable
+// (bit-identical to the pre-M14 contract). K=1.
+func Strict() DurabilityOption {
+	return func(s *FlatBuffersStore) { s.batchK = 1 }
+}
+
+// Batched sets group-commit durability: write+fsync only every k-th checkpoint. A
+// crash loses ≤k un-fsync'd levels (re-run idempotently via IdempotencyKey). k must
+// be ≥1 (k=1 ≡ Strict). Weakens power-loss durability in exchange for ~K× fewer
+// fsyncs on deep durable runs — you must type Batched to opt in.
+func Batched(k uint) DurabilityOption {
+	return func(s *FlatBuffersStore) {
+		if k < 1 {
+			k = 1
+		}
+		s.batchK = k
+	}
 }
 
 // NewFlatBuffersStore creates a new FlatBuffers-based workflow store.
 // baseDir is the directory where workflow data will be stored.
 // Returns an error if the directory cannot be created or accessed.
-func NewFlatBuffersStore(baseDir string) (*FlatBuffersStore, error) {
+// Durability defaults to Strict (every checkpoint fsync'd); pass
+// WithDurabilityMode(Batched(k)) to enable group-commit (M14 ph61).
+func NewFlatBuffersStore(baseDir string, opts ...func(*FlatBuffersStore)) (*FlatBuffersStore, error) {
 	// Create the directory if it doesn't exist
 	err := os.MkdirAll(baseDir, 0750)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return &FlatBuffersStore{
-		baseDir: baseDir,
-	}, nil
+	s := &FlatBuffersStore{
+		baseDir:   baseDir,
+		batchK:    1, // default Strict
+		ckptCount: make(map[string]uint),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Save stores the workflow data using FlatBuffers
@@ -518,6 +569,28 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	if err := validateWorkflowID(workflowID); err != nil {
 		return err
 	}
+
+	// Serialize the full snapshot (extracted so the group-commit checkpoint path
+	// reuses the EXACT same serialization — M14 ph61) and write it atomically.
+	buf := buildFullStateBuffer(data)
+	filePath := filepath.Join(s.baseDir, workflowID+".fb")
+	if err := writeFileAtomic(filePath, buf, 0600); err != nil {
+		return newIOError("write", workflowID, err)
+	}
+	// A full Save (final/rollback/external) is fsync-durable and supersedes any
+	// deferred batched checkpoint AND ends the batch window — clear both the pending
+	// state (so a later Sync() can't re-flush a stale snapshot) and the cadence
+	// counter (F1: Save is the normal completion path, so this is where the counter
+	// must be reclaimed to avoid unbounded growth). (M14 ph61.)
+	s.clearBatchState(workflowID)
+	return nil
+}
+
+// buildFullStateBuffer serializes data as a COMPLETE WorkflowState snapshot (M14
+// ph61 extraction of Save's builder body, so the group-commit checkpoint path reuses
+// the identical full-snapshot serialization).
+func buildFullStateBuffer(data *WorkflowData) []byte {
+	workflowID := data.GetWorkflowID()
 
 	// Create FlatBuffer builder
 	builder := flatbuffers.NewBuilder(1024)
@@ -765,25 +838,10 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 	builder.Finish(workflowState)
 
 	// Get the finished buffer
-	buf := builder.FinishedBytes()
-
-	// Write to file atomically (temp + fsync + rename) so a crash mid-write
-	// cannot leave a torn/partial file (the durable-checkpoint torn-write guard).
-	filePath := filepath.Join(s.baseDir, workflowID+".fb")
-	if err := writeFileAtomic(filePath, buf, 0600); err != nil {
-		return newIOError("write", workflowID, err)
-	}
-
-	return nil
+	return builder.FinishedBytes()
 }
 
-// SaveCheckpoint persists the current workflow state mid-run (M9 crash-resume).
-// FlatBuffersStore.Save writes atomically (writeFileAtomic), so delegating to it
-// satisfies the durability contract. This makes *FlatBuffersStore implement
-// Checkpointer.
-func (s *FlatBuffersStore) SaveCheckpoint(data *WorkflowData) error {
-	return s.Save(data)
-}
+// SaveCheckpoint is defined in workflow_store_groupcommit.go (M14 ph61 group-commit).
 
 // Load retrieves workflow data using FlatBuffers
 func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err error) {
@@ -1026,6 +1084,13 @@ func (s *FlatBuffersStore) Delete(workflowID string) error {
 	// signal delivered to a workflow that never ran/saved).
 	//nolint:errcheck,gosec // best-effort mailbox reclamation (ph37 F2)
 	removeSignalDir(s.baseDir, workflowID)
+
+	// Drop the group-commit batch state (M14 ph61, AF1): a deferred (un-fsync'd)
+	// checkpoint held in s.pending, plus the ckptCount cadence counter, must be
+	// cleared on Delete — otherwise the workflow is gone from disk but a later
+	// public Sync() would re-flush the stale pending snapshot and RESURRECT the
+	// deleted workflow.
+	s.clearBatchState(workflowID)
 
 	// Delete file
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")

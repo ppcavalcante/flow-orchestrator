@@ -5,6 +5,59 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0-alpha]
+
+**M14 — Pre-1.0 Remediation.** The last breaking-change window before the 1.0 freeze of all
+three axes (API, `.fbs` format, interfaces): close the M13-surfaced before-1.0 gaps with
+**zero moat regression**. There is **no format change** this milestone (the `.fbs`/generated
+tree is unchanged — delta checkpointing was evaluated and dropped, see below).
+
+**Added (additive):**
+- **Group-commit durability modes** on `FlatBuffersStore` — `WithDurabilityMode(Strict() |
+  Batched(K))` (variadic option on `NewFlatBuffersStore`, old single-arg calls unchanged),
+  plus the `Syncer` interface (`Sync(workflowID)`). Default **`Strict`** is the pre-M14
+  durable contract **bit-identical on disk**. `Batched(K)` group-commits a full snapshot every
+  `K`th checkpoint, taking a 1000-level durable run from ~10.6s to ~0.25s at `Batched(64)`
+  (**≈43-48×**, hardware-varying). `Batched(K)` trades a **≤K-level power-loss window** for
+  the speed — safe under the existing at-least-once idempotency contract (the lost levels
+  re-run); suspend and completion floors force an immediate `fsync` in every mode. Only
+  `FlatBuffersStore` batches; `JSONFileStore` stays `Strict`-only. See
+  [ADR-0012](docs/architecture/adr/0012-group-commit-durability-modes.md) and the
+  [Persistence guide](docs/guides/persistence.md#durability-modes-strict-vs-batched).
+- **Metrics enable-hook** — `Workflow.MetricsConfig *metrics.Config` field + `Workflow.GetMetrics()`.
+  Set `MetricsConfig` (e.g. `metrics.NewConfig().WithEnabled(true)`) to opt the workflow's
+  internally-built `WorkflowData` into operation-metrics collection; read the collected stats
+  after `Execute` with `GetMetrics()`, or export via the OpenTelemetry bridge.
+
+**Breaking (all top-level, confirmed small blast radius — this is the pre-1.0 window to get
+the frozen contracts right):**
+- **Removed the no-op `MetricsMiddleware()`** — it measured a duration and discarded it (never
+  recorded anywhere). *Migration:* enable metrics via `Workflow.MetricsConfig` + `GetMetrics()`
+  (above); metrics are a `Workflow` concern, not a middleware wrap.
+- **Universal `ErrRolledBack` (REM-03)** — a clean (fully-compensated) saga rollback now wraps
+  its cause as `fmt.Errorf("%w: %w", ErrRolledBack, cause)`, so `errors.Is(err, ErrRolledBack)`
+  is true for **any** rollback while `errors.As(err, &execErr)` still reaches the cause; a
+  **partial** rollback still returns `*SagaError`. The sentinel message was generalized to
+  `"workflow rolled back"`. *Migration:* replace any bare `err.(*ExecutionError)` on the
+  rollback path with `errors.As`. See
+  [ADR-0013](docs/architecture/adr/0013-pre-1.0-error-contract-fixes.md).
+- **`WithStore().Build()` now errors (REM-04)** — `builder.WithStore(s).Build()` previously ran
+  **silently non-durable** (a bare `*DAG` cannot carry a store); it now returns an
+  `ErrValidation` directing you to `FromBuilder`. *Migration:* build a store-backed run with
+  `workflow.FromBuilder(builder)` then `wf.Execute(ctx)`; omit `WithStore` for a non-durable
+  `Build()`. See [ADR-0013](docs/architecture/adr/0013-pre-1.0-error-contract-fixes.md).
+
+**Assessed and dropped (no code):** a typed action helper (`TypedAction`) — already covered by
+the existing compile-safe `Key[T]`/`Get[T]`/`Set[T]` typed-data path; ctx-aware compensation
+cancel — already implemented (the rollback-deadline ctx already reaches `Compensation.Execute`).
+A ctx-*ignoring* compensation can still leak ≤1 goroutine per node (Go cannot force-kill a
+goroutine); this stays a **documented accepted limitation**, unchanged from M12.
+
+**Moat holds:** default paths are byte-identical (durable format + gopter + TLA + format
+goldens hold by construction); **no determinism tax** (283/277 unchanged on the non-durable
+path); the batched-crash semantics are machine-checked in TLA+ (`specs/GroupCommit.tla`,
+bite-proven). The in-code version constant is bumped at release.
+
 ## [0.12.0-alpha]
 
 **M12 — Saga / Compensation (durable rollback).** A workflow can now *undo itself*: any node

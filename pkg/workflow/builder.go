@@ -55,6 +55,10 @@ func (b *WorkflowBuilder) WithWorkflowID(id string) *WorkflowBuilder {
 
 // WithStore sets the workflow store for persisting workflow state.
 // Returns the builder for method chaining.
+//
+// The store engages only via FromBuilder (which returns a store-backed *Workflow).
+// A bare Build() returns a *DAG that cannot carry a store, so since M14/REM-04
+// Build() REJECTS a store-configured builder rather than silently running non-durable.
 func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder {
 	b.store = store
 	return b
@@ -230,7 +234,28 @@ func (n *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder {
 
 // Build creates a DAG from the workflow definition.
 // Returns an error if the workflow definition is invalid (e.g., has cycles).
+//
+// M14 ph62 (REM-04): Build REFUSES when a store was configured via WithStore. A
+// bare *DAG does NOT carry a store — DAG.Execute has no persistence — so
+// WithStore(s).Build().Execute would run SILENTLY NON-DURABLE, discarding the store
+// the caller explicitly set (a silent durability-loss footgun). To build a durable,
+// store-backed run, use FromBuilder (returns a *Workflow whose Execute uses the
+// store) or construct a *Workflow directly. This guard turns the silent lie into a
+// loud, self-documenting error; the store-less Build() path is unchanged.
 func (b *WorkflowBuilder) Build() (*DAG, error) {
+	if b.store != nil {
+		return nil, fmt.Errorf(
+			"%w: WithStore configures a durable Workflow, but Build returns a bare DAG that cannot carry a store (Execute would silently run non-durable) — build with FromBuilder(b) to get a store-backed *Workflow instead",
+			ErrValidation,
+		)
+	}
+	return b.build()
+}
+
+// build is the guard-free DAG construction, used by Build (after the store guard)
+// and by FromBuilder (which DOES carry the store forward onto the *Workflow, so the
+// store is not lost — the guard would be wrong there). (M14 ph62 REM-04.)
+func (b *WorkflowBuilder) build() (*DAG, error) {
 	// Create a new DAG with capacity hints based on the number of nodes
 	nodeCount := len(b.nodes)
 	dag := NewDAGWithCapacity(b.workflowID, nodeCount)

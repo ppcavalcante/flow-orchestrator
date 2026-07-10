@@ -10,12 +10,12 @@ import (
 
 func TestWorkflowBuilder(t *testing.T) {
 	t.Run("Building workflow with builder pattern", func(t *testing.T) {
-		// Create workflow store
-		store := NewInMemoryStore()
-
-		// Create workflow using the builder API
-		builder := NewWorkflowBuilder().
-			WithStore(store)
+		// Create workflow using the builder API. This test builds a bare DAG and runs
+		// it directly (dag.Execute) — a NON-durable run — so it does NOT set WithStore
+		// (which since M14 ph62/REM-04 makes Build() error: a DAG can't carry a store;
+		// a durable run uses FromBuilder). Durable-build coverage lives in the store/
+		// resume tests that go through FromBuilder.
+		builder := NewWorkflowBuilder()
 
 		// Build workflow DAG with fluent API
 		builder.AddStartNode("fetch").
