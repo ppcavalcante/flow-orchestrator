@@ -11,10 +11,25 @@ import (
 	"testing"
 )
 
-// det-tax: the non-durable forward hot path allocates EXACTLY the frozen 283 (Workflow drive)
-// / 277 (DAG drive) — a hard equality (DEC-M12-BENCH). Alloc counts are deterministic, so an
-// extra alloc on the hot path reddens this. Frozen numbers: bench_baseline_preM12_test.go.
+// det-tax: the non-durable forward hot path allocates AT MOST the frozen CEILING of 283
+// (Workflow drive) / 277 (DAG drive) — the ratified arm64 numbers (DEC-M13-ARCH; frozen in
+// bench_baseline_preM12_test.go). A CEILING, not a hard equality: the guard's purpose is to
+// catch an ADDED alloc (the determinism tax the moat promises never to pay), so it reddens on
+// any count ABOVE the ceiling. It deliberately TOLERATES a count at-or-below: amd64 reads 1
+// lower (282/276) after the M14 ph60 interner right-sizing legitimately removed a hot-path
+// alloc — a REDUCTION is never a determinism-tax regression, and exact-equality mis-flagged it
+// as a "BREACH" on amd64 CI. arm64 (the ratified measure arch) still reads 283/277 == ceiling.
+// A +1 regression on arm64 (284/278) still reddens — the moat guard is fully preserved.
 func TestPerfCeiling_DetTax(t *testing.T) {
+	// Skip under -race: the det-tax reading comes from testing.Benchmark().AllocsPerOp(),
+	// which the race detector inflates by a fixed instrumentation overhead (~+9 allocs),
+	// making the alloc count meaningless as a zero-determinism-tax measure. The guard is
+	// enforced NON-race (locally + a dedicated BLOCKING non-race CI step). (raceEnabled is
+	// build-tagged in race_on_test.go / race_off_test.go.)
+	if raceEnabled {
+		t.Skip("det-tax alloc ceiling is measured non-race; -race AllocsPerOp is instrumentation-inflated")
+	}
+
 	d := benchDiamondDAG(t)
 	ctx := context.Background()
 
@@ -29,8 +44,8 @@ func TestPerfCeiling_DetTax(t *testing.T) {
 			benchErrSink = w.Execute(ctx)
 		}
 	})
-	if got := wr.AllocsPerOp(); got != 283 {
-		t.Errorf("det-tax BREACH: Workflow non-durable drive = %d allocs/op, want EXACTLY 283 (frozen)", got)
+	if got := wr.AllocsPerOp(); got > 283 {
+		t.Errorf("det-tax BREACH: Workflow non-durable drive = %d allocs/op, want <= 283 (frozen arm64 ceiling)", got)
 	}
 
 	dr := testing.Benchmark(func(b *testing.B) {
@@ -40,8 +55,8 @@ func TestPerfCeiling_DetTax(t *testing.T) {
 			benchErrSink = d.Execute(ctx, NewWorkflowData("wf"))
 		}
 	})
-	if got := dr.AllocsPerOp(); got != 277 {
-		t.Errorf("det-tax BREACH: DAG non-durable drive = %d allocs/op, want EXACTLY 277 (frozen)", got)
+	if got := dr.AllocsPerOp(); got > 277 {
+		t.Errorf("det-tax BREACH: DAG non-durable drive = %d allocs/op, want <= 277 (frozen arm64 ceiling)", got)
 	}
 }
 
