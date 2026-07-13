@@ -5,6 +5,56 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0-alpha] — 2026-07-12
+
+**M15 — SQLite-backed WorkflowStore.** A **fully additive** third first-class store that
+persists a run **decomposed into rows** (one row per node) rather than as one blob per file.
+It is the **WIDEN-not-freeze** outcome of the 1.0-freeze intake: the structural fix for the
+M14 deep-durable `O(N²)` re-serialize tail *and* the enabler for durable-visibility queries —
+both delivered over the frozen `WorkflowStore` base, foreclosing nothing about the 1.0 freeze.
+See [ADR-0014](docs/architecture/adr/0014-decomposed-sqlite-store.md).
+
+**Added (all additive — the frozen `WorkflowStore` base and every existing signature are
+unchanged; the new capabilities are optional, type-asserted interfaces):**
+- **`SQLiteStore`** + `NewSQLiteStore(path string, opts ...SQLiteOption)` — a decomposed,
+  row-based store backed by pure-Go **`modernc.org/sqlite`** (`CGO_ENABLED=0` preserved).
+  Schema: `workflows` (run scalars — **no `status` column; run status is DERIVED per-node**) +
+  `nodes` (per-node status + output; a `''` sentinel status = output-only node, **not** a
+  phantom `Pending`) + `data_kv` (typed) + `waits`. `Load` reconstructs a `WorkflowData`
+  byte-identical to the FB/JSON path. **Single-process only** (single-writer connection +
+  in-process lease — not multi-process-safe); call `Close()` at shutdown.
+- **`IncrementalCheckpointer`** (`SaveDeltaCheckpoint(ChangeSet, *WorkflowData)`) + the
+  `ChangeSet` type — the **structural fix for the deep-durable `O(N²)` tail**. The executor
+  passes the per-level changed-set → the store UPSERTs only what changed = `O(Δ)` compute and
+  writes = a genuine **`O(N)` forward drive**. (Even the delta-free `Checkpointer` fallback is
+  already a large absolute win over the M14 blob store — committed deep benchmark: deep-4000
+  ≈1.86s vs M14's ≈44.8s, ~24× faster — but keeps the `O(N²)` compute shape; the true `O(N)`
+  is from the incremental interface, **not** decomposition alone.) A store without
+  `IncrementalCheckpointer` falls back to the full `SaveCheckpoint` unchanged.
+- **`WorkflowQuery`** (`ListByNodeStatus`, `ListRollingBack`) — additive indexed visibility.
+  Option A **honest primitives** over the real per-node model (run status is DERIVED); the
+  caller composes run-level buckets. Two covering indexes; no per-run decode.
+- **SQLite durability modes** — `WithSQLiteDurability(SQLiteStrict() | SQLiteBatched(k))`, the
+  analogue of the FB `WithDurabilityMode`. `SQLiteStrict` (default) = `synchronous=FULL` +
+  `fullfsync=1`, per-commit power-loss-durable; `SQLiteBatched(k)` = `synchronous=NORMAL` +
+  WAL + a durable `wal_checkpoint(TRUNCATE)` every `k`th checkpoint, a **≤`k`-level power-loss
+  window** (lost levels re-run idempotently). `Syncer.Sync` is the suspend/completion floor in
+  both modes. darwin needs `F_FULLFSYNC` (both modes set `fullfsync=1`).
+
+**Durability honesty:** `SQLiteStore` provides **exactly-once state PERSISTENCE and
+at-least-once side EFFECTS** (idempotency-keyed) — never unqualified exactly-once.
+
+**No moat regression, no breaking changes:** the durable format is byte-unchanged, the
+determinism tax is frozen, gopter (with the SQLite store substituted) + TLA (a new
+`specs/DecomposedCheckpoint.tla` set-of-rows crash-atomicity arm, `INV_NoPartialLevel`) hold.
+No `.fbs`/format change.
+
+**Changed — Compatibility:**
+- **Minimum Go version raised to 1.25.0** (required by the new `modernc.org/sqlite`
+  dependency, whose own module declares `go 1.25.0`). The module directive is now
+  `go 1.25.0`; a Go 1.24 toolchain can no longer build the library. `CGO_ENABLED=0` is
+  still fully supported (`modernc.org/sqlite` is pure-Go).
+
 ## [0.13.0-alpha]
 
 **M14 — Pre-1.0 Remediation.** The last breaking-change window before the 1.0 freeze of all
@@ -648,7 +698,9 @@ plus the M1 correctness/security fixes that were never recorded in this file.
 - Limited persistence options
 - Documentation is being improved
 
-[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.12.0-alpha...HEAD
+[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.14.0-alpha...HEAD
+[0.14.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.13.0-alpha...v0.14.0-alpha
+[0.13.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.12.0-alpha...v0.13.0-alpha
 [0.12.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.12.0-alpha
 [0.11.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.11.0-alpha
 [0.7.2-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.7.2-alpha

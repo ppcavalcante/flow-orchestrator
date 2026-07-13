@@ -362,7 +362,30 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	// on one *Workflow memory-safe — each call has its own ctx-scoped callback, so
 	// there is no shared-field write to race and no `defer …=nil` that one run
 	// could use to nil out another run's callback. (DEC-M10-P37-LEASE(a).)
-	if cp, ok := w.Store.(Checkpointer); ok {
+	//
+	// M15 ph69: when the Store ALSO implements IncrementalCheckpointer, drive the fast
+	// O(N) path — turn on per-Execute delta capture (the mutators then record touched keys
+	// O(1); zero-alloc + no-op when off, so non-incremental runs and the hot path are
+	// unaffected — det-tax stays exact), and the per-level callback drains the changed-set
+	// and calls SaveDeltaCheckpoint. A level whose drain is inactive/first-warm falls back
+	// to the full SaveCheckpoint (byte-identical), so correctness never rides the fast path
+	// alone. Capture is disarmed when this drive returns. Forward-drive only: M12 rollback
+	// (handled above via finishRollback→Save) never reaches here.
+	if inc, ok := w.Store.(IncrementalCheckpointer); ok {
+		data.beginDeltaCapture()
+		defer data.endDeltaCapture()
+		cp, isCp := w.Store.(Checkpointer) // an IncrementalCheckpointer is expected to also be a Checkpointer (the fallback)
+		ctx = withCheckpoint(ctx, func(d *WorkflowData) error {
+			changed, active := d.drainDeltaCapture()
+			if active {
+				return inc.SaveDeltaCheckpoint(changed, d)
+			}
+			if isCp {
+				return cp.SaveCheckpoint(d)
+			}
+			return nil
+		})
+	} else if cp, ok := w.Store.(Checkpointer); ok {
 		ctx = withCheckpoint(ctx, func(d *WorkflowData) error {
 			return cp.SaveCheckpoint(d)
 		})

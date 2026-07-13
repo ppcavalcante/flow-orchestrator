@@ -20,7 +20,7 @@ If you're new to Flow Orchestrator, we recommend following this learning path:
 
 ## System Requirements
 
-- Go 1.24 or higher
+- Go 1.25 or higher
 - A small set of runtime dependencies: `google/flatbuffers` (persistence) and
   `go.opentelemetry.io/otel/metric` (the optional metrics bridge API); plus
   test-only deps (`leanovate/gopter`, `stretchr/testify`, the OTel SDK). All are
@@ -31,7 +31,7 @@ If you're new to Flow Orchestrator, we recommend following this learning path:
 
 | Flow Orchestrator Version | Go Version |
 |---------------------------|------------|
-| `v0.13.0-alpha` (latest release tag; `@latest` resolves here) | 1.24+ |
+| `v0.14.0-alpha` (latest release tag; `@latest` resolves here) | 1.25+ |
 
 All published tags are pre-releases; there is no stable (`v1`+) release yet.
 

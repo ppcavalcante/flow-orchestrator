@@ -20,6 +20,12 @@ setc() { sed -i '' "$2" "$1"; }   # macOS sed; drop the '' on GNU sed
 echo "== preservation (M10 diamond re-runs the extended spec, ~14,380 states) =="
 green M10DurableExecutor.cfg MCM10DurableExecutor.tla "M10 preservation"
 
+echo "== M10 fail-resume (DEC-M10-P39-T5, ~915 states) — the hard-fail arm the diamond =="
+echo "== capstone (FailSet={}) does NOT exercise: nF hard-fails, nD skips, indep nT completes, =="
+echo "== crash+recover preserves Failed/Skipped (NoResurrection non-vacuous). Wired in so it =="
+echo "== can't rot again (task #103 — it broke because it was never exercised). =="
+green M10FailResume.cfg MCM10FailResume.tla "M10 fail-resume (T5)"
+
 echo "== base M11 (crash-free), all routes =="
 cp M11ChoiceMerge.cfg /tmp/base44.cfg
 for r in bA bB bC; do

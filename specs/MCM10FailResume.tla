@@ -26,7 +26,25 @@ MCDeps  == { <<nF, nD>> }   \* nD depends on the failing node; nT is independent
 MCFireAt == [n \in MCNodes |-> IF n = nT THEN 2 ELSE 0]
 
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause
 
-INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt
+\* M11 OR-join + M12 saga arms are EMPTY/inert for this M10 fail-resume config, so
+\* they re-run the extended spec byte-behaviour-unchanged (DEC-M11-P44-PRESERVE /
+\* M12 preservation) — the fail-resume scenario is unaffected by the later arms.
+\* These bindings were missing (the wrapper went stale when M10DurableExecutor gained
+\* the M11/M12 constants+variables), which is why it failed to parse (task #103).
+MCChoiceNodes    == {}
+MCChoiceFailSet  == {}
+MCMergeNodes     == {}
+MCChoiceBranches == [c \in {} |-> {}]
+MCChosenBranch   == [c \in {} |-> nF]
+MCMergeTails     == [m \in {} |-> {}]
+MCSagaNodes    == {}
+MCCompFailSet  == {}
+MCSagaTrigger  == "none"
+
+INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
+    ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
+    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
+    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger
 =============================================================================

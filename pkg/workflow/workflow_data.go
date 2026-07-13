@@ -55,6 +55,12 @@ type WorkflowData struct {
 
 	// String interning for efficiency
 	stringInterner *stringInterner
+
+	// capture is the per-Execute delta accumulator (M15 ph69). NIL on the non-durable /
+	// plain-Checkpointer hot path (recordDelta is then a single branch, zero alloc — det-tax
+	// stays EXACT). Non-nil only while an IncrementalCheckpointer run drives forward, set by
+	// beginDeltaCapture. Guarded by mu (see workflow_data_delta.go).
+	capture *deltaCapture
 }
 
 // NewWorkflowData creates a new workflow data instance with the given ID.
@@ -95,7 +101,9 @@ func NewWorkflowDataWithConfig(id string, config WorkflowDataConfig) *WorkflowDa
 func (w *WorkflowData) SetWait(nodeName string, fireAt int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.waits[w.internKey(nodeName)] = fireAt
+	k := w.internKey(nodeName)
+	w.waits[k] = fireAt
+	w.recordDelta(deltaWait, k)
 }
 
 // GetWait returns the persisted fireAt for a node and whether the node has an
@@ -116,6 +124,8 @@ func (w *WorkflowData) ClearWait(nodeName string) {
 	defer w.mu.Unlock()
 	// No interning on the read path; delete is keyed by string value.
 	delete(w.waits, nodeName)
+	// Record the touch: the fast path re-reads d, finds the wait ABSENT ⇒ DELETEs the row.
+	w.recordDelta(deltaWait, nodeName)
 }
 
 // ForEachWait iterates over every armed timer's (nodeName, fireAt). Used by the
@@ -180,7 +190,9 @@ func (w *WorkflowData) Set(key string, value interface{}) {
 	if w.metricsDisabled() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.data[w.internKey(key)] = value
+		k := w.internKey(key)
+		w.data[k] = value
+		w.recordDelta(deltaData, k)
 		return
 	}
 
@@ -188,7 +200,9 @@ func (w *WorkflowData) Set(key string, value interface{}) {
 	w.metrics.TrackOperation(metrics.OpSet, func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.data[w.internKey(key)] = value
+		k := w.internKey(key)
+		w.data[k] = value
+		w.recordDelta(deltaData, k)
 	})
 }
 
@@ -235,6 +249,11 @@ func (w *WorkflowData) Delete(key string) bool {
 		if existed {
 			delete(w.data, internedKey)
 		}
+		// ph69-AF1: Delete is a 6th data mutator — record the touch so the delta fast path
+		// re-reads d, finds the key ABSENT, and emits the DELETE (else the row survives and
+		// the fast path diverges from a full SaveCheckpoint). Recorded unconditionally: a
+		// no-op delete re-reads absent and DELETEs 0 rows, still byte-identical.
+		w.recordDelta(deltaData, internedKey)
 		return existed
 	}
 
@@ -247,6 +266,7 @@ func (w *WorkflowData) Delete(key string) bool {
 		if existed {
 			delete(w.data, internedKey)
 		}
+		w.recordDelta(deltaData, internedKey) // ph69-AF1 (see fast-path note above)
 	})
 
 	return existed
@@ -259,7 +279,9 @@ func (w *WorkflowData) SetNodeStatus(nodeName string, status NodeStatus) {
 	if w.metricsDisabled() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.nodeStatus[w.internKey(nodeName)] = status
+		k := w.internKey(nodeName)
+		w.nodeStatus[k] = status
+		w.recordDelta(deltaNode, k)
 		return
 	}
 
@@ -267,7 +289,9 @@ func (w *WorkflowData) SetNodeStatus(nodeName string, status NodeStatus) {
 	w.metrics.TrackOperation(metrics.OpSetStatus, func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.nodeStatus[w.internKey(nodeName)] = status
+		k := w.internKey(nodeName)
+		w.nodeStatus[k] = status
+		w.recordDelta(deltaNode, k)
 	})
 }
 
@@ -304,7 +328,9 @@ func (w *WorkflowData) SetOutput(nodeName string, output interface{}) {
 	if w.metricsDisabled() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.outputs[w.internKey(nodeName)] = output
+		k := w.internKey(nodeName)
+		w.outputs[k] = output
+		w.recordDelta(deltaNode, k)
 		return
 	}
 
@@ -312,7 +338,9 @@ func (w *WorkflowData) SetOutput(nodeName string, output interface{}) {
 	w.metrics.TrackOperation(metrics.OpSetOutput, func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.outputs[w.internKey(nodeName)] = output
+		k := w.internKey(nodeName)
+		w.outputs[k] = output
+		w.recordDelta(deltaNode, k)
 	})
 }
 

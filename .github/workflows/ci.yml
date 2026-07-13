@@ -15,11 +15,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.24.x = the go.mod floor (lowest supported); 1.25.x = the dev/build
-        # toolchain. Testing both catches "used a 1.25-only feature while
-        # declaring 1.24". 1.25.x is pinned to a patched release (>=1.25.11,
-        # the govulncheck stdlib-advisory ceiling) — see DEC-M5-toolchain.
-        go: [ '1.24.x', '1.25.11' ]
+        # 1.25.0 = the go.mod floor (lowest supported) — RAISED from 1.24 in M15:
+        # modernc.org/sqlite v1.53.0's own go.mod requires `go 1.25.0`, so our module
+        # directive is now `go 1.25.0` and a 1.24 toolchain can no longer build it.
+        # 1.25.11 = the release/build toolchain, pinned to a patched release (>=1.25.11,
+        # the govulncheck stdlib-advisory ceiling) — see DEC-M5-toolchain. Testing both
+        # arms preserves cross-toolchain coverage (det-tax alloc counts drift across Go
+        # minor versions; the det-tax calibration is go1.25-consistent so a 1.25.0 floor
+        # arm is clean).
+        go: [ '1.25.0', '1.25.11' ]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -34,6 +38,15 @@ jobs:
         run: make generate-fb
       - name: Build
         run: go build -v ./...
+      - name: Pure-Go build (CGO_ENABLED=0, BLOCKING)
+        # The pure-Go / zero-CGo embeddable moat is now load-bearing on the M15
+        # SQLite dep (modernc.org/sqlite is pure-Go). A CGo regression — a new dep or
+        # import that needs a C toolchain — must redden a merge, or the "builds
+        # anywhere with no cgo" claim silently rots. Also cross-compile to a non-host
+        # target to catch a host-only assumption. (Mirrors the det-tax blocking step.)
+        run: |
+          CGO_ENABLED=0 go build ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build ./...
       - name: Vet
         run: go vet ./...
       - name: Gofmt (fail if any file is unformatted)

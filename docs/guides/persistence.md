@@ -76,6 +76,31 @@ if err != nil {
 see [Durability modes: Strict vs Batched](#durability-modes-strict-vs-batched)
 (`WithDurabilityMode(Batched(K))` group-commit).
 
+### SQLite Store (decomposed, row-based)
+
+Added in **M15**. A `SQLiteStore` persists the run **decomposed into rows** — one row per
+node instead of one blob per run — backed by pure-Go `modernc.org/sqlite` (no cgo:
+`CGO_ENABLED=0` is preserved):
+
+```go
+// Create a SQLite store (path to a .db file; the parent dir is created if absent)
+store, err := workflow.NewSQLiteStore("./workflow.db")
+if err != nil {
+    log.Fatalf("Failed to create store: %v", err)
+}
+defer store.Close() // SQLiteStore holds a DB handle; close it at shutdown
+```
+
+**Best for**: **deep durable workflows** (the row decomposition is the structural fix for
+the deep-durable `O(N²)` re-serialize tail — see [Deep-durable cost](#deep-durable-cost--and-the-sqlite-structural-fix)),
+and **durable visibility** (indexed "which runs have a `Waiting`/`Failed` node" queries —
+see [Indexed visibility](#indexed-visibility-workflowquery)). See
+[SQLite store details](#sqlite-store-details-decomposed-row-based) below and
+[ADR-0014](../architecture/adr/0014-decomposed-sqlite-store.md).
+
+> **Single-process only.** `SQLiteStore` uses a single-writer connection and an in-process
+> lease; it is **not** multi-process-safe. Do not point two processes at the same `.db` file.
+
 ## Trust & Safety
 
 The persistence layer has a defined, deliberately bounded trust model. Read it before
@@ -217,9 +242,10 @@ type Checkpointer interface {
 
 When the store a `Workflow` is given implements `Checkpointer`, `Workflow.Execute`
 flushes the run's state to the store **at each completed level barrier** (a
-checkpoint). The three built-in stores all implement it: the file stores
-(`JSONFileStore`, `FlatBuffersStore`) write atomically; `InMemoryStore` checkpoints
-into its map (useful for tests, but not durable across process death).
+checkpoint). All four built-in stores implement it: the file stores
+(`JSONFileStore`, `FlatBuffersStore`) and the row-based `SQLiteStore` write atomically;
+`InMemoryStore` checkpoints into its map (useful for tests, but not durable across
+process death).
 
 A store that does **not** implement `Checkpointer` keeps the prior behavior
 exactly — state is saved only at run boundaries — with zero overhead.
@@ -339,6 +365,52 @@ store, err := workflow.NewFlatBuffersStore(dir, workflow.WithDurabilityMode(work
 - **Only `FlatBuffersStore` batches.** `JSONFileStore` is always full-snapshot,
   `Strict`-only (it is not the deep-durable performance path).
 
+#### SQLite durability modes (`WithSQLiteDurability`, M15)
+
+`SQLiteStore` has the same two-mode contract, selected with its own option type
+(`WithSQLiteDurability` — the FB `WithDurabilityMode` is FB-typed and cannot be reused):
+
+```go
+// Strict (the default) — every checkpoint commit is power-loss-durable.
+store, err := workflow.NewSQLiteStore("./workflow.db") // == WithSQLiteDurability(SQLiteStrict())
+
+// Batched(K) — group commit: a durable flush only every Kth checkpoint. ≤K-level loss window.
+store, err := workflow.NewSQLiteStore("./workflow.db",
+    workflow.WithSQLiteDurability(workflow.SQLiteBatched(64)))
+```
+
+The mapping to SQLite's actual durability model:
+
+| | `SQLiteStrict()` (default) | `SQLiteBatched(k)` |
+|---|---|---|
+| pragmas | `synchronous=FULL` + `fullfsync=1` (+ WAL) | `synchronous=NORMAL` + `fullfsync=1` (+ WAL) |
+| durable boundary | every commit | every `k`th checkpoint via `wal_checkpoint(TRUNCATE)` |
+| power-loss loss window | **zero** completed levels | **up to `k`** completed levels |
+
+- **`SQLiteBatched(k)` weakens power-loss durability by design** — a crash loses only the WAL
+  frames since the last checkpoint, bounded to **≤`k`** levels. Those levels **re-run**
+  idempotently on resume (the same at-least-once contract). `k` is clamped to `≥1`.
+- **The suspend/completion floor holds in both modes** — `Sync()` (the `Syncer` capability)
+  forces a durable `wal_checkpoint(TRUNCATE)`, so a parked or finished run is power-loss-durable
+  regardless of the `Batched` cadence. In `Strict` every commit is already durable, so `Sync`
+  is a cheap no-op.
+- **darwin needs `F_FULLFSYNC`.** macOS's `fsync` deliberately does *not* flush the drive
+  cache, so both modes set `fullfsync=1` to make every fsync (and the checkpoint boundary) a
+  real `F_FULLFSYNC` drive flush. On Linux, `synchronous=FULL` uses the platform's native
+  power-loss primitive (`fdatasync`); `fullfsync` is a no-op there. The crash-*correctness* is
+  platform-portable (CI-gated on Linux); only the fsync *timing* number is darwin-specific.
+
+> **Honest note on the `O(N²)` shape:** the SQLite `Batched(K)` amortization is over the
+> **fsync** cost, exactly like the FB group-commit. It does **not** change the deep-durable
+> wall-clock *shape* on its own — the `O(N)` forward drive comes from the
+> [`IncrementalCheckpointer`](#deep-durable-cost--and-the-sqlite-structural-fix) fast path, not
+> from the durability mode. Do not read `Batched` as "makes deep runs `O(N)`".
+
+**Durability contract (SQLite, honest):** `SQLiteStore` provides **exactly-once state
+PERSISTENCE and at-least-once side EFFECTS** (idempotency-keyed) — *never* unqualified
+exactly-once. A committed checkpoint persists the run's state exactly once; a resumed re-run
+of a not-yet-checkpointed level re-executes its side effects (which must be idempotent).
+
 ### Saga rollback is crash-safe — and also at-least-once
 
 Added in **v0.12.0**, a saga rollback (see the
@@ -451,6 +523,115 @@ process, concurrent drives of the *same* `WorkflowID` (a timer `Tick` and a sign
 `DeliverAndResume` arriving at once) are serialized by a `Locker` lease (default
 in-process, `NewInProcessLocker`); different `WorkflowID`s run independently.
 Cross-*process* serialization for one `WorkflowID` remains the host's responsibility.
+
+## SQLite store details (decomposed, row-based)
+
+Added in **M15**, `SQLiteStore` is a third first-class `WorkflowStore` that stores the run
+**decomposed into rows** rather than as one blob per file (the FB/JSON model). It is fully
+**additive** — it implements the same frozen `WorkflowStore` base, plus the optional
+`Checkpointer`, `Syncer`, and the two M15 optional interfaces below. (It does **not**
+implement `SignalStore`, so `WaitForSignal` needs one of the other stores — see
+[Durable continuations](#wait-for-a-signal-addwaitforsignal--human-in-the-loop).) Backed by
+pure-Go `modernc.org/sqlite` (no cgo — `CGO_ENABLED=0` is preserved).
+
+### Schema (per-node rows)
+
+The durable unit is a **row**, not a blob:
+
+| Table | One row per | Holds |
+|---|---|---|
+| `workflows` | run | run-level scalars: `rolling_back`, `trigger_cause`, `updated_at`. **No `status` column.** |
+| `nodes` | node | `status` (a `NodeStatus` string) + `output` |
+| `data_kv` | data key | typed KV (a `kind` discriminator preserves the Go type; `int64` on an INTEGER-affinity column) |
+| `waits` | parked node | durable timer `fireAt` (M10) |
+
+Two things to know about the model — both are honesty invariants, not implementation trivia:
+
+- **Run status is DERIVED per-node — there is no `workflows.status` column.** A run's
+  "status" is a *derivation* over its per-node statuses, not a stored run-level field. The
+  visibility queries below derive it from the `nodes` rows.
+- **An output-only node stores a `''` (empty) sentinel status, not `Pending`.** A node that
+  has an output but no status entry (the blob store's "no status" state) is persisted with an
+  empty-string status so `Load` reconstructs *exactly* that state — the decomposed store never
+  synthesizes a phantom `Pending`.
+
+`SQLiteStore.Load` reconstructs a `WorkflowData` whose `Snapshot()` is **byte-identical** to
+the same data saved through the FB/JSON path (verified by a round-trip oracle and a gopter
+property substitution).
+
+### Deep-durable cost — and the SQLite structural fix
+
+The FB/JSON stores checkpoint the **whole** run per level, so a deep DAG re-serializes all
+`N` nodes at each of its `N` levels — an `O(N²)` serialize tail (see the
+[FlatBuffers depth-cost note](#durability--idempotency-crash-resume)). `SQLiteStore` fixes
+this **structurally**: because the durable unit is a row, a checkpoint can `UPSERT` only the
+nodes that changed.
+
+The fast path rides the optional **`IncrementalCheckpointer`** interface:
+
+```go
+// IncrementalCheckpointer — the executor passes the per-level changed-set; the store
+// re-reads and UPSERTs only those keys. O(Δ) compute AND writes = a genuine O(N) forward
+// drive (vs the O(N²) full-scan of a plain Checkpointer). Type-asserted, additive.
+type IncrementalCheckpointer interface {
+    SaveDeltaCheckpoint(changed ChangeSet, d *WorkflowData) error
+}
+
+type ChangeSet struct {
+    Nodes    []string
+    DataKeys []string
+    WaitKeys []string
+}
+```
+
+When the store implements `IncrementalCheckpointer`, `Workflow.Execute` drives it with the
+per-level changed-set → a measured **`O(N)` forward drive** (`O(Δ)` compute + writes per
+level, rather than re-scanning all `N`). Even without it, the decomposed store's
+delta-free `Checkpointer` fallback is already a large absolute win over the M14 blob store
+(the committed deep benchmark: a deep-4000 run ≈1.86s vs the M14 FlatBuffers snapshot tail's
+≈44.8s at the same depth — ~24× faster, ~1000× less I/O), but that fallback path keeps the
+`O(N²)` compute shape. A store that does **not** implement `IncrementalCheckpointer` falls
+back to the full `SaveCheckpoint` unchanged.
+
+> **Honest bound:** the `O(N)` win is delivered by the **incremental interface**, not by
+> decomposition alone. The plain `SaveCheckpoint` fallback still scans all `N` nodes per level
+> (it has no changed-set to work from), so it retains the `O(N²)` compute shape — only the
+> `SaveDeltaCheckpoint` forward path is true `O(N)`.
+
+### Indexed visibility (`WorkflowQuery`)
+
+`SQLiteStore` answers durable-visibility questions from **indexes**, not the composition-only
+`ListWorkflows` → `Load`-each → decode fallback (which deserializes every run):
+
+```go
+// WorkflowQuery — additive optional indexed visibility. Honest primitives over the real
+// (derived, per-node) data model; the caller composes run-level buckets. Type-asserted.
+type WorkflowQuery interface {
+    // ListByNodeStatus returns the DISTINCT workflow IDs with at least one node in status.
+    // since>0 additionally filters to updated_at >= since (unix-nanos); since<=0 = no filter.
+    ListByNodeStatus(status NodeStatus, since int64) ([]string, error)
+    // ListRollingBack returns the workflow IDs currently rolling back (M12), optionally
+    // filtered by since (updated_at >= since).
+    ListRollingBack(since int64) ([]string, error)
+}
+```
+
+The design is deliberately **honest primitives** (not contested run-level buckets): "which
+runs are waiting" is `ListByNodeStatus(workflow.Waiting)`, "which have a failed node" is
+`ListByNodeStatus(workflow.Failed)`; run-level compositions like "terminally failed"
+(`Failed ∧ ¬RollingBack`) or "completed" are the **caller's** composition from these
+primitives + `ListRollingBack`. `ListByNodeStatus` rejects an unknown status as corrupt input
+(`ErrValidation`). Two covering indexes back these queries (`idx_nodes_status`,
+`idx_workflows_rolling_back`); the `since` recency filter is a residual on the rows those
+indexes already fetch (no separate `updated_at` index — that would be write-amplification for
+no read gain).
+
+### SQLite durability modes
+
+`SQLiteStore` has its own durability knob, the analogue of the FlatBuffers
+`WithDurabilityMode` — see [Durability modes](#durability-modes-strict-vs-batched) below for
+the full `Strict` vs `Batched(K)` contract, which applies to SQLite via
+`WithSQLiteDurability(SQLiteStrict() | SQLiteBatched(k))`.
 
 ## Serialization Considerations
 

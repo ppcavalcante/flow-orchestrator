@@ -130,9 +130,24 @@ func roundTripExact(got *WorkflowData, want map[string]interface{}) bool {
 // scalar state plus the int64 killers, round-tripped through the real checkpoint
 // Save -> reload path, returns every value with its exact type and magnitude.
 func TestCheckpointFidelity_Property(t *testing.T) {
-	store, err := NewJSONFileStore(t.TempDir())
-	require.NoError(t, err)
+	// ph71: run the checkpoint fidelity property over the durable factories (InMemory/FB/SQLite),
+	// so the SQLite type-collapse round-trips every value byte-identically to the serializing
+	// stores (indistinguishable-under-test — the whole-suite SQL-01 bar, not just the ph66
+	// fixture). FB + SQLite carry the real type-collapse TEETH (encode/decode); InMemory is a
+	// non-serializing control (Clone(), cannot collapse int64->float64 — always passes). The
+	// JSON UseNumber int64 path is pinned separately by TestCheckpointFidelity_Int64Edges and
+	// TestCrossBackendParity_AllTypes (it is NOT in this factory set — reviewer ph71-F2).
+	for storeName, newStore := range durableStoreFactories(t) {
+		t.Run(storeName, func(t *testing.T) {
+			runCheckpointFidelityProperty(t, newStore())
+		})
+	}
+}
+
+func runCheckpointFidelityProperty(t *testing.T, store WorkflowStore) {
 	const id = "fid"
+	cp, ok := store.(Checkpointer)
+	require.True(t, ok, "durable store must implement Checkpointer")
 
 	params := gopter.DefaultTestParametersWithSeed(0xF1DE1117)
 	params.MinSuccessfulTests = 300
@@ -158,7 +173,7 @@ func TestCheckpointFidelity_Property(t *testing.T) {
 			}
 
 			// The REAL resume path: checkpoint (atomic JSON Save) then reload.
-			if err := store.SaveCheckpoint(d); err != nil {
+			if err := cp.SaveCheckpoint(d); err != nil {
 				return false
 			}
 			got, err := store.Load(id)

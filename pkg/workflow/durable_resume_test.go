@@ -212,7 +212,40 @@ func TestDurableResume_CheckpointFailureAbortsRun(t *testing.T) {
 //     → assertion (2) fails (a persisted-Completed node re-executes);
 //   - drop output rehydration / journal fidelity → assertion (1) fails
 //     (resumed outputs differ from the no-crash run).
+//
+// durableStoreFactories are the durable Checkpointer stores the crash/resume property is
+// run against — the ph71 SQLite substitution runs the SAME property over SQLiteStore that
+// InMemory/FB pass (indistinguishable-under-test). Each returns a fresh store + a cleanup.
+func durableStoreFactories(t *testing.T) map[string]func() WorkflowStore {
+	t.Helper()
+	return map[string]func() WorkflowStore{
+		"inmemory": func() WorkflowStore { return NewInMemoryStore() },
+		"flatbuffers": func() WorkflowStore {
+			s, err := NewFlatBuffersStore(t.TempDir())
+			require.NoError(t, err)
+			return s
+		},
+		"sqlite": func() WorkflowStore {
+			s, err := NewSQLiteStore(t.TempDir() + "/wf.db")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // test cleanup
+			return s
+		},
+	}
+}
+
 func TestDurableResume_Property(t *testing.T) {
+	for storeName, newStore := range durableStoreFactories(t) {
+		t.Run(storeName, func(t *testing.T) {
+			runDurableResumeProperty(t, newStore)
+		})
+	}
+}
+
+// runDurableResumeProperty runs the crash-at-any-level ⇒ resume-converges property against
+// the store the factory produces. Store-agnostic (uses only the Checkpointer interface), so
+// it is the same property for InMemory / FB / SQLite (ph71 SQL-01 whole-suite).
+func runDurableResumeProperty(t *testing.T, newStore func() WorkflowStore) {
 	params := gopter.DefaultTestParametersWithSeed(0xD0DECA11)
 	params.MinSuccessfulTests = 200
 	params.MaxShrinkCount = 50
@@ -241,7 +274,11 @@ func TestDurableResume_Property(t *testing.T) {
 			}
 
 			// --- Crash run: persist levels 0..L-1, crash at level L. ---
-			store := NewInMemoryStore()
+			store := newStore() // ph71: InMemory / FB / SQLite (indistinguishable-under-test)
+			cp, ok := store.(Checkpointer)
+			if !ok {
+				return false // fail-clean, not a cp.SaveCheckpoint nil-panic (reviewer ph71-F3)
+			}
 			const id = "prop"
 			crashCounter := newExecCounter()
 			mkAction := func(i int) func(context.Context, *WorkflowData) error {
@@ -266,7 +303,7 @@ func TestDurableResume_Property(t *testing.T) {
 				if cpSeen >= crashAtLevel {
 					return errors.New("crash")
 				}
-				return store.SaveCheckpoint(snap)
+				return cp.SaveCheckpoint(snap)
 			}
 			data1 := NewWorkflowData(id)
 			crashDAG.Execute(withCheckpoint(context.Background(), crashCP), data1) //nolint:errcheck // may crash (injected) or complete; outcome read via the store below
@@ -301,7 +338,7 @@ func TestDurableResume_Property(t *testing.T) {
 			} else {
 				data2 = NewWorkflowData(id)
 			}
-			resumeCP := func(snap *WorkflowData) error { return store.SaveCheckpoint(snap) }
+			resumeCP := func(snap *WorkflowData) error { return cp.SaveCheckpoint(snap) }
 			if err := resumeDAG.Execute(withCheckpoint(context.Background(), resumeCP), data2); err != nil {
 				return false
 			}

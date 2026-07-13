@@ -364,12 +364,22 @@ func NewJSONFileStore(baseDir string) (*JSONFileStore, error)
 // the durability-flush mode (added v0.13.0); with no options the default is Strict
 // (the pre-v0.13 durable contract). See "Durability modes" below.
 func NewFlatBuffersStore(baseDir string, opts ...func(*FlatBuffersStore)) (*FlatBuffersStore, error)
+
+// NewSQLiteStore creates a decomposed, row-based store backed by pure-Go
+// modernc.org/sqlite (CGO_ENABLED=0 preserved). Added M15. Variadic options configure
+// the durability mode (WithSQLiteDurability, default SQLiteStrict). Single-process only
+// (single-writer connection + in-process lease — NOT multi-process-safe). Holds a DB
+// handle: call Close() at shutdown. Implements the frozen WorkflowStore base plus the
+// optional Checkpointer / Syncer / IncrementalCheckpointer / WorkflowQuery interfaces (NOT
+// SignalStore). See the SQLite store section below and ADR-0014.
+func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error)
 ```
 
 ### Durable crash-resume (added v0.9.0)
 
 A store MAY additionally implement the optional `Checkpointer` interface to opt
-into durable mid-run checkpointing. All three built-in stores implement it.
+into durable mid-run checkpointing. All four built-in stores implement it (InMemory,
+JSON, FlatBuffers, and the M15 `SQLiteStore`).
 
 ```go
 // Checkpointer is an optional interface a WorkflowStore may implement to enable
@@ -406,6 +416,63 @@ type Syncer interface {
     Sync(workflowID string) error
 }
 ```
+
+#### SQLite store — decomposed, indexed (added M15)
+
+`SQLiteStore` is a third first-class store that persists the run **decomposed into rows**
+(one row per node) rather than as one blob per run. It is **fully additive** — it implements
+the frozen `WorkflowStore` base plus the optional `Checkpointer` / `Syncer` interfaces above,
+plus two M15 optional interfaces below. (It does **not** implement `SignalStore` —
+`WaitForSignal` needs one of the other stores.) Backed by pure-Go
+`modernc.org/sqlite` (no cgo). **Single-process only** (not multi-process-safe). It has its
+own durability option type (`WithSQLiteDurability(SQLiteStrict() | SQLiteBatched(k))`), the
+analogue of `WithDurabilityMode`. See the
+[Persistence guide → SQLite store](../guides/persistence.md#sqlite-store-details-decomposed-row-based)
+and [ADR-0014](../architecture/adr/0014-decomposed-sqlite-store.md).
+
+```go
+// SQLiteOption configures a SQLiteStore at construction (variadic on NewSQLiteStore).
+type SQLiteOption func(*sqliteDurability)
+
+func WithSQLiteDurability(opt SQLiteOption) SQLiteOption
+func SQLiteStrict() SQLiteOption      // synchronous=FULL + fullfsync=1; per-commit durable (default)
+func SQLiteBatched(k uint) SQLiteOption // group commit: durable flush every kth checkpoint (k clamped >=1)
+
+// IncrementalCheckpointer — additive optional interface (M15). A store that implements it
+// receives the executor's per-level changed-set and UPSERTs only those keys: O(Δ) compute
+// AND writes = a genuine O(N) forward drive (the structural fix for the deep-durable O(N²)
+// tail). Type-asserted; a store without it falls back to the full SaveCheckpoint unchanged.
+// SQLiteStore implements it.
+type IncrementalCheckpointer interface {
+    SaveDeltaCheckpoint(changed ChangeSet, d *WorkflowData) error
+}
+
+// ChangeSet is the per-level touched-key set the executor passes to SaveDeltaCheckpoint.
+// A reported key absent from the WorkflowData means it was deleted (⇒ the store DELETEs it).
+type ChangeSet struct {
+    Nodes    []string
+    DataKeys []string
+    WaitKeys []string
+}
+
+// WorkflowQuery — additive optional indexed visibility (M15). Honest primitives over the
+// real per-node data model (run status is DERIVED — there is no run-level status column);
+// the caller composes run-level buckets. Indexed (no per-run decode). SQLiteStore implements it.
+type WorkflowQuery interface {
+    // ListByNodeStatus returns the DISTINCT workflow IDs with >=1 node in status. since>0
+    // additionally filters to updated_at >= since (unix-nanos); since<=0 = no recency filter.
+    // Rejects an unknown status as ErrValidation.
+    ListByNodeStatus(status NodeStatus, since int64) ([]string, error)
+    // ListRollingBack returns the workflow IDs currently rolling back (M12), since-filterable.
+    ListRollingBack(since int64) ([]string, error)
+}
+```
+
+> **Durability honesty (SQLite):** `SQLiteStore` provides **exactly-once state PERSISTENCE
+> and at-least-once side EFFECTS** (idempotency-keyed) — never unqualified exactly-once. Under
+> `SQLiteBatched(k)` a power loss can lose **≤`k`** completed levels (bounded, re-run
+> idempotently). The `O(N)` forward drive comes from `IncrementalCheckpointer`, not from the
+> durability mode. See the Persistence guide for the full contract.
 
 Resume is just re-running `Workflow.Execute` with the same `WorkflowID`, store, and
 DAG: `Completed` nodes are skipped (outputs rehydrated), every non-completed node

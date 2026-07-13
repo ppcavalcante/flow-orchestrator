@@ -7,18 +7,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// makeAllStores returns the three production stores, each rooted in a fresh temp
-// dir, so a round-trip assertion runs identically across FB / JSON / in-mem.
+// makeAllStores returns the production stores, each rooted in a fresh temp dir, so a
+// round-trip assertion runs identically across FB / JSON / in-mem / SQLite. The SQLite
+// store (M15) is included so every AllStores round-trip is part of the indistinguishable-
+// under-test bar (ph71 SQL-01 whole-suite). Its Close is registered via t.Cleanup.
 func makeAllStores(t *testing.T) map[string]WorkflowStore {
 	t.Helper()
 	fb, err := NewFlatBuffersStore(t.TempDir())
 	require.NoError(t, err)
 	js, err := NewJSONFileStore(t.TempDir())
 	require.NoError(t, err)
+	sq, err := NewSQLiteStore(t.TempDir() + "/wf.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sq.Close() }) //nolint:errcheck // test cleanup
 	return map[string]WorkflowStore{
 		"flatbuffers": fb,
 		"json":        js,
 		"inmemory":    NewInMemoryStore(),
+		"sqlite":      sq,
 	}
 }
 
