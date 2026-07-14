@@ -77,10 +77,12 @@ and a gopter substitution of the SQLite store into the existing property suite).
   — the SQLite analogue of ADR-0012 (see ADR-0012 and the durability semantics in the
   Persistence guide).
 
-**Single-process only.** The lease is an in-process `Locker` and the store uses a
+**Single-process only (in M15).** The lease is an in-process `Locker` and the store uses a
 single-writer connection (`SetMaxOpenConns(1)` + `busy_timeout`); it is **not**
-multi-process-safe and is documented as such. (`modernc.org/sqlite` is the pure-Go driver;
-multi-process access is out of scope for M15.)
+multi-process-safe. (`modernc.org/sqlite` is the pure-Go driver; multi-process access is out of
+scope for M15.) **Extended by opt-in cross-process safety in M16** —
+[ADR-0015](0015-multi-process-safety-leases-fencing.md) adds `WithMultiProcess()` leases +
+fencing tokens; the default single-process path here is byte-for-byte unchanged.
 
 ## Consequences
 

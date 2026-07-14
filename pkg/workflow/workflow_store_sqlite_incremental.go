@@ -202,7 +202,10 @@ func (s *SQLiteStore) saveIncremental(data *WorkflowData) error {
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("%w: begin: %w", ErrIO, err)
+		// The executor's per-level checkpoint drives this path; BEGIN IMMEDIATE acquires the write
+		// lock here, so a contended writer past busy_timeout surfaces SQLITE_BUSY → ErrBusy (transient),
+		// errors.Is-reachable at the Execute return; clean abort (no row written). (MAJOR-5)
+		return classifyTxErr("begin", err)
 	}
 	committed := false
 	defer func() {
@@ -210,6 +213,13 @@ func (s *SQLiteStore) saveIncremental(data *WorkflowData) error {
 			tx.Rollback() //nolint:errcheck,gosec // best-effort; the real error is already returned
 		}
 	}()
+
+	// M16 (ph74): the FENCING CAS rides this IMMEDIATE txn — reject a stale-token write BEFORE
+	// any row lands (mu is held; the CAS reads tokenState + re-reads leases.fencing_token). No-op
+	// in single-process mode or for a non-claimed drive. renew-on-checkpoint happens inside it.
+	if err := s.checkFencingLocked(ctx, tx, id); err != nil {
+		return err
+	}
 
 	// workflows row: an unconditional idempotent UPSERT. It's exactly ONE row, so the
 	// "skip if unchanged" micro-optimization isn't worth an INSERT-vs-UPDATE branch keyed
@@ -235,7 +245,7 @@ func (s *SQLiteStore) saveIncremental(data *WorkflowData) error {
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("%w: commit: %w", ErrIO, err)
+		return classifyTxErr("commit", err) // SQLITE_BUSY at commit → ErrBusy (transient); else ErrIO.
 	}
 	committed = true
 	// Advance the shadow ONLY after a durable COMMIT (crash-safety ordering).

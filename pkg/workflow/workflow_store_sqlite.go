@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (CGO_ENABLED=0)
 )
@@ -76,7 +77,19 @@ CREATE TABLE IF NOT EXISTS waits (
 -- open — a ONE-TIME synchronous build proportional to the existing nodes rows (O(N log N) under
 -- a write lock; safe under the single-process modernc driver), then free on every later open.
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status, workflow_id);
-CREATE INDEX IF NOT EXISTS idx_workflows_rolling_back ON workflows(rolling_back);`
+CREATE INDEX IF NOT EXISTS idx_workflows_rolling_back ON workflows(rolling_back);
+-- M16 (ph74) durable lease row for cross-process competing consumers (DEC-M16-D2). One row per
+-- CLAIMED workflow: owner_id = the claiming process's opaque identity; expiry = wall-clock lease
+-- deadline (a LIVENESS heuristic — decides WHEN re-claim is offered, NEVER safety, DEC-M16-D3);
+-- fencing_token = the monotonic, DB-issued SAFETY arbiter (decides WHOSE write wins). Additive
+-- (new table, no migration); empty + unused in single-process mode. The fencing CAS re-reads
+-- fencing_token inside the checkpoint IMMEDIATE txn and rejects a stale-token write.
+CREATE TABLE IF NOT EXISTS leases (
+    workflow_id   TEXT PRIMARY KEY,
+    owner_id      TEXT NOT NULL,
+    expiry        INTEGER NOT NULL,  -- unix-nanos lease deadline; liveness heuristic, NOT safety
+    fencing_token INTEGER NOT NULL   -- monotonic DB-issued token; the SOLE safety arbiter (DEC-M16-D3)
+);`
 
 // data_kv.kind discriminators — mirror the FB store's typed vectors so Load
 // reconstructs the SAME Go type the FB path yields (byte-identical Snapshot).
@@ -107,6 +120,23 @@ type SQLiteStore struct {
 	// (bounding a power-loss to ≤K un-checkpointed levels). Both guarded by mu.
 	dur       sqliteDurability
 	ckptCount map[string]uint
+	// M16 (ph74): tokenState[workflowID] = the fencing token this PROCESS's claim holds for a
+	// workflow (0 = no claim). Set by Claim, cleared by Release; read inside the checkpoint
+	// IMMEDIATE txn to CAS against leases.fencing_token. Race-free WITHOUT a per-token lock
+	// because the executor's Locker (workflow.go:215) already serializes all in-process drives
+	// of one WorkflowID across the whole load→run→checkpoint span — so there is never an
+	// in-process concurrent writer on the same workflow's token (the M15 shadow TOCTOU class,
+	// ph67, does not apply). Still guarded by mu (uniform with shadow/ckptCount). Empty +
+	// unused when mp=false (the CAS is mp-gated), so the single-process path is untouched.
+	tokenState map[string]FencingToken
+	// M16 (ph75): clock + leaseTTL govern the LEASE liveness only (Claim/Renew expiry +
+	// renew-on-checkpoint). Default clock = SystemClock; tests inject a FakeClock to make
+	// lease-lapse deterministic. DEC-M16-D3: expiry is a LIVENESS heuristic read through the
+	// clock; the fencing TOKEN is the sole SAFETY arbiter and NEVER reads the clock, so a clock
+	// skew/fake can never cause a safety violation. The store's updated_at writes stay on
+	// unixNanoNow() (hot/fidelity path — det-tax + FB-fidelity untouched).
+	clock    Clock
+	leaseTTL time.Duration
 }
 
 // NewSQLiteStore opens (creating if absent) a SQLite DB at path and ensures the
@@ -119,10 +149,18 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 	for _, opt := range opts {
 		opt(&dur)
 	}
+	//nolint:gosec // G703: `path` is the caller's own store-construction DB path (trusted
+	// construction input, not request-derived); the interprocedural taint tracker anchors here
+	// via openSQLiteDB(path,...), but no external data reaches the filesystem/DSN.
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	// M16 C1: multi-process mode opens with _txlock=immediate so every BeginTx acquires the
+	// write lock UP FRONT. M15's default DEFERRED txns let two OS-process writers both BEGIN
+	// then deadlock on lock upgrade (proven in the ph73 spike); IMMEDIATE serializes them.
+	// The single-process path keeps the bare `path` DSN byte-for-byte unchanged (opt-in) — the
+	// mp branch appends only a HARDCODED DSN suffix, no external data.
+	db, err := openSQLiteDB(path, dur.mp, dur.driverName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open sqlite: %w", ErrIO, err)
 	}
@@ -143,12 +181,24 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
 		return nil, fmt.Errorf("%w: schema: %w", ErrIO, err)
 	}
+	// M16 (ph75): resolve the lease-liveness clock + TTL (defaults when unset). Lease liveness only.
+	clock := dur.clock
+	if clock == nil {
+		clock = SystemClock()
+	}
+	leaseTTL := dur.leaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = defaultLeaseTTL
+	}
 	return &SQLiteStore{
-		db:        db,
-		path:      path,
-		shadow:    make(map[string]*shadowState),
-		dur:       dur,
-		ckptCount: make(map[string]uint),
+		db:         db,
+		path:       path,
+		shadow:     make(map[string]*shadowState),
+		dur:        dur,
+		ckptCount:  make(map[string]uint),
+		tokenState: make(map[string]FencingToken),
+		clock:      clock,
+		leaseTTL:   leaseTTL,
 	}, nil
 }
 
@@ -178,7 +228,11 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("%w: begin: %w", ErrIO, err)
+		// BEGIN IMMEDIATE (mp mode) acquires the write lock HERE — a contended writer that waits
+		// past busy_timeout surfaces SQLITE_BUSY at this boundary. Classify it as ErrBusy (transient,
+		// retryable) so a competing consumer can distinguish it from ErrFencedOut. Clean abort: no
+		// txn was opened, so nothing was written. (MAJOR-5)
+		return classifyTxErr("begin", err)
 	}
 	// Roll back on any error path; a successful Commit makes this a no-op.
 	committed := false
@@ -187,6 +241,11 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 			tx.Rollback() //nolint:errcheck,gosec // best-effort; the real error is already returned
 		}
 	}()
+
+	// M16 (ph74): the FENCING CAS rides this IMMEDIATE txn (no-op single-process / non-claimed).
+	if err := s.checkFencingLocked(ctx, tx, id); err != nil {
+		return err
+	}
 
 	// Clean overwrite: drop the workflow's prior rows, then rewrite. The table + id
 	// column names are HARDCODED literals (this loop + idCol), never user input — only
@@ -288,7 +347,7 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("%w: commit: %w", ErrIO, err)
+		return classifyTxErr("commit", err) // SQLITE_BUSY at commit → ErrBusy (transient); else ErrIO.
 	}
 	committed = true
 	// A full Save is a clean overwrite → the shadow now equals the full written state,

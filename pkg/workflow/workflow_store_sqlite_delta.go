@@ -106,6 +106,11 @@ func (s *SQLiteStore) SaveDeltaCheckpoint(changed ChangeSet, d *WorkflowData) er
 		}
 	}()
 
+	// M16 (ph74): the FENCING CAS rides this IMMEDIATE txn (no-op single-process / non-claimed).
+	if err := s.checkFencingLocked(ctx, tx, id); err != nil {
+		return err
+	}
+
 	// workflows row — unconditional idempotent UPSERT (one row, cheap; keeps the anchor
 	// current incl. rolling_back/trigger_cause without a scalar-change gate — ph68 shape).
 	if _, err := tx.ExecContext(ctx,

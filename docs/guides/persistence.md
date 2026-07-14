@@ -98,8 +98,12 @@ see [Indexed visibility](#indexed-visibility-workflowquery)). See
 [SQLite store details](#sqlite-store-details-decomposed-row-based) below and
 [ADR-0014](../architecture/adr/0014-decomposed-sqlite-store.md).
 
-> **Single-process only.** `SQLiteStore` uses a single-writer connection and an in-process
-> lease; it is **not** multi-process-safe. Do not point two processes at the same `.db` file.
+> **Single-process by default; multi-process is opt-in (M16).** Out of the box `SQLiteStore`
+> uses a single-writer connection and an in-process lease — do not point two processes at the
+> same `.db` file. To run **competing consumers** (a pool of worker processes sharing one
+> `.db`), opt in with `NewSQLiteStore(path, workflow.WithMultiProcess())` and drive via
+> `WithMultiProcessLocker(ownerID)` — see [Multi-process safety](#multi-process-safety-competing-consumers)
+> below. The default single-process path is byte-for-byte unchanged.
 
 ## Trust & Safety
 
@@ -454,8 +458,11 @@ b := workflow.NewWorkflowBuilder().WithWorkflowID("order-42")
 b.AddNode("place-order").WithAction(placeOrder)
 b.AddTimer("wait-1h", time.Hour).DependsOn("place-order")
 b.AddNode("send-reminder").WithAction(sendReminder).DependsOn("wait-1h")
-wf, _ := b.Build()
-wf.Store = store // must implement Checkpointer
+b.WithStore(store) // must implement Checkpointer
+wf, err := workflow.FromBuilder(b) // FromBuilder returns *Workflow (Build() returns *DAG)
+if err != nil {
+    log.Fatal(err)
+}
 
 // First drive: the timer arms + parks, Execute returns ErrSuspended.
 if err := wf.Execute(ctx); err != nil && !errors.Is(err, workflow.ErrSuspended) {
@@ -632,6 +639,117 @@ no read gain).
 `WithDurabilityMode` — see [Durability modes](#durability-modes-strict-vs-batched) below for
 the full `Strict` vs `Batched(K)` contract, which applies to SQLite via
 `WithSQLiteDurability(SQLiteStrict() | SQLiteBatched(k))`.
+
+## Multi-process safety (competing consumers)
+
+Added in **M16**. By default `SQLiteStore` is single-process (above). Opt into cross-process
+mode and N worker processes can share **one `.db` file** as **competing consumers**: each
+claims a distinct workflow, drives it, and safely hands off after a crash — with **no two live
+workers ever corrupting one run's journal**. It is fully additive and engages only when you opt
+in; the single-process path is untouched. See
+[ADR-0015](../architecture/adr/0015-multi-process-safety-leases-fencing.md).
+
+```go
+// Open the store in multi-process mode (per worker process).
+store, err := workflow.NewSQLiteStore("./shared.db",
+    workflow.WithMultiProcess(),          // enable cross-process leases + fencing
+    workflow.WithLeaseTTL(60*time.Second), // optional; default 30s (see sizing below)
+)
+if err != nil { log.Fatal(err) }
+defer store.Close()
+
+dag, err := builder.Build() // ... your DAG ...
+if err != nil { log.Fatal(err) }
+wf := &workflow.Workflow{
+    DAG:        dag,
+    WorkflowID: "order-123",
+    Store:      store, // the SAME *SQLiteStore instance opened above
+}
+wf.WithMultiProcessLocker("worker-" + hostID) // claim/fence this workflow for this owner
+
+err = wf.Execute(ctx)
+switch {
+case errors.Is(err, workflow.ErrClaimLost):
+    // A live lease is held by another worker — this consumer didn't win the workflow.
+    // Move on to the next one; do NOT retry this workflow.
+case errors.Is(err, workflow.ErrFencedOut):
+    // We were SUPERSEDED mid-run (a re-claim bumped the token). Do NOT retry — a
+    // successor owns this workflow now. Abort cleanly (no partial write landed).
+case errors.Is(err, workflow.ErrBusy):
+    // Transient write-lock contention past busy_timeout. Safe to RETRY.
+case err != nil:
+    // other error
+}
+```
+
+### How it works — leases for liveness, fencing tokens for safety
+
+The model deliberately splits the two halves of the hazard:
+
+- **A lease carries *liveness*** — a `leases(workflow_id, owner_id, expiry, fencing_token)`
+  row with an `expiry` says *when* a stalled/dead worker's workflow becomes re-claimable. The
+  TTL is a **timing heuristic, never a safety input**: getting it wrong only costs a redo.
+- **A monotonic fencing token carries *safety*** — every `Claim` returns a fresh, strictly
+  increasing `FencingToken` (a counter, **never** a timestamp — wall-clock is never trusted for
+  safety). On **every** checkpoint write, inside the same `BEGIN IMMEDIATE` transaction as the
+  row write, the store re-reads the durable token and **rejects the write if the token this
+  process holds is stale** (a re-claim bumped it). A superseded (zombie) write returns
+  `ErrFencedOut` and is rolled back — it never lands, no matter how long the zombie slept past
+  its lease. This compare-and-swap is the keystone: a lease *alone* is unsafe (a worker can
+  pause past its lease, get re-claimed, wake, and write); fencing is what makes that write fail.
+
+The oracle is **per-level**: a committed row written under an *older* token is legal durable
+state — re-claim resumes *from* it. Only a stale *overwrite of an already-advanced level* is
+rejected. That is why re-claim-after-death resumes from the **last committed frontier**, not a
+reset to empty: worker A claims (token N), commits level 0, dies; worker B re-claims (token
+N+1) and resumes from level-0's committed state, running to completion with the journal
+exactly-once.
+
+Renewal is free: the lease `expiry` is bumped **inside the checkpoint transaction**, so a
+worker making progress renews automatically with no background heartbeat. The executor wiring
+is a thin `Locker` adapter — `Acquire` = `Claim`, `release` = `Release` — so the executor core
+is unchanged.
+
+### The honesty contract — exactly-once PERSISTENCE, at-least-once EFFECTS
+
+**Exactly-once state *persistence* across processes; at-least-once *effects*.** Fencing
+guarantees the durable journal is written exactly once per level even under competing consumers.
+It does **not** make side effects exactly-once: a worker can complete a node's side effect, then
+die before its checkpoint commits, and the re-claimer re-runs that node. **Side effects must be
+idempotent** — the same at-least-once discipline the crash-resume model already requires (see
+[The at-least-once contract](#the-at-least-once-contract--side-effects-must-be-idempotent)).
+Never read this as unqualified "exactly-once".
+
+### Same-instance invariant (a footgun to know)
+
+The fencing token this process holds lives in the **store instance's in-memory state**, and the
+checkpoint compare-and-swap reads it off `Workflow.Store`. So the store the lock claims through
+and the store the drive checkpoints through **must be the identical `*SQLiteStore` instance** —
+not two handles on the same file. `WithMultiProcessLocker(ownerID)` **derives** the locker from
+`w.Store`, making the mismatch **impossible** — it is the sole public MP entry point, so a
+caller cannot hand it a different store instance. (It panics if `w.Store` is not a
+`WithMultiProcess` SQLiteStore — fail-loud, never a silently-unfenced drive.) The footgun is
+structurally removed from the public API.
+
+### Sizing `WithLeaseTTL`
+
+**Size the TTL above your longest expected single-level compute** (default 30s). A single level
+whose compute exceeds the TTL *without* an intervening checkpoint may have its lease lapse, get
+re-claimed, and its in-flight work **fenced and redone** — never double-committed. That is a
+**liveness** cost (a wasted redo), not a safety failure: the fencing CAS guarantees the
+superseded work never corrupts the journal. Undersizing wastes work; it never loses or
+duplicates durable state.
+
+### Error taxonomy — retry vs abort
+
+| Sentinel | Meaning | Recovery |
+|---|---|---|
+| `ErrClaimLost` | A `Claim` you didn't win — a live lease is held by another owner. | Don't run this workflow; move to the next. |
+| `ErrFencedOut` | **Superseded** — a re-claim owns this workflow now. | **Do NOT retry.** Abort cleanly (no partial write landed). |
+| `ErrBusy` | **Transient** — a write lock was contended past `busy_timeout` (`SQLITE_BUSY`). | Safe to **retry**. |
+
+`ErrFencedOut` (abort) and `ErrBusy` (retry) are kept `errors.Is`-distinct so the two recovery
+paths never collapse.
 
 ## Serialization Considerations
 

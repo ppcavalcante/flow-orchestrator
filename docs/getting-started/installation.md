@@ -29,20 +29,23 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.14.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.15.0-alpha
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release and there is
-> **no stable (`v1`+) release**. The latest is **`v0.14.0-alpha`** (the M12 saga / compensation
-> layer: durable reverse-order rollback via `WithCompensation`, the `Compensated` /
-> `CompensationFailed` statuses, a typed `SagaError`, and crash-safe mid-rollback resume — built
-> on M11 conditional branching (`ChoiceNode` + OR-join), the M10 durable-continuations core
-> (suspend/resume, durable timers, wait-for-signal/condition, the `Waiting` status), and the M9
-> crash-resume core, all with no determinism tax).
+> **no stable (`v1`+) release**. The latest is **`v0.15.0-alpha`** (M16 — Multi-Process Safety:
+> opt-in SQLite competing consumers, monotonic fencing tokens + leases so N worker processes share
+> one `.db` file with crash-safe hand-off — built on the M15 decomposed row-based `SQLiteStore`
+> (incremental `O(N)` checkpointing + indexed queries), the M12 saga / compensation layer (durable
+> reverse-order rollback via `WithCompensation`, the `Compensated` / `CompensationFailed` statuses,
+> a typed `SagaError`, crash-safe mid-rollback resume), M11 conditional branching (`ChoiceNode` +
+> OR-join), the M10 durable-continuations core (suspend/resume, durable timers,
+> wait-for-signal/condition, the `Waiting` status), and the M9 crash-resume core, all with no
+> determinism tax).
 > Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.14.0-alpha`** — so the command above is
+> resolves to the highest pre-release — currently **`v0.15.0-alpha`** — so the command above is
 > correct. Pinning the exact version
-> (`go get github.com/ppcavalcante/flow-orchestrator@v0.14.0-alpha`) is optional but recommended
+> (`go get github.com/ppcavalcante/flow-orchestrator@v0.15.0-alpha`) is optional but recommended
 > for reproducibility, and the API may change between alpha minors. The in-code version
 > (`pkg/workflow.Version`) reads `0.13.0-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
@@ -171,7 +174,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.14.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.15.0-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

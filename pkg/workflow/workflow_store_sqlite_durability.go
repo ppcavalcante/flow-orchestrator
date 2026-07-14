@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // SQLite durability modes (M15 ph68). WithDurabilityMode / DurabilityOption are FB-typed
@@ -42,10 +43,28 @@ import (
 // (the ph65 trap). The Strict/Batched crash-CORRECTNESS is platform-portable (CI-gated on
 // linux); only the fullfsync TIMING number is darwin-specific + SUMMARY-reported.
 
-// sqliteDurability is the resolved durability configuration for a SQLiteStore.
+// sqliteDurability is the resolved durability configuration for a SQLiteStore. It also
+// carries the M16 multi-process opt-in flag (mp) — the store's construction config, mutated
+// by the SQLiteOption functions. (Kept on this struct rather than a parallel one so the
+// existing SQLiteOption signature — func(*sqliteDurability) — is unchanged; mp is additive.)
 type sqliteDurability struct {
 	strict bool // true = synchronous=FULL + fullfsync=1, commit-per-level power-loss-durable
 	batchK uint // Batched cadence: force a durable wal_checkpoint(TRUNCATE) every K checkpoints (Strict ⇒ 1)
+	mp     bool // M16: multi-process mode — opens the DSN with _txlock=immediate (C1) + enables
+	// the fencing-token CAS on the checkpoint write paths. Default false = the M15
+	// single-process store, byte-for-byte unchanged.
+	// M16 (ph75) LEASE-liveness config (unused unless mp). clock: the injectable clock the
+	// lease methods read "now" through (nil → the store default SystemClock; a test FakeClock
+	// makes lease-lapse deterministic). leaseTTL: the lease duration (0 → the store default 30s).
+	// These govern LIVENESS only — the fencing token (safety) never reads the clock (DEC-M16-D3).
+	clock    Clock
+	leaseTTL time.Duration
+	// driverName overrides the "sqlite" database/sql driver name at open (TEST-ONLY, unexported —
+	// default "" → the real modernc "sqlite" driver, production byte-unchanged). A fault-injecting
+	// test driver registers itself under a distinct name and sets this via withSQLiteDriverName so
+	// the store's error branches (Exec/Query/Commit failures, fsync failure) can be exercised —
+	// task #126. Never a production knob: no exported setter reaches it.
+	driverName string
 }
 
 // defaultDurability is Strict (the safe default — every checkpoint power-loss-durable),

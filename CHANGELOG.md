@@ -5,6 +5,52 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0-alpha] — 2026-07-14
+
+**M16 — Multi-process safety (competing consumers).** A **fully additive, opt-in** extension
+of `SQLiteStore`: N worker processes can share one `.db` file, each claiming a distinct
+workflow and safely handing off after a crash — with no two live workers ever corrupting one
+run's journal. Engages only under `WithMultiProcess()`; the single-process path is byte-for-byte
+unchanged and the determinism tax is unaffected, so M17 = 1.0 stays clean. Safety rests on
+**monotonic fencing tokens** (a stale/zombie write is rejected by a compare-and-swap inside the
+checkpoint transaction); **leases** carry only liveness (a re-claim timing heuristic, never a
+safety input). See [ADR-0015](docs/architecture/adr/0015-multi-process-safety-leases-fencing.md).
+
+**Added (all additive — the frozen `WorkflowStore` base is untouched; `ClaimStore` is an
+optional, type-asserted interface like `Checkpointer`):**
+- **`WithMultiProcess()`** — a `SQLiteOption` that opts the store into cross-process mode
+  (DSN `_txlock=immediate`; the fencing CAS enabled on every checkpoint write). Default is the
+  M15 single-process store, unchanged.
+- **`WithLeaseTTL(d time.Duration)`** — sizes the lease duration (default 30s). Size it **above
+  your longest expected single-level compute**: an over-running level is fenced and **redone**
+  (a liveness cost), never double-committed. Liveness only — the fencing token, not the lease,
+  is the safety mechanism.
+- **`ClaimStore`** interface (`Claim` / `Renew` / `Release`) + the monotonic **`FencingToken`**
+  type. A `SQLiteStore` opened `WithMultiProcess()` implements it; type-assert like
+  `Checkpointer`/`WorkflowQuery`.
+- **`Workflow.WithMultiProcessLocker(ownerID string)`** — the **sole public MP entry point**;
+  wires cross-process claim/fence into the drive, **deriving** the locker from `w.Store` (the
+  fencing token lives in that store instance, so deriving it makes the same-instance mismatch
+  unrepresentable — the footgun is structurally removed from the public API). Panics if `w.Store`
+  is not a `WithMultiProcess` SQLiteStore (fail-loud). `ownerID` is a caller-supplied opaque,
+  stable, per-process identity.
+- **Typed sentinels** `ErrFencedOut` (superseded — **abort, do not retry**), `ErrClaimLost`
+  (lost to a live owner), `ErrBusy` (transient `SQLITE_BUSY` — **safe to retry**). All
+  `errors.Is`-reachable; abort (`ErrFencedOut`) and retry (`ErrBusy`) kept distinct.
+
+**Honesty contract:** **exactly-once state PERSISTENCE across processes, at-least-once EFFECTS**
+— never unqualified exactly-once. Side effects must be idempotent; re-claim-after-death resumes
+from the **last committed frontier**, not a reset to empty.
+
+**No moat regression, no breaking changes:** additive/opt-in only, format byte-unchanged,
+determinism tax unaffected. Formally verified — `specs/MPFencing.tla` (≥2 processes,
+nondeterministic lease-lapse, per-level `NoStaleOverwrite`, bite-proven) plus a **real
+2-OS-process** test (pause past the lease → `ErrFencedOut` + byte-checked journal, with a
+sustained-contention `ErrBusy` variant). All prior verification arms re-run and preserved.
+
+**Toolchain:** built + tested with **go1.25.11**; consumers should use **go >= 1.25.8** for the patched standard library (GO-2026-4341 net/url + the os.ReadDir DoS fixes). The go.mod language floor stays `go 1.25.0` (no consumer is stranded); govulncheck is clean on the release toolchain.
+
+
 ## [0.14.0-alpha] — 2026-07-12
 
 **M15 — SQLite-backed WorkflowStore.** A **fully additive** third first-class store that
@@ -698,7 +744,8 @@ plus the M1 correctness/security fixes that were never recorded in this file.
 - Limited persistence options
 - Documentation is being improved
 
-[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.14.0-alpha...HEAD
+[Unreleased]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.15.0-alpha...HEAD
+[0.15.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.14.0-alpha...v0.15.0-alpha
 [0.14.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.13.0-alpha...v0.14.0-alpha
 [0.13.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/compare/v0.12.0-alpha...v0.13.0-alpha
 [0.12.0-alpha]: https://github.com/ppcavalcante/flow-orchestrator/releases/tag/v0.12.0-alpha

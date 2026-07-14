@@ -367,11 +367,12 @@ func NewFlatBuffersStore(baseDir string, opts ...func(*FlatBuffersStore)) (*Flat
 
 // NewSQLiteStore creates a decomposed, row-based store backed by pure-Go
 // modernc.org/sqlite (CGO_ENABLED=0 preserved). Added M15. Variadic options configure
-// the durability mode (WithSQLiteDurability, default SQLiteStrict). Single-process only
-// (single-writer connection + in-process lease — NOT multi-process-safe). Holds a DB
+// the durability mode (WithSQLiteDurability, default SQLiteStrict). Single-process by
+// default (single-writer connection + in-process lease); opt into multi-process competing
+// consumers with WithMultiProcess() (M16 — then it also implements ClaimStore). Holds a DB
 // handle: call Close() at shutdown. Implements the frozen WorkflowStore base plus the
 // optional Checkpointer / Syncer / IncrementalCheckpointer / WorkflowQuery interfaces (NOT
-// SignalStore). See the SQLite store section below and ADR-0014.
+// SignalStore). See the SQLite store section below and ADR-0014/ADR-0015.
 func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error)
 ```
 
@@ -424,9 +425,11 @@ type Syncer interface {
 the frozen `WorkflowStore` base plus the optional `Checkpointer` / `Syncer` interfaces above,
 plus two M15 optional interfaces below. (It does **not** implement `SignalStore` —
 `WaitForSignal` needs one of the other stores.) Backed by pure-Go
-`modernc.org/sqlite` (no cgo). **Single-process only** (not multi-process-safe). It has its
-own durability option type (`WithSQLiteDurability(SQLiteStrict() | SQLiteBatched(k))`), the
-analogue of `WithDurabilityMode`. See the
+`modernc.org/sqlite` (no cgo). **Single-process by default; multi-process is opt-in** via
+`WithMultiProcess()` (M16 — see [below](#multi-process-safety--competing-consumers-added-m16)).
+It has its own durability option type
+(`WithSQLiteDurability(SQLiteStrict() | SQLiteBatched(k))`), the analogue of
+`WithDurabilityMode`. See the
 [Persistence guide → SQLite store](../guides/persistence.md#sqlite-store-details-decomposed-row-based)
 and [ADR-0014](../architecture/adr/0014-decomposed-sqlite-store.md).
 
@@ -491,6 +494,56 @@ func IdempotencyKey(data *WorkflowData, nodeName string) string
 
 See the [Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume)
 for the worked detail and the at-least-once contract.
+
+#### Multi-process safety — competing consumers (added M16)
+
+Opt `SQLiteStore` into cross-process mode and N worker processes can share one `.db` file as
+**competing consumers**: each claims a distinct workflow, drives it, and safely hands off after
+a crash, with no two live workers ever corrupting one run's journal. Fully additive — the
+`ClaimStore` interface is optional and type-asserted like `Checkpointer`, engaging only under
+`WithMultiProcess()`. Safety rests on **monotonic fencing tokens** (a stale/zombie write is
+rejected by a compare-and-swap inside the checkpoint transaction), with **leases** carrying
+only liveness (a timing heuristic). See the
+[Persistence guide → Multi-process safety](../guides/persistence.md#multi-process-safety-competing-consumers)
+and [ADR-0015](../architecture/adr/0015-multi-process-safety-leases-fencing.md).
+
+```go
+// Opt into multi-process mode + optionally size the lease (default 30s).
+func WithMultiProcess() SQLiteOption        // enable cross-process leases + fencing
+func WithLeaseTTL(d time.Duration) SQLiteOption // size ABOVE your longest level (liveness only)
+
+// FencingToken is the monotonic per-claim safety counter (NEVER a timestamp). 0 = no claim.
+type FencingToken int64
+
+// ClaimStore — additive optional cross-process interface (M16). A SQLiteStore opened
+// WithMultiProcess implements it; type-asserted. The frozen WorkflowStore base is untouched.
+type ClaimStore interface {
+    // Claim acquires (or re-claims a lapsed) lease for workflowID on behalf of ownerID (an
+    // opaque, stable, per-process identity), returning a fresh monotonic token. INSERT-or-CAS.
+    // Returns ErrClaimLost if a LIVE lease is held by a different owner.
+    Claim(workflowID, ownerID string) (FencingToken, error)
+    // Renew extends the lease expiry under the held token. Returns ErrFencedOut if superseded
+    // (the drive must abort). Checkpoints ALSO renew automatically inside their CAS txn.
+    Renew(workflowID string, token FencingToken) error
+    // Release drops the lease iff the caller still holds token (best-effort clean handoff).
+    Release(workflowID string, token FencingToken) error
+}
+
+// WithMultiProcessLocker wires cross-process claim/fence into this workflow's drive, DERIVING
+// the locker from w.Store (the safe, mismatch-proof way — the fencing token lives in that
+// store instance). ownerID is a caller-supplied opaque process identity. Panics if w.Store is
+// not a ClaimStore (a WithMultiProcess SQLiteStore). This is the ONLY public entry to MP mode:
+// the raw store-explicit constructor is intentionally unexported so the instance-mismatch
+// footgun (a different store instance makes fencing silently no-op) cannot reach a caller.
+func (w *Workflow) WithMultiProcessLocker(ownerID string) *Workflow
+```
+
+> **Honesty (multi-process):** the guarantee is **exactly-once state PERSISTENCE across
+> processes, at-least-once EFFECTS** — never unqualified exactly-once. Side effects must be
+> idempotent (a worker can finish a node's effect, then die before its checkpoint commits, and
+> the re-claimer re-runs it). Re-claim-after-death resumes from the **last committed frontier**,
+> not a reset to empty. Size `WithLeaseTTL` above your longest level — an over-running level is
+> fenced and redone (a liveness cost), never double-committed.
 
 ## Durable continuations (added v0.10.0)
 
@@ -998,6 +1051,39 @@ switch {
 case errors.Is(err, workflow.ErrNotFound):    // no such workflow
 case errors.Is(err, workflow.ErrCorruptData): // file present but undecodable
 case errors.Is(err, workflow.ErrIO):          // transient I/O — safe to retry
+}
+```
+
+### Multi-process / competing-consumers domain (added M16)
+
+Returned by the cross-process `ClaimStore` path and the MP-mode `Execute` drive. All three are
+`errors.Is`-reachable through the `%w`-wrapped drive return. The **retry-vs-abort** distinction
+is load-bearing — `ErrFencedOut` (abort) and `ErrBusy` (retry) are deliberately kept distinct.
+
+```go
+// ErrFencedOut: this worker was SUPERSEDED — a re-claim bumped the fencing token, so a write
+// under the stale token was rejected (the zombie write never lands). Do NOT retry: a successor
+// owns this workflow now. Abort cleanly.
+var ErrFencedOut = errors.New("fenced out: stale claim token")
+
+// ErrClaimLost: a Claim the caller did not win — a LIVE lease is held by another owner. The
+// competing consumer that lost the race simply does not run this workflow.
+var ErrClaimLost = errors.New("claim lost: workflow owned by another worker")
+
+// ErrBusy: TRANSIENT — a write txn could not acquire the SQLite write lock within busy_timeout
+// (SQLITE_BUSY). Contention, not supersession — safe to RETRY. Kept errors.Is-distinct from
+// ErrFencedOut so "abort" and "retry" never collapse.
+var ErrBusy = errors.New("sqlite busy: write lock contended past busy_timeout")
+```
+
+Branch with `errors.Is`:
+
+```go
+err := wf.Execute(ctx) // wf.WithMultiProcessLocker(ownerID), store WithMultiProcess()
+switch {
+case errors.Is(err, workflow.ErrClaimLost):  // lost to a live owner — skip, don't retry
+case errors.Is(err, workflow.ErrFencedOut):  // superseded mid-run — ABORT, don't retry
+case errors.Is(err, workflow.ErrBusy):       // transient contention — safe to RETRY
 }
 ```
 
