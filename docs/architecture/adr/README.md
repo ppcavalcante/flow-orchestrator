@@ -61,6 +61,7 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 | [0013](0013-pre-1.0-error-contract-fixes.md) | Pre-1.0 frozen-contract fixes — universal `ErrRolledBack` and the `WithStore().Build()` guard | Accepted | M14 |
 | [0014](0014-decomposed-sqlite-store.md) | Decomposed SQLite store — per-node rows, indexed visibility, and the deep-durable `O(N²)` structural fix | Accepted | M15 |
 | [0015](0015-multi-process-safety-leases-fencing.md) | Multi-process safety — SQLite leases + monotonic fencing tokens (competing consumers) | Accepted | M16 |
+| [0016](0016-work-dispatch-queue-registry-pool.md) | Work dispatch — durable work-queue, type→factory registry, and a store-per-worker pool | Accepted | M17 |
 
 ## How to Create a New ADR
 

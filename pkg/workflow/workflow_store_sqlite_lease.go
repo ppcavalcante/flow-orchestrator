@@ -170,7 +170,15 @@ func (s *SQLiteStore) clearToken(workflowID string) {
 	s.mu.Unlock()
 }
 
-// heldToken returns the token this process holds for a workflow (0 = none). Caller holds mu.
+// heldToken returns the token this process holds for a workflow (0 = none). Takes mu itself (for callers
+// outside a held-lock section, e.g. MarkDone/MarkFailed's lease-release, ph82).
+func (s *SQLiteStore) heldToken(workflowID string) FencingToken {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokenState[workflowID]
+}
+
+// heldTokenLocked returns the token this process holds for a workflow (0 = none). Caller holds mu.
 func (s *SQLiteStore) heldTokenLocked(workflowID string) FencingToken {
 	return s.tokenState[workflowID]
 }
@@ -237,6 +245,57 @@ func (s *SQLiteStore) leaseExpiryNanos() int64 { return s.nowNanos() + s.leaseTT
 // the interface; ph75 implements the policy, so the assertion is now real).
 var _ ClaimStore = (*SQLiteStore)(nil)
 
+// claimLocked is the INSERT-or-CAS core of a claim: the read-branch-write on the `leases` row that
+// decides the fencing token. It runs INSIDE the caller's txn (no BeginTx/Commit of its own) with the
+// caller holding s.mu — so both Claim (its own single-workflow txn) and ClaimNext (a scan+claim+flip
+// txn, M17 ph80) call it atomically inside ONE BEGIN IMMEDIATE txn. It does NOT set tokenState (the
+// caller does that AFTER a successful Commit, so a rolled-back claim never leaves a stale token).
+// Returns ErrClaimLost when the workflow is held by a LIVE lease under a DIFFERENT owner.
+func (s *SQLiteStore) claimLocked(ctx context.Context, tx *sql.Tx, workflowID, ownerID string) (FencingToken, error) {
+	var (
+		curOwner  string
+		curExpiry int64
+		curToken  FencingToken
+	)
+	scanErr := tx.QueryRowContext(ctx,
+		`SELECT owner_id, expiry, fencing_token FROM leases WHERE workflow_id = ?`, workflowID,
+	).Scan(&curOwner, &curExpiry, &curToken)
+
+	now := s.nowNanos()
+	switch {
+	case errors.Is(scanErr, sql.ErrNoRows):
+		// z4: never-claimed workflow → INSERT with token 1.
+		token := FencingToken(1)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO leases(workflow_id, owner_id, expiry, fencing_token) VALUES (?,?,?,?)`,
+			workflowID, ownerID, s.leaseExpiryNanos(), int64(token)); err != nil {
+			return 0, fmt.Errorf("%w: claim insert: %w", ErrIO, err)
+		}
+		return token, nil
+	case scanErr != nil:
+		return 0, fmt.Errorf("%w: claim read: %w", ErrIO, scanErr)
+	case now >= curExpiry:
+		// Lease LAPSED → re-claim: bump the token (this is what FENCES the old owner) + take it.
+		token := curToken + 1
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE leases SET owner_id=?, expiry=?, fencing_token=? WHERE workflow_id=?`,
+			ownerID, s.leaseExpiryNanos(), int64(token), workflowID); err != nil {
+			return 0, fmt.Errorf("%w: claim reclaim: %w", ErrIO, err)
+		}
+		return token, nil
+	case curOwner == ownerID:
+		// LIVE lease held by US (re-entrant) → idempotent: keep the token, refresh expiry.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE leases SET expiry=? WHERE workflow_id=?`, s.leaseExpiryNanos(), workflowID); err != nil {
+			return 0, fmt.Errorf("%w: claim refresh: %w", ErrIO, err)
+		}
+		return curToken, nil
+	default:
+		// LIVE lease held by ANOTHER owner → do NOT steal it.
+		return 0, ErrClaimLost
+	}
+}
+
 // Claim implements ClaimStore: acquire — or re-claim a lapsed — durable lease for workflowID on
 // behalf of ownerID, returning a fresh monotonic FencingToken. The whole read-branch-write is ONE
 // BEGIN IMMEDIATE txn (mp DSN), so N contenders SERIALIZE on the write lock and exactly one wins
@@ -267,46 +326,9 @@ func (s *SQLiteStore) Claim(workflowID, ownerID string) (FencingToken, error) {
 		}
 	}()
 
-	var (
-		curOwner  string
-		curExpiry int64
-		curToken  FencingToken
-	)
-	scanErr := tx.QueryRowContext(ctx,
-		`SELECT owner_id, expiry, fencing_token FROM leases WHERE workflow_id = ?`, workflowID,
-	).Scan(&curOwner, &curExpiry, &curToken)
-
-	now := s.nowNanos()
-	var token FencingToken
-	switch {
-	case errors.Is(scanErr, sql.ErrNoRows):
-		// z4: never-claimed workflow → INSERT with token 1.
-		token = 1
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO leases(workflow_id, owner_id, expiry, fencing_token) VALUES (?,?,?,?)`,
-			workflowID, ownerID, s.leaseExpiryNanos(), int64(token)); err != nil {
-			return 0, fmt.Errorf("%w: claim insert: %w", ErrIO, err)
-		}
-	case scanErr != nil:
-		return 0, fmt.Errorf("%w: claim read: %w", ErrIO, scanErr)
-	case now >= curExpiry:
-		// Lease LAPSED → re-claim: bump the token (this is what FENCES the old owner) + take it.
-		token = curToken + 1
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE leases SET owner_id=?, expiry=?, fencing_token=? WHERE workflow_id=?`,
-			ownerID, s.leaseExpiryNanos(), int64(token), workflowID); err != nil {
-			return 0, fmt.Errorf("%w: claim reclaim: %w", ErrIO, err)
-		}
-	case curOwner == ownerID:
-		// LIVE lease held by US (re-entrant) → idempotent: keep the token, refresh expiry.
-		token = curToken
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE leases SET expiry=? WHERE workflow_id=?`, s.leaseExpiryNanos(), workflowID); err != nil {
-			return 0, fmt.Errorf("%w: claim refresh: %w", ErrIO, err)
-		}
-	default:
-		// LIVE lease held by ANOTHER owner → do NOT steal it.
-		return 0, ErrClaimLost
+	token, err := s.claimLocked(ctx, tx, workflowID, ownerID)
+	if err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {

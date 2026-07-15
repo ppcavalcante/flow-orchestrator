@@ -545,6 +545,57 @@ func (w *Workflow) WithMultiProcessLocker(ownerID string) *Workflow
 > not a reset to empty. Size `WithLeaseTTL` above your longest level — an over-running level is
 > fenced and redone (a liveness cost), never double-committed.
 
+#### Work dispatch — queue, registry, pool (added M17)
+
+An opt-in competing-consumers dispatch layer on the `WithMultiProcess()` store: a durable
+`work_queue` table + atomic `ClaimNext`, a type→DAG-factory `Registry`, and a store-per-worker
+`Pool` — a zero-infra distributed job queue. All additive; requires an mp store. See the
+[Work dispatch guide](../guides/dispatch.md) and
+[ADR-0016](../architecture/adr/0016-work-dispatch-queue-registry-pool.md).
+
+```go
+// The queue (on a WithMultiProcess SQLiteStore). All require mp mode.
+func (s *SQLiteStore) Enqueue(workflowID, typ string, input []byte) (queued bool, err error)
+func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem, error) // ErrNoWork if none
+func (s *SQLiteStore) MarkDone(workflowID string) (bool, error)     // claimed→done (CAS + token-guarded)
+func (s *SQLiteStore) MarkFailed(workflowID string) (bool, error)   // claimed→failed
+func (s *SQLiteStore) MarkForRetry(workflowID string, maxAttempts int) (requeued bool, err error) // claimed→pending if attempts<max
+func (s *SQLiteStore) CancelPending(workflowID string) (bool, error) // pending→cancelled (rejects a claimed item)
+func (s *SQLiteStore) ListPending(olderThan int64) ([]PendingItem, error) // stuck-work visibility, FIFO
+
+// A claimed item; input is the opaque Enqueue payload; Token is the M16 fencing token.
+type WorkItem struct { WorkflowID, Type string; Input []byte; Token FencingToken }
+// A pending item for operator inspection (Attempts climbing = a poison item nearing dead-letter).
+type PendingItem struct { WorkflowID, Type string; EnqueuedAt int64; Attempts int }
+
+// The registry: DATA type → CODE factory (actions are non-serializable closures — the moat).
+type DAGFactory func() (*DAG, error)
+func NewRegistry() *Registry
+func (r *Registry) Register(typ string, factory DAGFactory) error // fail-loud on empty/nil/duplicate
+func (r *Registry) Types() []string
+
+// Run one claimable item of a registered type (claim→rebuild→seed→Execute→terminalize).
+// ran=false + nil → nothing claimable (back off); ran=true → an item was driven.
+func RunNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID string) (ran bool, err error)
+
+// The worker pool: N goroutines, each opening its OWN store (store-per-worker is a SAFETY
+// requirement — per-worker tokenState isolation; a shared store un-fences superseded writes).
+type StoreFactory func() (*SQLiteStore, error)
+func NewPool(factory StoreFactory, reg *Registry, ownerID string, opts ...PoolOption) (*Pool, error)
+func (p *Pool) Run(ctx context.Context) error // blocks until ctx cancelled AND every worker drains
+func WithPoolSize(n int) PoolOption
+func WithMaxAttempts(n int) PoolOption
+func WithPollInterval(d time.Duration) PoolOption
+```
+
+> **Honesty (dispatch):** **exactly-once state PERSISTENCE, at-least-once INVOCATION** — the
+> journal is written once (fencing), but an action body may run **>1** time on a reclaim, bounded
+> by `maxAttempts` before dead-lettering. Actions must be idempotent. Reclaim resumes from the
+> **last committed frontier** (a fresh run seeds input; a re-claim skips the re-seed). Graceful
+> `Pool` drain leaves in-flight work `claimed` to lapse + reclaim — it does **not** lose it.
+> **Version-skew limit:** all live workers must share a type's factory version (the resume guard is
+> identity-only); a drifted resume is dead-lettered, not mis-run.
+
 ## Durable continuations (added v0.10.0)
 
 <a id="durable-continuations"></a>
@@ -1086,6 +1137,19 @@ case errors.Is(err, workflow.ErrFencedOut):  // superseded mid-run — ABORT, do
 case errors.Is(err, workflow.ErrBusy):       // transient contention — safe to RETRY
 }
 ```
+
+### Work-dispatch domain (added M17)
+
+```go
+// ErrNoWork: ClaimNext found nothing claimable (empty queue, no type match, or the whole
+// claimable set was contended away). NOT an error condition — a poller BACKS OFF (sleeps) on it,
+// as opposed to ErrBusy/ErrIO (a transient fault it RETRIES). errors.Is-distinct from both.
+var ErrNoWork = errors.New("no claimable work in the queue")
+```
+
+`RunNext` translates `ErrNoWork` into `ran=false, err=nil` (nothing to do), so a caller keys off
+`ran`, not the sentinel; the `Pool` backs off internally. See the
+[Work dispatch guide](../guides/dispatch.md#error-taxonomy).
 
 ### Saga / rollback domain (added v0.12.0)
 

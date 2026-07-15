@@ -649,6 +649,12 @@ workers ever corrupting one run's journal**. It is fully additive and engages on
 in; the single-process path is untouched. See
 [ADR-0015](../architecture/adr/0015-multi-process-safety-leases-fencing.md).
 
+> **Building a job queue on this?** M17 adds an opt-in **work-dispatch** layer on top of this
+> fencing model — a durable `work_queue` + `ClaimNext` + a type→factory registry + a worker
+> `Pool` that turns the store into a zero-infra distributed job queue. See the
+> [Work dispatch guide](dispatch.md). The rest of this section is the fencing *mechanism* dispatch
+> is built on.
+
 ```go
 // Open the store in multi-process mode (per worker process).
 store, err := workflow.NewSQLiteStore("./shared.db",

@@ -5,6 +5,51 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0-alpha] — 2026-07-15
+
+**M17 — Work dispatch (competing consumers → a zero-infra distributed job queue).** A **fully
+additive, opt-in** layer on the M16 multi-process store: enqueue workflows durably, run a pool of
+worker processes that each claim → rebuild → run → terminalize work items off one shared `.db`
+file, surviving worker death via reclaim-after-death. No server, no broker. Engages only under
+`WithMultiProcess()` + explicit use; the frozen `WorkflowStore` base and the FlatBuffers format are
+untouched, so 1.0 stays earnable. See
+[ADR-0016](docs/architecture/adr/0016-work-dispatch-queue-registry-pool.md) and the
+[dispatch guide](docs/guides/dispatch.md).
+
+**Added (all additive; all require a `WithMultiProcess()` store):**
+- **The durable work-queue** — a `work_queue` table + `Enqueue(workflowID, type, input)` (idempotent
+  by id, `queued` false = visible no-op) and the atomic **`ClaimNext(ownerID, types…)`** primitive
+  (scan-oldest-pending → claim the M16 lease → flip state, **one `BEGIN IMMEDIATE` txn** so N
+  workers never double-claim; `ErrNoWork` when nothing is claimable). Terminal transitions
+  `MarkDone`/`MarkFailed`/`MarkForRetry`/`CancelPending` are CAS + fencing-token-guarded (a
+  superseded worker's terminal write is a 0-row no-op). Reclaim-after-death broadens the scan to
+  lapsed-`claimed` rows; the drive resumes from the committed frontier.
+- **The type→factory `Registry`** — `NewRegistry()` + `Register(type, DAGFactory)` maps a DATA
+  `type` to CODE (a `func() (*DAG, error)`; actions stay non-serializable closures — the moat). A
+  worker claims only registered types; an unregistered item stays `pending` + visible.
+- **`RunNext`** (one item: claim → rebuild → seed-on-fresh → `Execute` → terminalize) and the
+  store-per-worker **`Pool`** (`NewPool` + `Run`, options `WithPoolSize`/`WithMaxAttempts`/
+  `WithPollInterval`). **Store-per-worker is a SAFETY requirement** — each worker opens its own
+  `*SQLiteStore` for per-worker `tokenState` isolation; a shared store would un-fence superseded
+  writes.
+- **Stuck-work visibility** — `ListPending(olderThan)` (FIFO, with `Type`/`EnqueuedAt`/`Attempts`)
+  to spot unregistered-type or too-old work. New sentinel **`ErrNoWork`** (`errors.Is`-distinct
+  from `ErrBusy`/`ErrIO` — a poller sleeps on it, retries on those).
+
+**Honesty contract:** **exactly-once state PERSISTENCE, at-least-once INVOCATION** — the journal is
+written once (fencing), but an action body may run **>1** time on a reclaim, bounded by
+`maxAttempts` before dead-lettering. Actions must be idempotent. Graceful `Pool` drain leaves
+in-flight work `claimed` to lapse + reclaim — it does **not** lose it. **Documented limit
+(version-skew):** all live workers must share a type's factory version (the resume guard is
+identity-only); a drifted resume is dead-lettered, not mis-run.
+
+**No moat regression, no breaking changes:** additive/opt-in only, format byte-unchanged,
+determinism tax unaffected. Formally verified — `specs/WorkQueue.tla` (queue lifecycle, ≥2
+processes, nondeterministic lease-lapse; invariants `TypeOK` / `NoReclaimOfTerminal` (C2) /
+`AtMostOneClaimedWriter` / `NoSupersededTerminalize` / `NoLostWork`, each bite-proven by a
+`WorkQueueBreak*.cfg` seed-break). M16 `MPFencing.tla` + all prior arms re-run and preserved.
+
+
 ## [0.15.0-alpha] — 2026-07-14
 
 **M16 — Multi-process safety (competing consumers).** A **fully additive, opt-in** extension

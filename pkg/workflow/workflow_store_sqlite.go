@@ -89,7 +89,24 @@ CREATE TABLE IF NOT EXISTS leases (
     owner_id      TEXT NOT NULL,
     expiry        INTEGER NOT NULL,  -- unix-nanos lease deadline; liveness heuristic, NOT safety
     fencing_token INTEGER NOT NULL   -- monotonic DB-issued token; the SOLE safety arbiter (DEC-M16-D3)
-);`
+);
+-- M17 (ph80) durable WORK QUEUE for Tier-1 dispatch (DF-1). One row per submitted workflow; a pool
+-- worker ClaimNext()s the oldest pending row of a matching type, rides the M16 fencing CAS on the
+-- leases table (orthogonal — this table never touches the fencing arbiter), and drives it. Additive/
+-- opt-in; empty + unused unless Enqueue/ClaimNext are called. The state lifecycle is pending ->
+-- claimed -> (done | failed | cancelled); terminal rows are NEVER re-claimed (the C2 reclaim guard).
+CREATE TABLE IF NOT EXISTS work_queue (
+    workflow_id  TEXT PRIMARY KEY,       -- shares the workflows/leases id space (one queue entry per run)
+    type         TEXT NOT NULL,          -- caller's dispatch type (the ClaimNext typeFilter key)
+    input        BLOB,                   -- opaque caller payload, nullable
+    enqueued_at  INTEGER NOT NULL,       -- unix-nanos submit time; the FIFO ordering key
+    state        TEXT NOT NULL,          -- pending | claimed | done | failed | cancelled
+    attempts     INTEGER NOT NULL DEFAULT 0, -- bumped on each ClaimNext claim
+    updated_at   INTEGER NOT NULL        -- unix-nanos of the last state transition
+);
+-- PARTIAL index over ONLY claimable rows: the ClaimNext scan (WHERE state='pending' [AND type IN …]
+-- ORDER BY enqueued_at) is fully index-covered, and terminal rows never bloat it.
+CREATE INDEX IF NOT EXISTS idx_wq_claimable ON work_queue(type, enqueued_at) WHERE state='pending';`
 
 // data_kv.kind discriminators — mirror the FB store's typed vectors so Load
 // reconstructs the SAME Go type the FB path yields (byte-identical Snapshot).
