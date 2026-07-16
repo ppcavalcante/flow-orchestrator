@@ -59,6 +59,8 @@ type sqliteDurability struct {
 	// These govern LIVENESS only — the fencing token (safety) never reads the clock (DEC-M16-D3).
 	clock    Clock
 	leaseTTL time.Duration
+	// M18 (ph86): the optional dispatch-metrics hook (OBS-MET). nil = zero-cost (no counters, no bridge).
+	dispatchMetrics *DispatchMetrics
 	// driverName overrides the "sqlite" database/sql driver name at open (TEST-ONLY, unexported —
 	// default "" → the real modernc "sqlite" driver, production byte-unchanged). A fault-injecting
 	// test driver registers itself under a distinct name and sets this via withSQLiteDriverName so

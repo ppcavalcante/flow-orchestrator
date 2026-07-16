@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,13 +97,16 @@ CREATE TABLE IF NOT EXISTS leases (
 -- opt-in; empty + unused unless Enqueue/ClaimNext are called. The state lifecycle is pending ->
 -- claimed -> (done | failed | cancelled); terminal rows are NEVER re-claimed (the C2 reclaim guard).
 CREATE TABLE IF NOT EXISTS work_queue (
-    workflow_id  TEXT PRIMARY KEY,       -- shares the workflows/leases id space (one queue entry per run)
-    type         TEXT NOT NULL,          -- caller's dispatch type (the ClaimNext typeFilter key)
-    input        BLOB,                   -- opaque caller payload, nullable
-    enqueued_at  INTEGER NOT NULL,       -- unix-nanos submit time; the FIFO ordering key
-    state        TEXT NOT NULL,          -- pending | claimed | done | failed | cancelled
-    attempts     INTEGER NOT NULL DEFAULT 0, -- bumped on each ClaimNext claim
-    updated_at   INTEGER NOT NULL        -- unix-nanos of the last state transition
+    workflow_id     TEXT PRIMARY KEY,       -- shares the workflows/leases id space (one queue entry per run)
+    type            TEXT NOT NULL,          -- caller's dispatch type (the ClaimNext typeFilter key)
+    input           BLOB,                   -- opaque caller payload, nullable
+    enqueued_at     INTEGER NOT NULL,       -- unix-nanos submit time; the FIFO ordering key
+    state           TEXT NOT NULL,          -- pending | claimed | done | failed | cancelled
+    attempts        INTEGER NOT NULL DEFAULT 0, -- bumped on each ClaimNext claim
+    updated_at      INTEGER NOT NULL,       -- unix-nanos of the last state transition
+    cancel_requested INTEGER                -- M18 ph87: unix-nanos of an operator cancel request; NULL = not requested.
+                                            -- The durable INTENT that splits operator-cancel (terminalize cancelled)
+                                            -- from AF1 drain/crash (leave claimed). Additive/nullable — no FB change.
 );
 -- PARTIAL index over ONLY claimable rows: the ClaimNext scan (WHERE state='pending' [AND type IN …]
 -- ORDER BY enqueued_at) is fully index-covered, and terminal rows never bloat it.
@@ -154,6 +158,10 @@ type SQLiteStore struct {
 	// unixNanoNow() (hot/fidelity path — det-tax + FB-fidelity untouched).
 	clock    Clock
 	leaseTTL time.Duration
+	// M18 (ph86): the optional dispatch-metrics hook (OBS-MET). nil = zero-cost — every increment site is
+	// a single `if s.metrics != nil` nil check; no counter/alloc/bridge when unset. Opt-in via
+	// WithDispatchMetrics. Distinct from the M14 per-workflow metrics (Workflow.MetricsConfig), untouched.
+	metrics *DispatchMetrics
 }
 
 // NewSQLiteStore opens (creating if absent) a SQLite DB at path and ensures the
@@ -198,6 +206,15 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
 		return nil, fmt.Errorf("%w: schema: %w", ErrIO, err)
 	}
+	// M18 ph87: additive migration for the cancel_requested column. CREATE TABLE IF NOT EXISTS above
+	// gives NEW DBs the column, but an existing v0.16 work_queue predates it — ADD it idempotently. SQLite
+	// has no ADD COLUMN IF NOT EXISTS, so we run the ALTER and TOLERATE the "duplicate column name" error
+	// (the column already exists = the desired state). Any OTHER error is a real schema fault, surfaced.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE work_queue ADD COLUMN cancel_requested INTEGER`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
+		return nil, fmt.Errorf("%w: cancel_requested migration: %w", ErrIO, err)
+	}
 	// M16 (ph75): resolve the lease-liveness clock + TTL (defaults when unset). Lease liveness only.
 	clock := dur.clock
 	if clock == nil {
@@ -216,6 +233,7 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		tokenState: make(map[string]FencingToken),
 		clock:      clock,
 		leaseTTL:   leaseTTL,
+		metrics:    dur.dispatchMetrics,
 	}, nil
 }
 

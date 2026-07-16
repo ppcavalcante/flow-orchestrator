@@ -5,6 +5,51 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0-alpha] — 2026-07-16
+
+**M18 — Operability.** The operator-facing **read-side + control layer** over the M17 dispatch
+queue: see what's in the queue / in-flight / wedged, meter dispatch events, and cancel a running
+workflow. **Fully additive/opt-in** — the executor (`Execute`/`dag.go`/`workflow.go`) is
+**byte-unchanged**, the dispatch write path and `WorkflowQuery` are untouched, so 1.0 stays earnable.
+See [ADR-0017](docs/architecture/adr/0017-cancel-of-running-workflow.md) and the
+[dispatch guide](docs/guides/dispatch.md#operator-observability-added-m18).
+
+**Added (all additive; the read-model + cancel require a `WithMultiProcess()` store):**
+- **`Observability` read-model** — a type-asserted interface (like `Checkpointer`/`ClaimStore`)
+  with five granular queries (four are one atomic SELECT; `WorkflowStatus` composes two — its
+  dispatch row + its node tally) — `QueueCounts` (per-state counts), `InFlight`
+  (claimed items + lease owner + freshness), `StuckWork` (wedged items classified by `StuckReason`:
+  `unregistered_type` / `too_old_pending` / `lapsed_claimed`), `WorkflowStatus` (dispatch state +
+  per-node journal tally), `WorkerHealth` (per-owner held/live lease counts) — plus aggregate
+  **`Snapshot()`** in one `BEGIN DEFERRED` read-txn (mutually consistent, never torn). Read-only:
+  the write path is byte-unchanged.
+- **Dispatch metrics** — optional **`WithDispatchMetrics(*DispatchMetrics)`** (`nil` = zero-cost).
+  In-process atomic event counters (`reclaimAfterDeath`, `fenceRejections`, `supersededAborts`,
+  `retriesAttempted`, `deadLetters`) + **`OTelDispatchBridge`** (the counters as observable
+  event-counters **plus** live state gauges read from the read-model, via the OTel API). **Distinct
+  from** the M14 per-workflow-run metrics (`Workflow.MetricsConfig`/`metrics.Collector`, unchanged) —
+  a two-part provenance split: events (transient, reset-on-restart) vs store-derived state gauges.
+- **Cancel-of-running** — **`CancelRunning(workflowID)`** + a durable `cancel_requested` column
+  (additive migration): cancel a **claimed, mid-`Execute`** workflow → terminal `cancelled`, never
+  resumed. A durable **intent flag** (not a terminal flip) is what distinguishes an operator cancel
+  from an AF1 graceful-drain/crash (both byte-identical `context.Canceled`). No token to request
+  (operator surface); terminalization stays token-gated; a crashed owner's cancelled row is
+  terminalized by the reclaimer (liveness).
+
+**Honesty contracts:** the read-model is a purely additive read side (write path byte-unchanged).
+**Cancel is cooperative and best-effort** — a 500 ms watcher cancels the run context and `Execute`
+acts at its **next level barrier**, so latency is *next level barrier + ≤500 ms*, **not** an instant
+kill (a node already mid-level is not interrupted). Cancel ≠ drain (cancel → terminal `cancelled`;
+drain → leave `claimed`, resume). Dispatch metrics **reset on process restart** (events, not durable
+state). Lease freshness is a **liveness** read, never a safety input.
+
+**No moat regression, no breaking changes:** additive/opt-in only, executor + FlatBuffers format
+byte-unchanged, determinism tax unaffected. Formally verified — `specs/WorkQueue.tla` extended with
+the `cancel_requested` transition + the **`NoResumeAfterCancel`** invariant (a cancelled workflow is
+never resumed-from-frontier), bite-proven by `WorkQueueBreakCancel.cfg`, **non-redundant** with the
+prior C2/F1/NoLostWork/AtMostOneClaimedWriter invariants (which stayed EXACT on the enlarged
+218-state exhaustive space). Specs-only; zero production change for the formal arm.
+
 ## [0.16.0-alpha] — 2026-07-15
 
 **M17 — Work dispatch (competing consumers → a zero-infra distributed job queue).** A **fully

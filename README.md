@@ -44,7 +44,12 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.16.0-alpha`** (M16 — Multi-Process Safety:
+> **no stable (`v1`+) release**. The latest is **`v0.17.0-alpha`** (M18 — Operability: the operator
+> read-side + control layer over the dispatch queue — observe the queue, meter dispatch, cancel a
+> running workflow, on top of M17 — Work dispatch: an opt-in
+> competing-consumers job queue — a durable `work_queue` + atomic `ClaimNext` + a type→factory
+> registry + a store-per-worker `Pool` — turning the store into a zero-infra distributed job queue,
+> on top of M16 — Multi-Process Safety:
 > opt-in SQLite competing consumers, monotonic fencing tokens + leases so N worker processes share
 > one `.db` file with crash-safe hand-off — on top of the M15 decomposed, row-based `SQLiteStore`
 > + incremental `O(N)` checkpointing + indexed visibility queries, M12 saga / compensation (durable
@@ -55,10 +60,10 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 > (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status), the M9
 > durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
 > work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
-> currently **`v0.16.0-alpha`** — so the command above is correct. Pinning the exact version
-> (`@v0.16.0-alpha`) is optional but recommended for reproducibility, and the API may change between
+> currently **`v0.17.0-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.17.0-alpha`) is optional but recommended for reproducibility, and the API may change between
 > alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) reads
-> `0.16.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
+> `0.17.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -537,7 +542,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.16.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.16.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.17.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.17.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap

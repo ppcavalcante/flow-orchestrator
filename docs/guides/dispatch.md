@@ -190,6 +190,106 @@ for _, it := range stuck {
 `ErrNoWork` is `errors.Is`-distinct from `ErrBusy`/`ErrIO` so a poller sleeps on an empty queue but
 retries on transient contention.
 
+## Operator observability (added M18)
+
+M18 adds an opt-in, type-asserted **`Observability`** read-model over the dispatch queue — the
+operator's "what's happening" view. It is a **purely additive read side**: the write path
+(`Enqueue`/`ClaimNext`/the terminal transitions) is byte-unchanged. Four of the five granular
+methods are **one atomic SELECT** each; `WorkflowStatus` composes **two** (its dispatch row + its
+node tally), so its two halves can reflect different instants under a concurrent *cross-process*
+writer — use `Snapshot()` when you need every part to agree (it wraps all its component queries in
+one consistent read-transaction). Requires an mp store.
+
+```go
+// A WithMultiProcess SQLiteStore implements Observability (type-assert like Checkpointer/ClaimStore).
+obs := store.(workflow.Observability)
+
+counts, _ := obs.QueueCounts("")            // per-state row counts: {"pending":3,"claimed":2,"done":10,…}
+inflight, _ := obs.InFlight()               // claimed items + lease owner + freshness (LeaseLive)
+stuck, _ := obs.StuckWork(cutoff, regTypes) // wedged items, each with a StuckReason
+ws, _ := obs.WorkflowStatus("order-4711")   // one workflow's dispatch state + per-node journal tally
+workers, _ := obs.WorkerHealth()            // per-owner held/live lease counts
+
+// One mutually-consistent snapshot (BEGIN DEFERRED read-txn — all parts reflect one instant).
+snap, _ := store.Snapshot(cutoff, regTypes) // QueueSnapshot{Counts, InFlight, Stuck, Workers}
+```
+
+- **`QueueCounts(typ)`** — per-`state` counts (`typ==""` = whole queue; else filtered to that type).
+- **`InFlight()`** — the `claimed` items, each with `OwnerID` + `Expiry` + `LeaseLive` (`expiry >= now`
+  on the injected lease clock — a *liveness* read, never a safety input; the read-model only reports it).
+- **`StuckWork(olderThan, registeredTypes)`** — wedged items classified by `StuckReason`:
+  `unregistered_type` (no worker can build it), `too_old_pending` (enqueued before the cutoff, still
+  unclaimed), or `lapsed_claimed` (a dead worker's abandoned claim awaiting reclaim). `registeredTypes=nil`
+  skips the unregistered-type check.
+- **`WorkflowStatus(id)`** — one workflow's dispatch fields (`State`/`Attempts`/`OwnerID`) plus its
+  per-node-status journal tally (`NodeCounts`); `Queued=false` when the id has no `work_queue` row.
+- **`WorkerHealth()`** — per-owner `TotalHeld` / `LiveHeld` lease counts.
+- **`Snapshot(olderThan, registeredTypes)`** — the four aggregate views in **one** `BEGIN DEFERRED`
+  read-txn, so a concurrent writer's flip is either fully visible or fully absent across all parts —
+  never torn. Use it when you need the counts, in-flight list, stuck items, and worker health to *agree*.
+
+## Cancelling a running workflow (added M18)
+
+M17's `CancelPending` only cancels a *pending* item. M18 adds **`CancelRunning(workflowID)`** to cancel
+a **claimed, mid-`Execute`** workflow — it ends terminally `cancelled` and is **never resumed**.
+
+```go
+requested, _ := store.CancelRunning("order-4711")
+// requested == true if this call set the cancel flag; false if already-cancelled or already-terminal.
+```
+
+**How it works — a durable intent flag, not a terminal flip.** `CancelRunning` sets a durable
+`cancel_requested` column on the `work_queue` row; it does **not** itself terminalize. That intent flag
+is what distinguishes an **operator cancel** (→ terminal `cancelled`, never resumed) from an **AF1
+graceful drain or a crash** (→ leave `claimed`, resume from the committed frontier later) — the two are
+byte-identical `context.Canceled` at the queue layer, so the durable flag is the only thing that tells
+them apart. The actual terminalization is done by the token-holding owner (or, if the owner crashed, by
+a reclaimer inside `ClaimNext`) — always **fencing-token-gated**, so a cancel can never clobber a live
+worker's completion.
+
+**Delivery is cooperative, not an instant kill (document this honestly).** A background watcher polls
+the flag every **500 ms** and cancels the running `Execute`'s context; `Execute` observes it at its
+**next level barrier**. So cancel latency is **the next level barrier + ≤500 ms** — a long single node
+already mid-level runs to that level's completion; it is not interrupted. This is a graceful cooperative
+cancel (safe, no torn state), not a hard abort.
+
+**Authority — no token required (an operator surface).** Any holder of a store handle (a CLI, an admin
+process, a pool worker) may call `CancelRunning` — setting a flag on a separate column is fencing-safe by
+construction (it cannot lose to a live `MarkDone` nor clobber a reclaimer's completion; only the
+token-holder terminalizes). It is idempotent: a double-cancel or a cancel-of-terminal is a detectable
+0-row no-op (`requested=false`). Formally, `WorkQueue.tla` carries a machine-checked **`NoResumeAfterCancel`**
+invariant — a `cancel_requested` workflow is never resumed-from-frontier. See
+[ADR-0017](../architecture/adr/0017-cancel-of-running-workflow.md).
+
+## Dispatch metrics (added M18)
+
+Optional in-process **`DispatchMetrics`** — event counters over the dispatch layer, distinct from the
+M14 per-workflow-run metrics (`Workflow.MetricsConfig` / `metrics.Collector` — that path is unchanged;
+see the [Observability guide](observability.md)). **`nil` = zero-cost**: unset, every increment site is
+a single nil check.
+
+```go
+dm := workflow.NewDispatchMetrics()
+store, _ := workflow.NewSQLiteStore("./shared.db",
+    workflow.WithMultiProcess(),
+    workflow.WithDispatchMetrics(dm), // opt-in; omit for zero-cost
+)
+// … run the pool …
+dm.ReclaimAfterDeath(); dm.FenceRejections(); dm.SupersededAborts(); dm.RetriesAttempted(); dm.DeadLetters()
+```
+
+The five counters are **events, not durable state** — `reclaimAfterDeath`, `fenceRejections`,
+`supersededAborts`, `retriesAttempted`, `deadLetters` — and they **reset on process restart** (this is
+correct: they count what *this* process observed, not a durable tally). For OpenTelemetry, wire the
+**`OTelDispatchBridge`** — it exposes the five counters as observable event counters **plus** live state
+gauges read from the read-model (`QueueCounts`/`InFlight`), all through the OTel **API** (the host owns
+the SDK/exporter):
+
+```go
+bridge, _ := workflow.NewOTelDispatchBridge(store.(workflow.Observability), dm, meterProvider)
+defer bridge.Shutdown(ctx)
+```
+
 ## Requirements
 
 - Dispatch requires a **`WithMultiProcess()`** SQLite store — `Enqueue`/`ClaimNext`/the transitions

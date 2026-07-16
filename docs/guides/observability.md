@@ -19,6 +19,14 @@ Each is off until the host opts in, and each follows the same rule — the libra
 depends only on the OpenTelemetry **API**, never the SDK; the host owns the SDK,
 exporter, and endpoint.
 
+> **This guide is about per-workflow-run metrics** (`Workflow.MetricsConfig` /
+> `metrics.Collector` — node counts, durations, in-flight gauges for one run). The
+> **multi-process dispatch queue** has its own, separate operator observability —
+> a read-model (`QueueCounts`/`InFlight`/`StuckWork`/…), dispatch event counters
+> (`WithDispatchMetrics`), and an `OTelDispatchBridge` (added M18). Those live with
+> the dispatch layer, not here — see the
+> [Dispatch guide → Operator observability](dispatch.md#operator-observability-added-m18).
+
 ---
 
 ## The API-only contract

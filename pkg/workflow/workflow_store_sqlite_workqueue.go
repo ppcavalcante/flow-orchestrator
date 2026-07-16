@@ -136,6 +136,7 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 	// FakeClock test advances THIS clock to lapse a lease deterministically, and the scan must see it.
 	reclaimNow := s.nowNanos()
 	var tried []string
+	cancelledAny := false // M18 ph87: true once a reclaim-terminalize-cancelled has run in this txn (BLOCKER-2)
 	for {
 		excludeClause, excludeArgs := buildNotInFilter(tried)
 		scanSQL := `SELECT workflow_id, type, input, state FROM work_queue
@@ -155,7 +156,17 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		scanErr := tx.QueryRowContext(ctx, scanSQL, scanArgs...).Scan(&wf, &typ, &input, &state)
 		switch {
 		case errors.Is(scanErr, sql.ErrNoRows):
-			return WorkItem{}, ErrNoWork // empty / no-match / whole claimable set contended away.
+			// No runnable item. BUT if this txn terminalized any cancel-set reclaim rows (BLOCKER-2), we
+			// MUST COMMIT so those `cancelled` flips persist — otherwise the defer-rollback discards them and
+			// the crashed-while-cancel-pending row strands in `claimed` limbo (the exact bug the resolution
+			// closes). Commit-then-ErrNoWork on that path; plain ErrNoWork (rollback, nothing to persist) else.
+			if cancelledAny {
+				if cErr := tx.Commit(); cErr != nil {
+					return WorkItem{}, classifyTxErr("claimnext cancel-commit", cErr)
+				}
+				committed = true
+			}
+			return WorkItem{}, ErrNoWork // empty / no-match / whole claimable set contended away (cancelled rows cleaned up).
 		case scanErr != nil:
 			return WorkItem{}, classifyTxErr("claimnext scan", scanErr)
 		}
@@ -170,6 +181,33 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		}
 		if claimErr != nil {
 			return WorkItem{}, claimErr // ErrIO/ErrBusy from the lease write.
+		}
+
+		// RECLAIM-TERMINALIZES-CANCELLED (M18 ph87, BLOCKER-2 — the liveness resolution): a lapsed-`claimed`
+		// row (state==wqClaimed here, its owner presumed dead/stalled) whose `cancel_requested` is SET must
+		// NOT be re-offered for reclaim (it must never resume) — but also must NOT be excluded from the scan
+		// (that would STRAND a crashed-while-cancel-pending row in `claimed` limbo forever = the AF1
+		// crash-window class). So we TERMINALIZE it `cancelled` HERE, inside the BEGIN IMMEDIATE txn, under
+		// the reclaimer's FRESH bumped token (fencing-clean — the superseded dead owner can't defeat it),
+		// then skip it (tried + continue) and re-scan for the next ACTUALLY-runnable item. This closes the
+		// limbo AND satisfies never-resume (the row is cancelled, never handed to a worker). A LIVE-lease
+		// cancel-set row is NOT matched by the reclaim scan (it needs expiry<now); its owner's own
+		// disposition gate (disposeExecErr, BLOCKER-1) handles that case — no overlap.
+		if state == wqClaimed {
+			var reqTS sql.NullInt64
+			if serr := tx.QueryRowContext(ctx, `SELECT cancel_requested FROM work_queue WHERE workflow_id=?`, wf).Scan(&reqTS); serr != nil {
+				return WorkItem{}, classifyTxErr("claimnext cancel-check", serr)
+			}
+			if reqTS.Valid {
+				if _, terr := tx.ExecContext(ctx,
+					`UPDATE work_queue SET state='cancelled', updated_at=? WHERE workflow_id=? AND state='claimed'`,
+					unixNanoNow(), wf); terr != nil {
+					return WorkItem{}, classifyTxErr("claimnext cancel-terminalize", terr)
+				}
+				cancelledAny = true       // a cancel-terminalize ran → the txn MUST commit even if no runnable item follows.
+				tried = append(tried, wf) // cancelled + cleaned up → skip it, re-scan for the next runnable item in-txn.
+				continue
+			}
 		}
 
 		// The flip is SPLIT by the scanned state — both branches bump attempts + updated_at, both keep the
@@ -212,6 +250,12 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		}
 		committed = true
 		s.tokenState[wf] = token // in-process fencing token for the checkpoint CAS (mu held).
+		if state == wqClaimed && s.metrics != nil {
+			// RECLAIM-AFTER-DEATH (OBS-MET-01): the scanned row was `claimed` (not pending) → a lapsed-claimed
+			// row was re-claimed by this live worker (a dead/stalled owner's item taken over under a bumped
+			// token). Count the event (nil-guarded → zero-cost when metrics unset).
+			s.metrics.incReclaimAfterDeath()
+		}
 		return WorkItem{WorkflowID: wf, Type: typ, Input: input, Token: token}, nil
 	}
 }
@@ -336,6 +380,18 @@ func (s *SQLiteStore) flipTerminalFenced(workflowID, to string) (bool, error) {
 		return false, classifyTxErr("workqueue terminal fenced", err)
 	}
 	n, _ := res.RowsAffected() //nolint:errcheck // modernc always returns it
+	if n == 0 && s.metrics != nil {
+		// FENCE-REJECTION (OBS-MET-02): a token-guarded flip matching 0 rows has TWO causes (review
+		// ph86-F3): (a) a GENUINE fence-rejection — the row is STILL `claimed` but our token is stale
+		// (a re-claim bumped past us, the EXISTS guard fails); OR (b) a BENIGN already-terminal no-op — a
+		// live owner (held != 0) double-flips an already-terminal row (state != `claimed`). Only (a) is a
+		// fence-rejection. Distinguish by re-reading the row's state (only on this rare 0-row+metrics path,
+		// so no hot-path cost): count ONLY when the row is still `claimed`.
+		var cur string
+		if serr := s.db.QueryRowContext(ctx, `SELECT state FROM work_queue WHERE workflow_id=?`, workflowID).Scan(&cur); serr == nil && cur == wqClaimed {
+			s.metrics.incFenceRejections()
+		}
+	}
 	return n == 1, nil
 }
 
@@ -394,6 +450,63 @@ func (s *SQLiteStore) MarkForRetry(workflowID string, maxAttempts int) (requeued
 // detectable 0-row no-op.
 func (s *SQLiteStore) CancelPending(workflowID string) (bool, error) {
 	return s.flipState(workflowID, wqPending, wqCancelled)
+}
+
+// CancelRunning requests cancellation of a RUNNING (or still-pending) workflow (M18 ph87, OBS-CAN). It
+// sets the durable `cancel_requested` INTENT flag — it does NOT itself terminalize the row. The intent is
+// what distinguishes an operator-cancel (→ terminal `cancelled`, never resumed) from an AF1 graceful-drain
+// or crash (→ leave `claimed`, resume-from-frontier later), which are byte-identical `context.Canceled` at
+// the queue layer. The actual terminalization is done by the token-holding owner (its disposeExecErr
+// disposition gate) or, if the owner crashed, by a reclaimer inside ClaimNext (both fencing-gated).
+//
+// AUTHORITY (DEC-M18-CANCEL-FENCING): requires NO fencing token — any store-handle caller (a CLI, an admin
+// process, a pool worker) may request cancel. This is the operator's control surface; setting a flag on a
+// separate column is fencing-safe by construction (it cannot lose to a live MarkDone nor clobber a
+// reclaimer's completion — only the token-holder terminalizes). Idempotent: sets the flag only WHERE it is
+// still NULL and the row is non-terminal (pending|claimed), so a double-cancel or a cancel-of-terminal is a
+// detectable 0-row no-op. Returns requested=true iff this call set the flag.
+func (s *SQLiteStore) CancelRunning(workflowID string) (requested bool, err error) {
+	if !s.dur.mp {
+		return false, fmt.Errorf("%w: CancelRunning requires a multi-process store", ErrValidation)
+	}
+	if err := validateWorkflowID(workflowID); err != nil {
+		return false, err
+	}
+	ctx := context.Background()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE work_queue SET cancel_requested=?, updated_at=?
+		 WHERE workflow_id=? AND state IN ('pending','claimed') AND cancel_requested IS NULL`,
+		unixNanoNow(), unixNanoNow(), workflowID)
+	if err != nil {
+		return false, classifyTxErr("cancelrunning", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("%w: cancelrunning rows: %w", ErrIO, err)
+	}
+	return n == 1, nil // 1 = the flag was set now; 0 = already-cancelled | already-terminal | not present.
+}
+
+// isCancelRequested reports whether a workflow's cancel_requested flag is SET (non-NULL). Lock-free BY
+// DESIGN — it does NOT hold s.mu (unlike the granular store methods): its callers (the cancelWatcher
+// goroutine, the disposition gate in disposeExecErr, the post-reclaim re-read) run OUTSIDE the store lock,
+// and a lone SELECT is atomic regardless under MaxOpenConns(1)+WAL (it serializes on the single conn
+// behind any in-flight write txn). Safe because the flag is monotonic (NULL→set, never cleared) and every
+// caller treats a read error as best-effort (not-cancelled, retry next poll). The reclaim path does NOT
+// use this method — it inlines its own cancel_requested SELECT inside ClaimNext's IMMEDIATE txn (BLOCKER-2).
+// Used by the disposition gate (BLOCKER-1) + the post-reclaim re-read. A missing row → false (nothing to cancel).
+func (s *SQLiteStore) isCancelRequested(ctx context.Context, workflowID string) (bool, error) {
+	var ts sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT cancel_requested FROM work_queue WHERE workflow_id=?`, workflowID).Scan(&ts)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, classifyTxErr("iscancelrequested", err)
+	}
+	return ts.Valid, nil
 }
 
 // PendingItem is a stuck-work-visibility row (DEC-M17-STUCKVIS): a pending work_queue entry an operator

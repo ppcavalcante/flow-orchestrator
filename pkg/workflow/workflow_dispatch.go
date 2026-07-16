@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // DAGFactory builds the *DAG for a workflow type. It carries the CODE (actions as closures) — the
@@ -110,6 +111,16 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		return false, err
 	}
 
+	// POST-RECLAIM CANCEL RE-READ (M18 ph87, BLOCKER-2 defense-in-depth): ClaimNext's in-txn cancel-gate
+	// terminalizes a LAPSED cancel-set row before offering it, but a cancel can land on a FRESH-pending
+	// claim in the narrow window BETWEEN ClaimNext's scan and here. Re-check under this worker's own (just-
+	// granted) token: if cancel was requested, terminalize `cancelled` NOW rather than running it. Fencing-
+	// clean (we hold the current token → flipTerminalFenced lands). Cheap (one indexed read per claim).
+	if cancelled, cerr := store.isCancelRequested(ctx, item.WorkflowID); cerr == nil && cancelled {
+		_, _ = store.flipTerminalFenced(item.WorkflowID, wqCancelled) //nolint:errcheck // best-effort; token-guarded
+		return true, nil                                              // ran=true (we handled the item — terminalized cancelled, did not Execute)
+	}
+
 	factory, ok := reg.lookup(item.Type)
 	if !ok {
 		// Claimed a type with no factory. Given the len(types)>0 guard + the type filter, this is an
@@ -161,13 +172,58 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		// else: a prior journal EXISTS (re-claim) → do NOT re-seed; Execute resumes from the committed frontier.
 	}
 
+	// CANCEL DELIVERY (M18 ph87, DEC-M18-CANCEL-DELIVERY): a ctx-watcher observes an in-flight cancel and
+	// cancels the Execute ctx, so a RUNNING workflow stops at its next level barrier (dag.go's existing
+	// ctx.Err() guard — Execute/dag.go BYTE-UNCHANGED). We derive a cancellable child ctx, poll
+	// cancel_requested every cancelPollInterval, and cancel() on observing SET. LEAK-FREE: the watcher
+	// exits on EITHER the flag firing OR Execute returning (the `done` channel closed below) — no per-drive
+	// goroutine leak in the Pool loop. Poll interval << lease TTL so cancel wins the reclaim race; the
+	// watcher is dispatch-layer only (it calls the store flag-read + the ctx cancel, never into Execute/dag).
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go cancelWatcher(runCtx, cancel, done, store, item.WorkflowID)
+
 	w := &Workflow{DAG: dag, WorkflowID: item.WorkflowID, Store: store}
-	execErr := w.Execute(ctx)
+	execErr := w.Execute(runCtx)
+	close(done) // Execute returned → tell the watcher to exit (leak-free).
+	cancel()    // release the child ctx (idempotent; harmless if the watcher already cancelled).
 	if execErr != nil {
 		return true, disposeExecErr(store, item.WorkflowID, maxAttempts, execErr)
 	}
 	_, _ = store.MarkDone(item.WorkflowID) //nolint:errcheck // ph80 CAS flip claimed->done (idempotent)
 	return true, nil
+}
+
+// cancelPollInterval is how often the ctx-watcher polls cancel_requested. 500ms: well under the default
+// 30s lease TTL (so an operator cancel is observed + terminalized long before any reclaimer could take the
+// row = cancel wins the reclaim race) and >> a single indexed SELECT (so the poll is negligible, off the
+// hot Execute path). A long single node mid-level is NOT interrupted — cancel takes effect at the next
+// level barrier + ≤ this interval (cooperative, rides dag.go's existing guard).
+const cancelPollInterval = 500 * time.Millisecond
+
+// cancelPollIntervalForTest is the poll interval the watcher actually uses; it defaults to
+// cancelPollInterval and is overridden ONLY by tests (to avoid a 500ms wait). Production reads the const.
+var cancelPollIntervalForTest = cancelPollInterval
+
+// cancelWatcher polls cancel_requested for workflowID and cancels the run ctx on observing SET. It exits
+// on `done` (Execute returned) OR runCtx cancellation OR the flag firing — leak-free. A read error is
+// ignored (best-effort; the next poll retries; the store is authoritative on the terminal disposition).
+func cancelWatcher(runCtx context.Context, cancel context.CancelFunc, done <-chan struct{}, store *SQLiteStore, workflowID string) {
+	ticker := time.NewTicker(cancelPollIntervalForTest)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return // Execute finished — nothing to watch.
+		case <-runCtx.Done():
+			return // ctx already cancelled (by us or a parent) — done.
+		case <-ticker.C:
+			if cancelled, err := store.isCancelRequested(runCtx, workflowID); err == nil && cancelled {
+				cancel() // operator asked to cancel → cancel the Execute ctx → it stops at the next level barrier.
+				return
+			}
+		}
+	}
 }
 
 // disposeExecErr applies the DF-4 retry policy to a failed Execute: RETRY a transient infra fault (bounded
@@ -198,7 +254,8 @@ func disposeExecErr(store *SQLiteStore, workflowID string, maxAttempts int, exec
 	// the flips themselves — flipTerminalAndRelease / MarkForRetry, ph82-F1 structural — is the belt to this
 	// suspenders: even a mis-routed terminal write can't clobber a higher-token owner's row.)
 	if isSupersededError(execErr) {
-		return execErr // lost the workflow to a re-claim → abort, leave the queue row to the live owner.
+		store.metrics.incSupersededAborts() // OBS-MET-02 (nil-safe: no-op when metrics unset)
+		return execErr                      // lost the workflow to a re-claim → abort, leave the queue row to the live owner.
 	}
 	// GRACEFUL SHUTDOWN / DEADLINE is NOT a failure (review ph82-AF1, HIGH — data loss on the normal drain
 	// path). Pool.Run's drain cancels the ctx handed to the in-flight runNext → when the PARENT ctx is
@@ -226,7 +283,20 @@ func disposeExecErr(store *SQLiteStore, workflowID string, maxAttempts int, exec
 	var xe *ExecutionError
 	if !errors.As(execErr, &xe) &&
 		(errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded)) {
-		return execErr // parent shutdown/deadline (bare, non-poison) → leave claimed for TTL-reclaim; no Release.
+		// DISPOSITION GATE (M18 ph87, BLOCKER-1): a bare parent-ctx cancel is EITHER an operator-cancel
+		// (terminalize `cancelled`, never resume) OR an AF1 graceful-drain/crash (leave `claimed`, resume
+		// later) — byte-identical context.Canceled here. The durable `cancel_requested` INTENT flag is what
+		// splits them. Read it FIRST (ordered BEFORE the leave-claimed return): SET → the operator asked to
+		// cancel → terminalize `cancelled` via the token-guarded flip (flipTerminalFenced — under the owner's
+		// live token; a superseded worker's cancel-terminalize is a 0-row no-op, fencing-safe). UNSET → fall
+		// through to the existing AF1 leave-claimed. (Reads the FLAG, not the error type — so a genuine
+		// operator-cancel of a poison-flavored run still terminalizes cancelled, while an unset-flag poison
+		// stays poison → dead-lettered below, since poison is caught by the errors.As gate above this block.)
+		if cancelled, cerr := store.isCancelRequested(context.Background(), workflowID); cerr == nil && cancelled {
+			_, _ = store.flipTerminalFenced(workflowID, wqCancelled) //nolint:errcheck // best-effort terminalize; a superseded flip is a fencing-safe 0-row no-op
+			return execErr                                           // operator-cancel → terminal cancelled (NOT a dead-letter; a distinct terminal disposition)
+		}
+		return execErr // no cancel intent → parent shutdown/deadline (AF1) → leave claimed for TTL-reclaim; no Release.
 	}
 	if isRetryableInfra(execErr) {
 		requeued, rerr := store.MarkForRetry(workflowID, maxAttempts)
@@ -234,14 +304,17 @@ func disposeExecErr(store *SQLiteStore, workflowID string, maxAttempts int, exec
 			// The requeue itself faulted (store error). Best-effort dead-letter so the row can't strand
 			// `claimed`; surface the ORIGINAL execErr (the run's real failure), not the requeue fault.
 			_, _ = store.MarkFailed(workflowID) //nolint:errcheck // terminalize; requeue faulted
+			store.metrics.incDeadLetters()      // review ph86-F2: this IS a dead-letter (terminal MarkFailed) — count it (nil-safe)
 			return execErr
 		}
 		if requeued {
-			return execErr // back to pending under budget — a sibling (or this worker) re-claims + retries.
+			store.metrics.incRetriesAttempted() // OBS-MET-03 retry event (nil-safe)
+			return execErr                      // back to pending under budget — a sibling (or this worker) re-claims + retries.
 		}
 		// budget exhausted → fall through to dead-letter.
 	}
 	_, _ = store.MarkFailed(workflowID) //nolint:errcheck // poison / drift / unclassified / budget-spent
+	store.metrics.incDeadLetters()      // OBS-MET-03 dead-letter event (nil-safe)
 	return execErr
 }
 

@@ -596,6 +596,55 @@ func WithPollInterval(d time.Duration) PoolOption
 > **Version-skew limit:** all live workers must share a type's factory version (the resume guard is
 > identity-only); a drifted resume is dead-lettered, not mis-run.
 
+#### Dispatch operability — read-model, metrics, cancel (added M18)
+
+Operator-facing read + control over the dispatch queue. All opt-in/additive; the read-model and
+cancel require an mp store, and the executor is byte-unchanged. See the
+[Dispatch guide → Operator observability](../guides/dispatch.md#operator-observability-added-m18) and
+[ADR-0017](../architecture/adr/0017-cancel-of-running-workflow.md).
+
+```go
+// Read-model (a WithMultiProcess SQLiteStore implements Observability; type-assert like Checkpointer).
+// Four methods are ONE atomic SELECT; WorkflowStatus composes TWO (dispatch row + node tally).
+// Snapshot aggregates the aggregate views in one consistent read-txn (use it when parts must agree).
+type Observability interface {
+    QueueCounts(typ string) (map[string]int, error)          // per-state row counts ("" = whole queue)
+    InFlight() ([]InFlightItem, error)                       // claimed items + lease owner + freshness
+    StuckWork(olderThan int64, registeredTypes []string) ([]StuckItem, error) // wedged items + StuckReason
+    WorkflowStatus(workflowID string) (*WorkflowStatus, error) // dispatch state + per-node journal tally
+    WorkerHealth() ([]WorkerInfo, error)                      // per-owner held/live lease counts
+}
+func (s *SQLiteStore) Snapshot(olderThan int64, registeredTypes []string) (*QueueSnapshot, error) // BEGIN DEFERRED, mutually consistent
+// Result types: InFlightItem{WorkflowID,Type,OwnerID string;Attempts int;EnqueuedAt,Expiry int64;LeaseLive bool}
+//   StuckItem{WorkflowID,Type,State string;Attempts int;EnqueuedAt int64;Reason StuckReason}
+//   WorkflowStatus{WorkflowID,State,OwnerID string;Queued bool;Attempts int;UpdatedAt int64;NodeCounts []NodeStatusCount}
+//   WorkerInfo{OwnerID string;TotalHeld,LiveHeld int}; QueueSnapshot{Counts,InFlight,Stuck,Workers}
+//   StuckReason ∈ {"unregistered_type","too_old_pending","lapsed_claimed"}
+
+// Cancel a RUNNING (claimed, mid-Execute) workflow → terminal `cancelled`, NEVER resumed. Sets a durable
+// cancel_requested INTENT flag (not a terminal flip); needs NO token (operator surface); idempotent.
+// Delivery is COOPERATIVE: a 500ms watcher cancels the run ctx; Execute acts at its next level barrier
+// (latency = next level barrier + <=500ms — NOT an instant kill).
+func (s *SQLiteStore) CancelRunning(workflowID string) (requested bool, err error)
+
+// Dispatch metrics (opt-in; nil = zero-cost). Event counters, DISTINCT from the M14 per-run metrics
+// (Workflow.MetricsConfig / metrics.Collector). Reset on process restart (events, not durable state).
+type DispatchMetrics struct{ /* reclaimAfterDeath / fenceRejections / supersededAborts / retriesAttempted / deadLetters */ }
+func NewDispatchMetrics() *DispatchMetrics
+func WithDispatchMetrics(m *DispatchMetrics) SQLiteOption
+// getters: (*DispatchMetrics) ReclaimAfterDeath/FenceRejections/SupersededAborts/RetriesAttempted/DeadLetters() int64
+
+// OTel bridge: the 5 event counters + live state gauges (read from the read-model), via the OTel API.
+func NewOTelDispatchBridge(store Observability, m *DispatchMetrics, mp metric.MeterProvider) (*OTelDispatchBridge, error)
+func (b *OTelDispatchBridge) Shutdown(ctx context.Context) error
+```
+
+> **Honesty (M18):** the read-model is a purely additive read side (write path byte-unchanged); each
+> granular query is one atomic SELECT, `Snapshot` is mutually consistent (`BEGIN DEFERRED`). Cancel is
+> **cooperative and best-effort** — bounded by the level barrier + the 500 ms poll, **not** an instant
+> abort; a node already mid-level is not interrupted. Dispatch metrics **reset on restart** (they count
+> what this process saw). Lease `LeaseLive`/`Expiry` is a **liveness** read, never a safety input.
+
 ## Durable continuations (added v0.10.0)
 
 <a id="durable-continuations"></a>
