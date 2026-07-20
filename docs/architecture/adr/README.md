@@ -63,6 +63,7 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 | [0015](0015-multi-process-safety-leases-fencing.md) | Multi-process safety — SQLite leases + monotonic fencing tokens (competing consumers) | Accepted | M16 |
 | [0016](0016-work-dispatch-queue-registry-pool.md) | Work dispatch — durable work-queue, type→factory registry, and a store-per-worker pool | Accepted | M17 |
 | [0017](0017-cancel-of-running-workflow.md) | Cancel-of-running — a durable intent flag, cooperative delivery, and reclaim-terminalizes | Accepted | M18 |
+| [0018](0018-sub-workflow-composition-and-approvals.md) | Sub-workflow composition & approvals — a phased-hybrid exec-model, completion-signal WAKE, and the SQLite signal mailbox | Accepted | M19 |
 
 ## How to Create a New ADR
 

@@ -14,6 +14,8 @@ Welcome to the Flow Orchestrator Guides section. These guides provide in-depth i
 ### Usage Patterns
 
 - [**Workflow Patterns**](./workflow-patterns.md) - Common patterns and best practices for workflow design
+- [**Sub-workflows & Approvals**](./sub-workflows.md) - Composition: a node that spawns/awaits a child workflow, and the approval gate (M19)
+- [**Work Dispatch**](./dispatch.md) - Competing-consumers job queue over the multi-process SQLite store (M17)
 - [**Error Handling**](./error-handling.md) - Strategies for handling errors in workflows
 - [**Benchmarks**](./benchmarks.md) - Performance benchmarks and analysis
 

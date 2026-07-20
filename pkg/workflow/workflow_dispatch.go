@@ -118,7 +118,11 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 	// clean (we hold the current token → flipTerminalFenced lands). Cheap (one indexed read per claim).
 	if cancelled, cerr := store.isCancelRequested(ctx, item.WorkflowID); cerr == nil && cancelled {
 		_, _ = store.flipTerminalFenced(item.WorkflowID, wqCancelled) //nolint:errcheck // best-effort; token-guarded
-		return true, nil                                              // ran=true (we handled the item — terminalized cancelled, did not Execute)
+		// A cancelled child is TERMINAL → wake its parent so the parent renders the outcome (INV-01)
+		// and does not park forever (F-P94-02). deliverSubWorkflowCompletion re-reads the now-cancelled
+		// state + fires only for a sub-workflow child (ParentID != "").
+		deliverSubWorkflowCompletion(store, item)
+		return true, nil // ran=true (we handled the item — terminalized cancelled, did not Execute)
 	}
 
 	factory, ok := reg.lookup(item.Type)
@@ -183,15 +187,83 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 	done := make(chan struct{})
 	go cancelWatcher(runCtx, cancel, done, store, item.WorkflowID)
 
-	w := &Workflow{DAG: dag, WorkflowID: item.WorkflowID, Store: store}
-	execErr := w.Execute(runCtx)
+	// M19 ph95 (F-P94-04): a queue child runs in THIS worker — a separate drive from its parent, so the
+	// parent's Registry + drive-stack ctx did NOT cross the dispatch. Thread both back: w.Registry=reg so a
+	// GRANDCHILD queue-spawn can resolve its type (else ErrSubWorkflowRequiresRegistry), and seed the drive
+	// ctx to item.Depth so the child's own spawns see the accumulated nesting depth — a type-ref chain is
+	// bounded by the ceiling across the dispatch, not reset to 0 at each worker. depth 0 (a plain M17
+	// dispatch) seeds nothing → byte-unchanged.
+	w := &Workflow{DAG: dag, WorkflowID: item.WorkflowID, Store: store, Registry: reg}
+	execErr := w.Execute(withDepthSeed(runCtx, item.Depth))
 	close(done) // Execute returned → tell the watcher to exit (leak-free).
 	cancel()    // release the child ctx (idempotent; harmless if the watcher already cancelled).
+
+	// A PARK is not a disposition (M19 ph94 — a SUSPENDABLE dispatched workflow, e.g. a queue
+	// sub-workflow child with its own ph90 approval). ErrSuspended means the child durably parked
+	// (Waiting), NOT a failure — dead-lettering it (the disposeExecErr default) would terminalize a
+	// child that is legitimately awaiting a signal and can never resume. Leave the queue row + the
+	// lease intact: the child's own signal (e.g. its approval) + a re-drive (RunNext/reclaim-after-
+	// lease-lapse) resumes it from the committed frontier, exactly the M10 durable-suspend contract.
+	// No completion signal is delivered (the child is NOT terminal — the parent stays parked until the
+	// child actually terminalizes). Release the drive lease so the reclaim scan can re-offer the row
+	// after the TTL lapses (a Released lease would fall out of the reclaim scan — leave it to lapse).
+	if errors.Is(execErr, ErrSuspended) {
+		// A park is genuine DURABLE PROGRESS (the child reached a checkpoint-persisted suspend point),
+		// not a failed attempt — so RESET attempts to 0 (F-P94-01). Otherwise each park-reclaim cycle
+		// bumps attempts (ClaimNext's flip), and a long-parked approval child would silently spend its
+		// transient-infra retry budget → a coincident ErrBusy/ErrIO on its eventual terminalizing drive
+		// would wrongly dead-letter it instead of retrying. The retry budget is for FAILURES; a park
+		// (like a successful checkpoint) is not one, so it does not consume it. Best-effort.
+		_, _ = store.resetWorkQueueAttempts(item.WorkflowID) //nolint:errcheck // best-effort; a failed reset only risks over-counting, never a lost child
+		return true, nil                                     // ran=true (we drove it; it parked). The row stays claimed; TTL-lapse → reclaim → resume.
+	}
+
 	if execErr != nil {
-		return true, disposeExecErr(store, item.WorkflowID, maxAttempts, execErr)
+		dispErr := disposeExecErr(store, item.WorkflowID, maxAttempts, execErr)
+		// A sub-workflow child that reached a genuine TERMINAL disposition (done/failed/cancelled)
+		// must wake its parent — including on FAILURE, so the parent renders the fail verdict and does
+		// not park forever. A leave-claimed drain/reclaim does NOT fire (the child is not terminal; a
+		// later reclaim re-runs it and fires then). Signal-after-terminal (F-92-04): the disposition is
+		// durable before we deliver.
+		deliverSubWorkflowCompletion(store, item)
+		return true, dispErr
 	}
 	_, _ = store.MarkDone(item.WorkflowID) //nolint:errcheck // ph80 CAS flip claimed->done (idempotent)
+	// The child is durably `done` → deliver the completion signal to the parent (if a sub-workflow).
+	deliverSubWorkflowCompletion(store, item)
 	return true, nil
+}
+
+// deliverSubWorkflowCompletion delivers a bare completion trigger to a sub-workflow child's PARENT
+// mailbox (M19 ph94, DEC-P94-PARENT-ADDRESS-COLUMN + DEC-P92-SIGNAL-IS-TRIGGER). It fires ONLY when:
+//   - the item carries a parent address (item.ParentID != "" — the TRUSTED engine-set column, never the
+//     input BLOB → attacker input cannot forge the target); AND
+//   - the child is genuinely TERMINAL (state ∈ {done, failed, cancelled}) — a leave-claimed drain/reclaim
+//     does not fire (the child will re-run + fire on the reclaim). Signal-after-terminal ordering (F-92-04):
+//     called AFTER the terminal disposition is durable, so the woken parent reads a COMPLETE child journal.
+//
+// The signal is a bare trigger (no payload — the parent reads the child DATA key + childRunFailed verdict,
+// the uniform contract). The sig.ID is deterministic (f(childID)) so a re-run RunNext / re-delivered signal
+// is idempotent (one mailbox entry). Best-effort: a delivery error does not fail the (already-terminal)
+// child — the parent can be re-driven and will re-check the child journal; a lost signal degrades to a
+// host re-drive, not a lost result. The parent's ph92 journal-gate is the validation: it completes ONLY for
+// ITS OWN deterministic child ID, so a misrouted/spurious signal → the parent re-parks, never a false wake.
+func deliverSubWorkflowCompletion(store *SQLiteStore, item WorkItem) {
+	if item.ParentID == "" {
+		return // a plain M17 dispatch (no parent) → no completion signal.
+	}
+	// Read the authoritative terminal state (the disposition may have left the row `claimed` on a
+	// drain/reclaim — do NOT signal then).
+	var state string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT state FROM work_queue WHERE workflow_id=?`, item.WorkflowID).Scan(&state); err != nil {
+		return // best-effort: a read error → the parent can re-drive later.
+	}
+	if state != wqDone && state != wqFailed && state != wqCancelled {
+		return // not terminal (leave-claimed) → a reclaim will re-run + fire.
+	}
+	sigID := "subworkflow-complete:" + item.WorkflowID                                 // deterministic → idempotent by sig.ID
+	_ = store.DeliverSignal(item.ParentID, Signal{ID: sigID, Name: item.ParentSignal}) //nolint:errcheck // best-effort; a lost signal degrades to a parent re-drive
 }
 
 // cancelPollInterval is how often the ctx-watcher polls cancel_requested. 500ms: well under the default

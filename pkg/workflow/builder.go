@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -116,6 +117,136 @@ func (b *WorkflowBuilder) AddTimer(name string, d time.Duration) *NodeBuilder {
 func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder {
 	node := b.AddNode(name)
 	node.action = &waitForSignalAction{nodeName: name, signalName: signalName}
+	return node
+}
+
+// AddSubWorkflow adds a declared sub-workflow node (M19 ph91): when reached it spawns and
+// awaits the definition-value child DAG IN-PROCESS under a deterministic child ID
+// (f(parentID, name)) with the child's own journal — parent and child are DISTINCT
+// workflows (one-writer preserved). Child success writes the child's result (see
+// WithResult) into parent data; child failure fails this node (INV-01 fail-fast). The
+// spawn is idempotent (a re-drive after the child completed does not re-run it). Requires
+// the run to have a Store (else the node returns ErrSubWorkflowRequiresStore).
+//
+// The child's whole spawn-closure is scanned AT BUILD for any suspendable node (an inline
+// child BLOCKS the parent, so it can never park): a suspendable node anywhere in the
+// closure fails Build with ErrSubWorkflowSuspendableChild — route such a child to the
+// queue path (ph94) instead. The action is set directly, so do NOT also call WithAction.
+// Returns a NodeBuilder for dependency wiring and result declaration (WithResult).
+func (b *WorkflowBuilder) AddSubWorkflow(name string, child *DAG) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &subWorkflowAction{nodeName: name, child: child}
+	// Scan the child's spawn-closure NOW; a suspendable node (direct or transitive) is a
+	// build error surfaced through actionErr (Build reports it — builder.go Build()).
+	if err := scanChildInlineSafe(child); err != nil {
+		node.actionErr = err
+	}
+	return node
+}
+
+// WithResult declares that this sub-workflow node's result is the child's DATA KEY
+// childDataKey, written into parent data under parentKey on child success (M19 ph91). The
+// child must Set(childDataKey, ...) its result; a data key (not a node output) is read
+// because data keys carry the store's typed columns, so a SCALAR result (int64 via value_long,
+// plus string/bool/float) round-trips type-faithfully on all three stores (an int64 reloads
+// as an int64), whereas node outputs reload as strings on FB/SQLite. A COMPLEX result
+// (map/slice/nil) is NOT backend-uniform — it reloads typed on InMemory but as a JSON string
+// on FB/SQLite (the same pre-existing store-wide property that governs every complex data
+// value); declare a scalar result key when backend-uniformity matters. A collision with a
+// pre-existing parent key (foreign value) is a loud ErrSubWorkflowResultKeyCollision at run
+// time, not last-writer-wins. Only valid on a node created by AddSubWorkflow; a no-op (with a
+// deferred error) otherwise.
+func (n *NodeBuilder) WithResult(parentKey, childDataKey string) *NodeBuilder {
+	switch a := n.action.(type) {
+	case *subWorkflowAction:
+		a.resultKey = parentKey
+		a.resultFrom = childDataKey
+	case *parkedSubWorkflowAction:
+		a.resultKey = parentKey
+		a.resultFrom = childDataKey
+	case *queueSubWorkflowAction:
+		a.resultKey = parentKey
+		a.resultFrom = childDataKey
+	default:
+		n.actionErr = fmt.Errorf("%w: WithResult is only valid on an AddSubWorkflow/AddSubWorkflowParked/AddSubWorkflowQueued node", ErrValidation)
+	}
+	return n
+}
+
+// WithInput sets the seeded KV input for a QUEUE-dispatched sub-workflow child (M19 ph94): the map is
+// JSON-encoded into the work_queue row's input, and RunNext's seedInput sets each key as a child data
+// key on the fresh run (so the child's first nodes read it). Only valid on an AddSubWorkflowQueued node
+// (the inline/parked children run in-process and read the parent data directly, so they need no queue
+// input). A nil/empty map is a no-op (no seed).
+func (n *NodeBuilder) WithInput(kv map[string]any) *NodeBuilder {
+	sub, ok := n.action.(*queueSubWorkflowAction)
+	if !ok {
+		n.actionErr = fmt.Errorf("%w: WithInput is only valid on an AddSubWorkflowQueued node", ErrValidation)
+		return n
+	}
+	if len(kv) == 0 {
+		return n
+	}
+	b, err := json.Marshal(kv)
+	if err != nil {
+		n.actionErr = fmt.Errorf("%w: cannot encode sub-workflow input: %w", ErrValidation, err)
+		return n
+	}
+	sub.input = b
+	return n
+}
+
+// AddSubWorkflowParked adds a declared PARKED sub-workflow-await node (M19 ph92): when reached
+// it PARKS the run (Waiting) while the child — run OUT-OF-BAND under its deterministic ID
+// f(parentID, name) — is not yet terminal; a durable completion signal delivered to the
+// workflow's mailbox (SubWorkflowCompletionSignal) + a host DeliverAndResume wakes it; on wake
+// it reads the child's declared result DATA key (see WithResult — the uniform ph91 contract, NOT
+// the signal payload) and converges, or fails this node if the child terminalized failed
+// (INV-01, coe-aware). Requires a Store implementing SignalStore (else ErrWaitRequiresSignalStore).
+//
+// This is the PARKED counterpart to AddSubWorkflow (which BLOCKS inline). The child is carried by
+// definition-value so the parked node can render the child's coe-aware terminal verdict from the
+// journal + DAG. The action is set directly (marker visible), so do NOT also call WithAction. The
+// ROUTING between inline and parked is ph94; ph92 provides the parked mechanism.
+func (b *WorkflowBuilder) AddSubWorkflowParked(name string, child *DAG) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &parkedSubWorkflowAction{nodeName: name, child: child}
+	return node
+}
+
+// AddSubWorkflowQueued adds a QUEUE-dispatched sub-workflow node (M19 ph94): when reached it ENQUEUES
+// a child of TYPE childType to the M17 work_queue (carrying this parent's mailbox address in the
+// trusted control columns) and PARKS (Waiting); a pool worker claims + runs the child; on child-terminal
+// a completion signal wakes this parent, which reads the child's result DATA key (WithResult) + renders
+// the coe-aware verdict. This is the queue counterpart to AddSubWorkflow (inline, ph91) — the explicit
+// opt-in for a TYPE-REF and/or SUSPENDABLE child (which the inline path refuses). It structurally
+// requires a multi-process *SQLiteStore + a worker Pool + a Registry (the type→DAG map, injected at
+// Execute — the DAG carries only the type STRING, keeping the workflow pure DATA). The action is set
+// directly (marker visible), so do NOT also call WithAction. Returns a NodeBuilder for dependency wiring
+// + WithResult. WithInput sets the child's seeded KV input.
+func (b *WorkflowBuilder) AddSubWorkflowQueued(name, childType string) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &queueSubWorkflowAction{nodeName: name, childType: childType}
+	if childType == "" {
+		node.actionErr = fmt.Errorf("%w: AddSubWorkflowQueued requires a non-empty child type", ErrValidation)
+	}
+	return node
+}
+
+// AddApproval adds a declared approval node (M19 ph90): when reached it parks the
+// run (Waiting) until an approve/reject decision (an ApprovalDecision payload) is
+// delivered to the workflow's durable mailbox under the SIGNAL NAME EQUAL TO THE NODE
+// NAME, then acts: approve → apply the decision (persisted to the journal for audit)
+// and converge; reject → fail fast with an *ApprovalRejectedError (INV-01, no
+// downstream runs). Requires a Store implementing SignalStore (else the node returns
+// ErrWaitRequiresSignalStore — a loud failure, never a forever-park). A host builds
+// the decision Signal with ApproveSignal / RejectSignal (which derive the same name).
+// Returns a NodeBuilder for dependency wiring; the action is set directly, so do NOT
+// also call WithAction (that would replace it) — retry/timeout are not meaningful on a
+// park.
+func (b *WorkflowBuilder) AddApproval(name string) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &approvalAction{nodeName: name, signalName: name}
 	return node
 }
 

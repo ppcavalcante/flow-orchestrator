@@ -22,6 +22,28 @@ type Workflow struct {
 	// Store is used for persisting workflow state
 	Store WorkflowStore
 
+	// Registry maps a workflow TYPE (a data string) to its DAGFactory (M17). A queue-dispatched
+	// sub-workflow node (M19 ph94, AddSubWorkflowQueued) reads it off ctx to resolve the child type
+	// → DAG (for the coe-verdict on wake) + validate the type exists at enqueue. Nil when the
+	// workflow uses no queue sub-workflows; a queue node reached with a nil Registry returns
+	// ErrSubWorkflowRequiresRegistry. It is the EXECUTION-ENVIRONMENT's Registry (carries CODE),
+	// injected at Execute — the DAG references only the type STRING (keeping the workflow pure DATA),
+	// exactly as RunNext takes the Registry as a parameter, not baked into the workflow.
+	Registry *Registry
+
+	// MaxSubWorkflowDepth bounds sub-workflow nesting (M19 ph95, the COMP-CLOSE DoS ceiling).
+	// A sub-workflow spawn reached at nesting depth d >= this ceiling is refused with
+	// ErrSubWorkflowMaxDepth (loud, never a park, never a silent cap). Zero => the package
+	// default (defaultMaxSubWorkflowDepth = 8). Injected on ctx at executeLocked.
+	//
+	// SCOPE (F-P95-02): this override governs the INLINE path. On the QUEUE path a child runs in a
+	// SEPARATE RunNext drive that does not carry this field — only the depth COUNT crosses the
+	// dispatch — so a queue child enforces the package DEFAULT ceiling regardless of this override.
+	// The unbounded-nesting DoS invariant holds on BOTH paths (the queue path is always bounded at
+	// the default); only a non-default override is inline-only. Change the package default if you
+	// need a uniform queue-path bound.
+	MaxSubWorkflowDepth int
+
 	// Clock is the source of "now" for durable timers (M10). When nil it defaults
 	// to the system clock; tests inject a FakeClock to drive durable-time
 	// scenarios deterministically and instantly. Execute injects this clock into
@@ -266,6 +288,32 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 			clock = systemClock{}
 		}
 		ctx = withClock(ctx, clock)
+	}
+
+	// Inject the parent Store so a sub-workflow node (M19 ph91) can spawn its child under
+	// the child's own ID + journal through the same store. Threaded on ctx exactly like the
+	// clock — the action is handed only ctx + data, never the Store. A nil store is not
+	// injected (subWorkflowAction then returns ErrSubWorkflowRequiresStore). A store already
+	// in ctx (a nested child drive re-entering executeLocked) is left intact so the child
+	// spawns under the SAME root store, not a re-injected one.
+	if parentStoreFrom(ctx) == nil {
+		ctx = withParentStore(ctx, w.Store)
+	}
+
+	// Inject the type→DAG Registry so a queue-dispatched sub-workflow node (M19 ph94) can resolve +
+	// validate its child type. Threaded on ctx like the parent Store — the DAG carries only the type
+	// STRING (data); the Registry (CODE) is the execution environment's. Nil is not injected (the
+	// queue action then returns ErrSubWorkflowRequiresRegistry). Left intact if already present (a
+	// nested child drive re-entering executeLocked shares the SAME root Registry).
+	if w.Registry != nil && registryFrom(ctx) == nil {
+		ctx = withRegistry(ctx, w.Registry)
+	}
+
+	// Inject the sub-workflow nesting ceiling (M19 ph95). Threaded on ctx like the Registry so both
+	// spawn paths read one source of truth. Left intact if already present (a nested child drive
+	// re-entering executeLocked inherits the ROOT ceiling — a child cannot widen its own ceiling).
+	if maxSubWorkflowDepthFrom(ctx) == 0 {
+		ctx = withMaxSubWorkflowDepth(ctx, w.MaxSubWorkflowDepth)
 	}
 
 	// Create workflow data. When MetricsConfig is set (REM-02 enable-hook), thread

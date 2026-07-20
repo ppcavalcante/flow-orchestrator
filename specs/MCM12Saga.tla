@@ -28,7 +28,8 @@ MCDeps  == { <<s,a>>, <<s,b>>, <<a,t>>, <<b,t>> }
 MCFireAt == [n \in MCNodes |-> 0]
 
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded, rollingBack, triggerCause
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause,
+          spawned, childTerminal
 
 \* M11 OR-join arm EMPTY for the saga config (inert).
 MCChoiceNodes    == {}
@@ -37,8 +38,15 @@ MCMergeNodes     == {}
 MCChoiceBranches == [c \in {} |-> {}]
 MCChosenBranch   == [c \in {} |-> s]
 MCMergeTails     == [m \in {} |-> {}]
+\* M19 sub-workflow arm EMPTY for the saga config (inert -> preservation, DEC-P96-BASE).
+MCSubWorkflowNodes == {}
+MCChildFailSet     == {}
+MCMaxDepth         == 3
+MCNodeDepth        == [n \in MCNodes |-> 0]
 
 INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
     ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
-    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails
+    ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
+    SubWorkflowNodes <- MCSubWorkflowNodes, ChildFailSet <- MCChildFailSet,
+    MaxDepth <- MCMaxDepth, NodeDepth <- MCNodeDepth
 =============================================================================

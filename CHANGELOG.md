@@ -5,6 +5,48 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0-alpha] — 2026-07-20
+
+**M19 — Composition.** Two opt-in composition seams over the existing durable executor:
+a workflow node can **spawn and await a child workflow**, and a node can **gate on an approval**.
+Both ride the M10 durable park/wake seam — a composing parent parks (`Waiting`) and wakes on a
+**completion signal** (no scheduler, no polling). **Fully additive** — the public `Execute` /
+`dag.go` / `parallel_execution.go` path is **byte-unchanged** (0-diff re-derived vs `v0.17.0-alpha`),
+so 1.0 stays earnable. See
+[ADR-0018](docs/architecture/adr/0018-sub-workflow-composition-and-approvals.md) and the
+[sub-workflows guide](docs/guides/sub-workflows.md).
+
+**Added (all additive):**
+- **Sub-workflow spawn/await** — `AddSubWorkflow(name, child)` (inline def-value child, spawned
+  under a deterministic child ID with its own journal), `AddSubWorkflowParked(name, child)` (parks
+  and wakes on an out-of-band completion signal via `DeliverAndResume`), and
+  `AddSubWorkflowQueued(name, childType)` (the child is dispatched to the M17 work queue and run by
+  a worker). `WithResult(parentKey, childDataKey)` declares the child's result DATA key into the
+  parent — the uniform result contract across all three. A failing child fails the sub-workflow node
+  (INV-01 fail-fast); the child owns its own saga (a parent's M12 compensation never crosses into a
+  child's journal).
+- **Approval gates** — `AddApproval(name)`: a node that parks until an approval decision is
+  delivered (the same park/wake completion-signal seam as a parked sub-workflow).
+- **Exec model** — a phased hybrid: inline (def-value) children run in-process on the drive stack;
+  type-ref children route through the M17 queue. The route is a deterministic function of the DAG +
+  journal (not a runtime pick), so it is crash-resume-stable.
+- **SQLite `SignalStore`** — the durable mailbox backing the completion-signal wake for the SQLite
+  store (additive, opt-in with a `WithMultiProcess()` store).
+- **Nesting-DoS ceiling** — sub-workflow nesting is bounded by a runtime depth ceiling (default 8,
+  overridable inline via `Workflow.MaxSubWorkflowDepth`) enforced on **both** the inline and queue
+  spawn paths; depth-exceeded is a loud typed error (`ErrSubWorkflowMaxDepth`), never unbounded
+  recursion. `Registry.ValidateNoTypeCycles()` is an opt-in build-time static type-cycle check
+  (call once at Registry assembly).
+- **Formal capstone** — a TLA+ sub-workflow-await arm (`specs/MCM19Composition.tla`) extends the M10
+  durable-executor model: it exhausts at `MaxCrashes=1` (62,790 distinct states, 0 violations) with
+  four bite-proven composition invariants (idempotent spawn, park/wake-exactly-on-terminal,
+  child-fail⇒parent-fail, bounded nesting); the idempotent-spawn invariant is a discriminator
+  (RED in the composition config, INERT in the base). Every base config re-runs byte-behavior-
+  unchanged (preservation).
+
+**Security:** PASSED (0 blocking). Three tracked **LOW** residuals are documented and carried to the
+1.0 backlog; none blocks the release.
+
 ## [0.17.0-alpha] — 2026-07-16
 
 **M18 — Operability.** The operator-facing **read-side + control layer** over the M17 dispatch

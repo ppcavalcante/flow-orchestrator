@@ -26,7 +26,8 @@ MCDeps  == { <<nF, nD>> }   \* nD depends on the failing node; nT is independent
 MCFireAt == [n \in MCNodes |-> IF n = nT THEN 2 ELSE 0]
 
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded, rollingBack, triggerCause
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause,
+          spawned, childTerminal
 
 \* M11 OR-join + M12 saga arms are EMPTY/inert for this M10 fail-resume config, so
 \* they re-run the extended spec byte-behaviour-unchanged (DEC-M11-P44-PRESERVE /
@@ -42,9 +43,16 @@ MCMergeTails     == [m \in {} |-> {}]
 MCSagaNodes    == {}
 MCCompFailSet  == {}
 MCSagaTrigger  == "none"
+\* M19 sub-workflow arm empty -> inert -> re-runs byte-behaviour-unchanged (DEC-P96-BASE).
+MCSubWorkflowNodes == {}
+MCChildFailSet     == {}
+MCMaxDepth         == 3
+MCNodeDepth        == [n \in MCNodes |-> 0]
 
 INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
     ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
     ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
-    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger
+    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger,
+    SubWorkflowNodes <- MCSubWorkflowNodes, ChildFailSet <- MCChildFailSet,
+    MaxDepth <- MCMaxDepth, NodeDepth <- MCNodeDepth
 =============================================================================

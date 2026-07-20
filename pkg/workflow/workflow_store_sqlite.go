@@ -104,13 +104,50 @@ CREATE TABLE IF NOT EXISTS work_queue (
     state           TEXT NOT NULL,          -- pending | claimed | done | failed | cancelled
     attempts        INTEGER NOT NULL DEFAULT 0, -- bumped on each ClaimNext claim
     updated_at      INTEGER NOT NULL,       -- unix-nanos of the last state transition
-    cancel_requested INTEGER                -- M18 ph87: unix-nanos of an operator cancel request; NULL = not requested.
+    cancel_requested INTEGER,               -- M18 ph87: unix-nanos of an operator cancel request; NULL = not requested.
                                             -- The durable INTENT that splits operator-cancel (terminalize cancelled)
                                             -- from AF1 drain/crash (leave claimed). Additive/nullable — no FB change.
+    parent_id       TEXT,                   -- M19 ph94: the PARENT workflow's mailbox address for a sub-workflow child
+    parent_signal   TEXT,                   -- (parent_id = parent WorkflowID, parent_signal = completion-signal name).
+                                            -- NULL = a plain M17 dispatch (no parent) → RunNext emits no completion signal.
+                                            -- CONTROL-plane metadata (alongside cancel_requested/state) — the child's input
+                                            -- BLOB structurally cannot reach it, so attacker input can never forge the
+                                            -- completion target (DEC-P94-PARENT-ADDRESS-COLUMN, defense-by-construction).
+                                            -- Additive/nullable, engine-set at EnqueueSubWorkflow. Orthogonal to the M16
+                                            -- fencing arbiter (leases table) — never touches the fencing CAS.
+    depth           INTEGER NOT NULL DEFAULT 0 -- M19 ph95: sub-workflow NESTING depth (the COMP-CLOSE DoS ceiling).
+                                            -- ENGINE-SET at EnqueueSubWorkflow (parent_depth+1), NEVER user-supplied —
+                                            -- same defense-by-construction as parent_id: a user cannot forge a low depth
+                                            -- to bypass the ceiling. A plain M17 Enqueue is depth 0 (the DEFAULT). RunNext
+                                            -- projects it back into the child drive-stack so a type-ref chain is bounded
+                                            -- across the dispatch (F-P94-04). NOT NULL DEFAULT 0 → a legit row is never NULL;
+                                            -- the read path treats a NULL as corruption (fail-safe refuse, DEC-P95-DEPTH-DEFENSIVE-READ).
 );
 -- PARTIAL index over ONLY claimable rows: the ClaimNext scan (WHERE state='pending' [AND type IN …]
 -- ORDER BY enqueued_at) is fully index-covered, and terminal rows never bloat it.
-CREATE INDEX IF NOT EXISTS idx_wq_claimable ON work_queue(type, enqueued_at) WHERE state='pending';`
+CREATE INDEX IF NOT EXISTS idx_wq_claimable ON work_queue(type, enqueued_at) WHERE state='pending';
+-- M19 (ph93) durable SIGNAL MAILBOX for the SignalStore interface (M10 signals: approvals,
+-- wait-for-signal, ph92 sub-workflow completion). One row per un-acked signal per workflow.
+-- SEPARATE from the WorkflowData snapshot tables (nodes/data_kv) — mailbox-outside-snapshot
+-- (MH37-1): a Save/checkpoint rewrites the snapshot rows, never this table, so a delivered
+-- signal can NEVER be clobbered by a concurrent checkpoint. NO FK to workflows: a signal may
+-- be delivered before the instance exists (early-signal buffering, topology-independent
+-- delivery). PRIMARY KEY (workflow_id, sig_id) gives BOTH the idempotent-by-id UNIQUE and the
+-- ON CONFLICT target (a re-delivered sig_id is a no-op). Additive CREATE TABLE IF NOT EXISTS
+-- (ph80/ph87 pattern) — an existing DB gains it on next open.
+CREATE TABLE IF NOT EXISTS signals (
+    workflow_id TEXT NOT NULL,
+    sig_id      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    payload     TEXT,                  -- JSON-encoded (marshalSignalPayload); '' = nil payload. DeliverSignal
+                                        -- always writes a non-NULL string, but the READ path (TakeSignals)
+                                        -- scans via sql.NullString so a NULL from a corrupt DB / foreign
+                                        -- writer decodes to nil, never bricking the read (F-P93-ADV-1). No
+                                        -- NOT NULL constraint: it would give false confidence (constraints
+                                        -- don't protect a corrupt DB — the read-path robustness is the defense).
+    enqueued_at INTEGER NOT NULL,      -- unix-nanos delivery time (a tiebreak; sig_id is the primary sort)
+    PRIMARY KEY (workflow_id, sig_id)  -- idempotent-by-id UNIQUE + the ON CONFLICT target; NO FK to workflows
+);`
 
 // data_kv.kind discriminators — mirror the FB store's typed vectors so Load
 // reconstructs the SAME Go type the FB path yields (byte-identical Snapshot).
@@ -214,6 +251,23 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
 		return nil, fmt.Errorf("%w: cancel_requested migration: %w", ErrIO, err)
+	}
+	// M19 ph94: additive parent-address columns for sub-workflow queue children (same ADD COLUMN
+	// pattern — an existing DB gains them on next open; "duplicate column name" = already migrated).
+	for _, col := range []string{"parent_id TEXT", "parent_signal TEXT"} {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE work_queue ADD COLUMN "+col); err != nil && //nolint:gosec // G202: col is a hardcoded literal, not user input
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
+			return nil, fmt.Errorf("%w: %s migration: %w", ErrIO, col, err)
+		}
+	}
+	// M19 ph95: additive sub-workflow nesting-depth column (same idempotent ADD COLUMN pattern). NOT NULL
+	// DEFAULT 0 is a valid SQLite ADD COLUMN (a constant default backfills existing rows to 0 — a pre-ph95
+	// row is a top-level dispatch = depth 0, correct). Engine-set at EnqueueSubWorkflow; NEVER user input.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE work_queue ADD COLUMN depth INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
+		return nil, fmt.Errorf("%w: depth migration: %w", ErrIO, err)
 	}
 	// M16 (ph75): resolve the lease-liveness clock + TTL (defaults when unset). Lease liveness only.
 	clock := dur.clock
@@ -524,6 +578,15 @@ func (s *SQLiteStore) Delete(workflowID string) error {
 		}
 	}()
 
+	// Reclaim the durable mailbox FIRST + UNCONDITIONALLY — the SQLite analog of the file stores'
+	// removeSignalDir, which reclaims the mailbox even for a never-Saved workflow (early-buffered
+	// signals with NO workflows row; ph37 F2 — no background GC). Doing it before the workflows-row
+	// check + committing it below (even on the ErrNotFound path) means an early-buffered mailbox is
+	// never orphaned. (F-P93-R1.)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM signals WHERE workflow_id = ?`, workflowID); err != nil {
+		return fmt.Errorf("%w: delete signals: %w", ErrIO, err)
+	}
+
 	res, err := tx.ExecContext(ctx, `DELETE FROM workflows WHERE id = ?`, workflowID)
 	if err != nil {
 		return fmt.Errorf("%w: delete workflow: %w", ErrIO, err)
@@ -533,8 +596,16 @@ func (s *SQLiteStore) Delete(workflowID string) error {
 		return fmt.Errorf("%w: rows affected: %w", ErrIO, raErr)
 	}
 	if n == 0 {
+		// The snapshot did not exist — but a mailbox MAY have (early buffering). Commit the signals
+		// reclaim so it is not leaked, THEN report ErrNotFound (the snapshot-absence contract is
+		// unchanged for callers).
+		if cerr := tx.Commit(); cerr != nil {
+			return fmt.Errorf("%w: commit: %w", ErrIO, cerr)
+		}
+		committed = true
 		return fmt.Errorf("%w: %s", ErrNotFound, workflowID)
 	}
+	// The snapshot existed — reclaim its remaining rows in the same txn.
 	for _, tbl := range []string{"nodes", "data_kv", "waits"} {
 		//nolint:gosec // G202: table names are hardcoded literals, not user input; only the ?-bound id is external
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE workflow_id = ?", workflowID); err != nil {

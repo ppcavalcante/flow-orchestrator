@@ -30,6 +30,16 @@ type WorkItem struct {
 	Type       string
 	Input      []byte
 	Token      FencingToken
+	// ParentID / ParentSignal (M19 ph94) carry a sub-workflow child's PARENT mailbox address (the
+	// parent WorkflowID + the completion-signal name), set by EnqueueSubWorkflow. Both "" for a plain
+	// M17 dispatch (no parent) → RunNext emits no completion signal. Engine-set (not from the input
+	// BLOB), so an attacker-controlled input can never forge the completion target.
+	ParentID     string
+	ParentSignal string
+	// Depth (M19 ph95) is the sub-workflow NESTING depth this item runs at — engine-set at
+	// EnqueueSubWorkflow (parent_depth+1), 0 for a plain M17 dispatch. RunNext seeds the child's
+	// drive-stack to this depth so a type-ref chain is bounded by the ceiling across the dispatch.
+	Depth int
 }
 
 // Enqueue durably submits workflowID for dispatch as a `pending` work_queue row of the given type.
@@ -66,6 +76,52 @@ func (s *SQLiteStore) Enqueue(workflowID, typ string, input []byte) (queued bool
 	return n == 1, nil // 1 = a new pending row landed; 0 = the id already existed (visible no-op).
 }
 
+// EnqueueSubWorkflow is Enqueue for a SUB-WORKFLOW child (M19 ph94): it durably submits childID with the
+// parent's mailbox address (parentID = the parent WorkflowID, parentSig = the completion-signal name) set
+// ATOMICALLY on the pending row's engine-set control columns (parent_id/parent_signal). When the child
+// terminalizes, RunNext delivers a completion signal to parentID's mailbox under parentSig; a plain Enqueue
+// (NULL parent columns) emits none. Idempotent + detectable like Enqueue (ON CONFLICT DO NOTHING). The
+// parent address lives in the CONTROL plane, never the input BLOB — attacker-controlled input cannot forge
+// the completion target (DEC-P94-PARENT-ADDRESS-COLUMN). parentID/parentSig must be non-empty (a sub-workflow
+// child by definition has a parent).
+func (s *SQLiteStore) EnqueueSubWorkflow(childID, typ string, input []byte, parentID, parentSig string, depth int) (queued bool, err error) {
+	if !s.dur.mp {
+		return false, fmt.Errorf("%w: EnqueueSubWorkflow requires a multi-process store (WithMultiProcess)", ErrValidation)
+	}
+	if err := validateWorkflowID(childID); err != nil {
+		return false, err
+	}
+	if typ == "" {
+		return false, fmt.Errorf("%w: EnqueueSubWorkflow requires a non-empty type", ErrValidation)
+	}
+	if err := validateWorkflowID(parentID); err != nil {
+		return false, fmt.Errorf("%w: invalid parent id: %w", ErrValidation, err)
+	}
+	if parentSig == "" {
+		return false, fmt.Errorf("%w: EnqueueSubWorkflow requires a non-empty parent signal name", ErrValidation)
+	}
+	if depth < 0 {
+		return false, fmt.Errorf("%w: EnqueueSubWorkflow depth must be non-negative", ErrValidation)
+	}
+	ctx := context.Background()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := unixNanoNow()
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO work_queue(workflow_id, type, input, enqueued_at, state, attempts, updated_at, parent_id, parent_signal, depth)
+		 VALUES (?,?,?,?, 'pending', 0, ?, ?, ?, ?)
+		 ON CONFLICT(workflow_id) DO NOTHING`,
+		childID, typ, input, now, now, parentID, parentSig, depth)
+	if err != nil {
+		return false, classifyTxErr("enqueue subworkflow", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("%w: enqueue subworkflow rows: %w", ErrIO, err)
+	}
+	return n == 1, nil
+}
+
 // wqStates — the terminal set (never re-claimed; the C2 infinite-reclaim guard lives in ClaimNext's
 // `WHERE state='pending'` scan, but these name the lifecycle for the transition methods).
 const (
@@ -75,6 +131,29 @@ const (
 	wqFailed    = "failed"
 	wqCancelled = "cancelled"
 )
+
+// queueTerminalState reports a queue-dispatched child's LIFECYCLE authority for the ph94 parked-await
+// gate (DEC-P94-QUEUE-TERMINAL-AUTHORITY). For a queue child the `work_queue` row IS its lifecycle
+// record by M17's design (state ∈ pending|claimed|done|failed|cancelled), so the parked-await gate
+// consults the row — not just the journal — to decide terminal-ness. Returns (state, exists): a child
+// with NO row (a manual-signal ph92 child) yields exists=false, and the caller falls back to the
+// journal-gate (ph92 behavior byte-unchanged). Read-only, under s.mu — no lifecycle mutation.
+func (s *SQLiteStore) queueTerminalState(childID string) (state string, exists bool, err error) {
+	if verr := validateWorkflowID(childID); verr != nil {
+		return "", false, verr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = s.db.QueryRowContext(context.Background(),
+		`SELECT state FROM work_queue WHERE workflow_id=?`, childID).Scan(&state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil // no queue row → not a queue-dispatched child → journal-gate applies.
+	case err != nil:
+		return "", false, classifyTxErr("queueterminalstate", err)
+	}
+	return state, true, nil
+}
 
 // buildTypeFilter renders the optional `AND type IN (?,?,…)` clause + its args for a ClaimNext scan.
 // Empty filter → no clause (claim any type). The values are ?-bound (never concatenated).
@@ -139,7 +218,7 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 	cancelledAny := false // M18 ph87: true once a reclaim-terminalize-cancelled has run in this txn (BLOCKER-2)
 	for {
 		excludeClause, excludeArgs := buildNotInFilter(tried)
-		scanSQL := `SELECT workflow_id, type, input, state FROM work_queue
+		scanSQL := `SELECT workflow_id, type, input, state, parent_id, parent_signal, depth FROM work_queue
 		            WHERE (state='pending'
 		                   OR (state='claimed'
 		                       AND EXISTS (SELECT 1 FROM leases l
@@ -150,10 +229,12 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		scanArgs := append(append(append([]interface{}{}, reclaimNow), typeArgs...), excludeArgs...)
 
 		var (
-			wf, typ, state string
-			input          []byte
+			wf, typ, state         string
+			input                  []byte
+			parentID, parentSignal sql.NullString // M19 ph94: NULL for a plain M17 dispatch (no parent)
+			depthCol               sql.NullInt64  // M19 ph95: scanned defensively — a NULL is corruption, NOT a silent 0
 		)
-		scanErr := tx.QueryRowContext(ctx, scanSQL, scanArgs...).Scan(&wf, &typ, &input, &state)
+		scanErr := tx.QueryRowContext(ctx, scanSQL, scanArgs...).Scan(&wf, &typ, &input, &state, &parentID, &parentSignal, &depthCol)
 		switch {
 		case errors.Is(scanErr, sql.ErrNoRows):
 			// No runnable item. BUT if this txn terminalized any cancel-set reclaim rows (BLOCKER-2), we
@@ -170,6 +251,20 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		case scanErr != nil:
 			return WorkItem{}, classifyTxErr("claimnext scan", scanErr)
 		}
+
+		// DEFENSIVE DEPTH READ (M19 ph95, DEC-P95-DEPTH-DEFENSIVE-READ + the ph93 NULL-poison lesson): the
+		// column is NOT NULL DEFAULT 0, so a legit row is NEVER NULL and is bounded ≤ the ceiling by the
+		// enqueue-time refusal. A NULL, a negative, OR a depth beyond maxSubWorkflowDepthCap means schema
+		// corruption (a forged/bit-rotted row — the corrupt-store-as-input-TCB, M9). Fail-safe: SKIP the row
+		// (tried + continue) so it is never claimed — never read it as a silent 0 (a free ceiling BYPASS), and
+		// never feed a huge depth to RunNext's withDepthSeed (F-P95-01: an allocation storm). Skipping instead
+		// of returning ErrCorruptData keeps ONE corrupt row from wedging the whole queue (F-P95-03) — the row
+		// is simply never claimable (same posture as an unregistered-type row), the rest of the queue flows.
+		if !depthCol.Valid || depthCol.Int64 < 0 || depthCol.Int64 > maxSubWorkflowDepthCap {
+			tried = append(tried, wf)
+			continue
+		}
+		depth := int(depthCol.Int64)
 
 		// Claim the M16 fencing lease for this id INSIDE this txn (the sole safety arbiter, untouched).
 		// A lapsed-`claimed` reclaim → claimLocked bumps the token (fencing the dead/stalled owner); a
@@ -203,6 +298,23 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 					`UPDATE work_queue SET state='cancelled', updated_at=? WHERE workflow_id=? AND state='claimed'`,
 					unixNanoNow(), wf); terr != nil {
 					return WorkItem{}, classifyTxErr("claimnext cancel-terminalize", terr)
+				}
+				// M19 ph94 (F-P94-02): this row is a SUB-WORKFLOW child (parent_id set) being terminalized
+				// `cancelled` HERE, inside ClaimNext — it never reaches RunNext, so RunNext's completion hook
+				// (deliverSubWorkflowCompletion) can NEVER fire for it. Without a wake HERE the parent parks
+				// FOREVER on a child that is durably terminal (cancelled). So deliver the completion signal in
+				// the SAME txn (a signals INSERT), under the reclaimer's write lock — atomic with the terminal
+				// flip, no re-lock (calling DeliverSignal would re-take s.mu → deadlock). Idempotent by sig_id.
+				if parentID.Valid && parentID.String != "" {
+					sigID := "subworkflow-complete:" + wf
+					if _, serr := tx.ExecContext(ctx,
+						`INSERT INTO signals(workflow_id, sig_id, name, payload, enqueued_at)
+						 VALUES(?, ?, ?, '', ?)
+						 ON CONFLICT(workflow_id, sig_id)
+						 DO UPDATE SET name=excluded.name, enqueued_at=excluded.enqueued_at`,
+						parentID.String, sigID, parentSignal.String, unixNanoNow()); serr != nil {
+						return WorkItem{}, classifyTxErr("claimnext cancel-wake-parent", serr)
+					}
 				}
 				cancelledAny = true       // a cancel-terminalize ran → the txn MUST commit even if no runnable item follows.
 				tried = append(tried, wf) // cancelled + cleaned up → skip it, re-scan for the next runnable item in-txn.
@@ -256,7 +368,7 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 			// token). Count the event (nil-guarded → zero-cost when metrics unset).
 			s.metrics.incReclaimAfterDeath()
 		}
-		return WorkItem{WorkflowID: wf, Type: typ, Input: input, Token: token}, nil
+		return WorkItem{WorkflowID: wf, Type: typ, Input: input, Token: token, ParentID: parentID.String, ParentSignal: parentSignal.String, Depth: depth}, nil
 	}
 }
 
@@ -450,6 +562,28 @@ func (s *SQLiteStore) MarkForRetry(workflowID string, maxAttempts int) (requeued
 // detectable 0-row no-op.
 func (s *SQLiteStore) CancelPending(workflowID string) (bool, error) {
 	return s.flipState(workflowID, wqPending, wqCancelled)
+}
+
+// resetWorkQueueAttempts sets a claimed row's attempts back to 0 (M19 ph94, F-P94-01). Called on a
+// PARK (a suspendable dispatched child that returned ErrSuspended): a park is durable progress, not a
+// failed attempt, so it must not spend the transient-infra retry budget. Guarded to `state='claimed'`
+// (only a live-claimed row is parking under this worker); a terminal/pending row is a 0-row no-op.
+// Orthogonal to the fencing arbiter (it touches only attempts, never the token/leases).
+func (s *SQLiteStore) resetWorkQueueAttempts(workflowID string) (reset bool, err error) {
+	ctx := context.Background()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE work_queue SET attempts=0, updated_at=? WHERE workflow_id=? AND state='claimed'`,
+		unixNanoNow(), workflowID)
+	if err != nil {
+		return false, classifyTxErr("reset attempts", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("%w: reset attempts rows: %w", ErrIO, err)
+	}
+	return n == 1, nil
 }
 
 // CancelRunning requests cancellation of a RUNNING (or still-pending) workflow (M18 ph87, OBS-CAN). It

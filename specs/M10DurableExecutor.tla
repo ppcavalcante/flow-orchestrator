@@ -79,8 +79,22 @@ CONSTANTS
     SagaNodes,       \* subset of Nodes that DECLARE a compensation (compensable). A run rolls back only
                      \* when SagaNodes # {} (hasCompensations). Empty -> the saga arm never fires.
     CompFailSet,     \* subset of SagaNodes whose COMPENSATION fails when run (best-effort -> CompensationFailed)
-    SagaTrigger      \* the trigger cause to model for this config: "failure" (a FailSet node fails) or
+    SagaTrigger,     \* the trigger cause to model for this config: "failure" (a FailSet node fails) or
                      \* "canceled"/"deadline" (a caller-cancel/deadline aborts the run). "none" = no saga.
+    \* --- M19 sub-workflow-await arm (ph96). ALL default to {} / 0 / [n|->0] for the
+    \* M10/M11/M12 configs, so the composition arm is INERT and those re-run byte-behaviour-
+    \* unchanged (preservation-by-re-verification, DEC-P96-BASE). A sub-workflow node is a
+    \* Suspendable node that SPAWNS a child sub-run (at most once, even across crash+resume —
+    \* the ph91 deterministic-child-ID idempotency guard) and PARKS awaiting the child's
+    \* terminal; the child's terminal outcome is journal-determined (ChildFailSet), NOT a
+    \* nondet pick (the ph44 faithfulness trap — a nondet outcome re-routes on resume). ---
+    SubWorkflowNodes, \* subset of Suspendable that spawn+await a child sub-run. Empty {} -> arm inert.
+    ChildFailSet,     \* subset of SubWorkflowNodes whose child sub-run reaches a FAILURE terminal
+                      \* (child-fail -> parent-fail, INV-01). Journal-determined, not nondet.
+    MaxDepth,         \* the nesting ceiling (ph95 ErrSubWorkflowMaxDepth). A small constant so TLC
+                      \* exhausts the boundary. A node at NodeDepth >= MaxDepth must NOT spawn (loud refusal).
+    NodeDepth         \* [Nodes -> Nat]: the journal-determined nesting depth of each node's spawn chain
+                      \* (durable-by-data, like a timer's FireAt — NOT a nondet pick).
 
 VARIABLES
     status,    \* status[n]: in-memory status in {pending,running,done,failed,skipped,waiting}
@@ -104,9 +118,16 @@ VARIABLES
     rollingBack, \* M12 (ph50): the durable run-level saga rollback marker. Set at the trigger and
                  \* PERSISTED before any compensation, so it survives a crash (UNCHANGED on Crash/Recover
                  \* — durable-directly, faithful to the marker-Save-before-drive ordering, ph46/48).
-    triggerCause \* M12 (ph50, ph49): the durable rollback trigger discriminator in {"none","failure",
+    triggerCause, \* M12 (ph50, ph49): the durable rollback trigger discriminator in {"none","failure",
                  \* "canceled","deadline"}. Journaled WITH rollingBack; a resumed rollback recovers the
                  \* TRUE cause from it, not an inference (TriggerCauseFidelity — the ph48-F2 shape).
+    spawned,     \* M19 (ph96): spawned[n] = how many times sub-workflow node n has spawned its child.
+                 \* DURABLE (UNCHANGED on Crash; NOT reset on Recover — the deterministic child ID +
+                 \* the durable journal make a re-drive a no-op, so spawned stays 1: the ph91 spawn-
+                 \* idempotency guard modeled faithfully across a crash). NoDoubleSpawn keys off this.
+    childTerminal \* M19 (ph96): childTerminal[n] in {"none","succeeded","failed"} — the child sub-run's
+                 \* terminal outcome as recorded in the parent's durable journal. DURABLE (UNCHANGED on
+                 \* Crash/Recover). Journal-determined by ChildFailSet (NOT nondet — the ph44 trap).
 
 \* ApplyVal is the single canonical value a signal apply records — a constant, NOT a
 \* counter. An idempotent apply sets recorded[n] := ApplyVal every time; the recorded
@@ -119,7 +140,7 @@ ApplyVal == 1
 \* triggerCause: the journaled discriminator (ph49). Both are CONSTANT (false / "none")
 \* for the M10/M11 configs (SagaNodes = {} -> the saga arm is inert), so they add NO
 \* distinct states and M10/M11 re-run byte-behaviour-unchanged (DEC-M12-P50-PRESERVE).
-vars == <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+vars == <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* A node may run up to twice per (crash-reverted) attempt: once to park, once to
 \* complete after waking. Bounds exec finitely.
@@ -176,6 +197,8 @@ TypeOK ==
     /\ recorded  \in [Nodes -> 0..(ApplyVal * MaxRuns)]
     /\ rollingBack  \in BOOLEAN
     /\ triggerCause \in {"none","failure","canceled","deadline"}
+    /\ spawned      \in [Nodes -> 0..MaxRuns]
+    /\ childTerminal \in [Nodes -> {"none","succeeded","failed"}]
 
 Init ==
     /\ status    = [n \in Nodes |-> "pending"]
@@ -193,6 +216,8 @@ Init ==
     /\ recorded  = [n \in Nodes |-> 0]
     /\ rollingBack  = FALSE
     /\ triggerCause = "none"
+    /\ spawned      = [n \in Nodes |-> 0]
+    /\ childTerminal = [n \in Nodes |-> "none"]
 
 ------------------------------------------------------------------------
 (* RUN actions (require the process to be up). *)
@@ -205,24 +230,30 @@ Start(n) ==
     /\ DepsResolved(n)
     /\ Cardinality(Running) < MaxConc
     /\ status' = [status EXCEPT ![n] = "running"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* Finish: a running node's action runs to completion. A SUSPENDABLE node may   *)
 (* COMPLETE here only once its wake event has fired; while ~wakeReady it parks   *)
 (* (Suspend), never completing. (Suspendable nodes do not fail — the config      *)
 (* keeps FailSet disjoint from Suspendable, modelling Timer/Signal nodes.)       *)
+(* M19 (ph96): a SUB-WORKFLOW node completes to the status its CHILD reached — the      *)
+(* child-fail->parent-fail contract (INV-01). The outcome is childTerminal[n], journal- *)
+(* determined by ChildFailSet (NOT a nondet pick). A "failed" child halts the attempt   *)
+(* like any hard failure; a "succeeded" child -> done. FailSet stays DISJOINT from       *)
+(* SubWorkflowNodes in the configs (a sub-workflow node fails only via its child).       *)
+SubWorkflowFails(n) == n \in SubWorkflowNodes /\ childTerminal[n] = "failed"
 Finish(n) ==
     /\ up
     /\ status[n] = "running"
     /\ n \notin ChoiceNodes   \* M11: a ChoiceNode completes via ChoiceFinish (activates one branch, bypasses the rest)
     /\ (n \in Suspendable => wakeReady[n])
     /\ exec' = [exec EXCEPT ![n] = exec[n] + 1]
-    /\ IF n \in FailSet
+    /\ IF n \in FailSet \/ SubWorkflowFails(n)
          THEN /\ status' = [status EXCEPT ![n] = "failed"]
               /\ halted' = (halted \/ (n \notin ContinueOnError))
          ELSE /\ status' = [status EXCEPT ![n] = "done"]
               /\ UNCHANGED halted
-    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* Suspend: a running suspendable node whose wake event has NOT fired PARKS —    *)
 (* the non-terminal "waiting" status (the action ran and returned ErrSuspended,  *)
@@ -235,7 +266,7 @@ Suspend(n) ==
     /\ ~wakeReady[n]
     /\ status' = [status EXCEPT ![n] = "waiting"]
     /\ exec' = [exec EXCEPT ![n] = exec[n] + 1]
-    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* SendSignal: the external SIGNAL is DELIVERED to a non-timer suspendable node's   *)
 (* durable mailbox (the phase-37 enqueue, D37-03). UNFAIR + monotone (~delivered    *)
@@ -250,10 +281,11 @@ SendSignal(n) ==
     /\ up
     /\ n \in Suspendable
     /\ n \notin TimerNodes
+    /\ n \notin SubWorkflowNodes   \* M19: a sub-workflow node's wake is ChildComplete, not an external mailbox signal
     /\ ~delivered[n]
     /\ mailbox'   = [mailbox   EXCEPT ![n] = TRUE]
     /\ delivered' = [delivered EXCEPT ![n] = TRUE]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* Consume: a signal node TAKES its mailbox and APPLIES the payload — the take→apply  *)
 (* step (D37-04). Enabled while the node is running or parked (waiting) AND its signal *)
@@ -268,6 +300,7 @@ Consume(n) ==
     /\ up
     /\ n \in Suspendable
     /\ n \notin TimerNodes
+    /\ n \notin SubWorkflowNodes   \* M19: a sub-workflow node consumes no mailbox signal (its wake is ChildComplete)
     /\ status[n] \in {"running", "waiting"}
     /\ mailbox[n]
     /\ ~wakeReady[n]
@@ -277,7 +310,7 @@ Consume(n) ==
     \* a crash re-apply, writes the SAME ApplyVal, so recorded[n] is invariant. This is
     \* the observable-idempotence the restated NoDoubleApply asserts. (ph39 F3.)
     /\ recorded'  = [recorded  EXCEPT ![n] = ApplyVal]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, fireCount, mailbox, delivered, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, fireCount, mailbox, delivered, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* Ack: drain the consumed signal from the mailbox — ONLY after the consuming        *)
 (* completion is DURABLE (journal[n] = "done"), the take→apply→Completed→checkpoint→  *)
@@ -288,10 +321,11 @@ Ack(n) ==
     /\ up
     /\ n \in Suspendable
     /\ n \notin TimerNodes
+    /\ n \notin SubWorkflowNodes   \* M19: no mailbox to drain for a sub-workflow node
     /\ journal[n] = "done"
     /\ mailbox[n]
     /\ mailbox' = [mailbox EXCEPT ![n] = FALSE]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* Wake: a waiting node whose event has fired RE-ENTERS (status -> pending) — the *)
 (* M9 resume path re-entered. The executor then re-runs it, and it completes      *)
@@ -302,14 +336,14 @@ Wake(n) ==
     /\ status[n] = "waiting"
     /\ wakeReady[n]
     /\ status' = [status EXCEPT ![n] = "pending"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 Skip(n) ==
     /\ up
     /\ status[n] = "pending"
     /\ HasSkipCauseDep(n)
     /\ status' = [status EXCEPT ![n] = "skipped"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 ------------------------------------------------------------------------
 (* M11 OR-JOIN actions (phase 44 — the ChoiceNode + MergeNode arm).           *)
@@ -349,7 +383,7 @@ ChoiceFinish(c) ==
                     IF nn = c THEN "done"
                     ELSE IF nn \in (ChoiceBranches[c] \ {ChosenBranch[c]}) THEN "bypassed"
                     ELSE status[nn]]
-    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* ChoiceFail (ph41 / 41-F1, phase-44 review 44-F1): a ChoiceNode with NO matching
 \* branch and NO default FAILS (non-coe -> halts the attempt) and leaves its branch
@@ -366,7 +400,7 @@ ChoiceFail(c) ==
     /\ exec'   = [exec   EXCEPT ![c] = exec[c] + 1]
     /\ status' = [status EXCEPT ![c] = "failed"]      \* branches left untouched (Pending) -> cascade Skips them
     /\ halted' = (halted \/ (c \notin ContinueOnError))
-    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* Bypass (classifyBlockedStatus rule 4): a non-merge node blocked SOLELY by
 \* bypassed dep(s) — all deps settled, >=1 bypassed, NONE a skip-cause, NONE
@@ -382,7 +416,7 @@ Bypass(n) ==
     /\ ~HasSkipCauseDep(n)
     /\ ~(\E d \in DepsOf(n) : Resolved(d))
     /\ status' = [status EXCEPT ![n] = "bypassed"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* DiamondSkip (rule 3 / D-03 / DEC-M11-P41-DIAMOND): a non-merge node with a
 \* bypassed dep AND a surviving taken (Resolved) ancestor is SKIPPED, not bypassed
@@ -396,7 +430,7 @@ DiamondSkip(n) ==
     /\ ~HasSkipCauseDep(n)
     /\ \E d \in DepsOf(n) : Resolved(d)
     /\ status' = [status EXCEPT ![n] = "skipped"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* MergeStart (ph42 launch-eligibility): a Merge is launch-eligible once ALL its
 \* predecessors are resolved-for-merge (a bypassed tail SATISFIES). It FIRES (runs,
@@ -412,7 +446,7 @@ MergeStart(m) ==
     /\ TakenTails(m) # {}
     /\ Cardinality(Running) < MaxConc
     /\ status' = [status EXCEPT ![m] = "running"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* MergeBypass (ph42 MH-2): a Merge whose every branch-tail is bypassed (0 taken) is
 \* itself bypassed (composes downward — the nested all-bypassed case).
@@ -432,7 +466,7 @@ MergeBypass(m) ==
     \* for safety proofs. Gating on ~halted here would MASK the separator bite (a
     \* failed-tail scenario is always halted), hiding the anti-vacuity teeth.
     /\ status' = [status EXCEPT ![m] = "bypassed"]
-    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 ------------------------------------------------------------------------
 (* DURABILITY actions (inherited from the M9 model). *)
@@ -445,14 +479,14 @@ Checkpoint ==
     /\ Running = {}
     /\ journal # status
     /\ journal' = status
-    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 Crash ==
     /\ up
     /\ crashes < MaxCrashes
     /\ up' = FALSE
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<status, halted, journal, exec, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, journal, exec, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* Recover restores in-memory status from the journal AND RE-DERIVES wakeReady +     *)
 (* recorded from the DURABLE SUBSTRATE — crash-faithful (ph39 F3 closure, D39-02).   *)
@@ -492,7 +526,7 @@ Recover ==
                        IF n \in Suspendable /\ n \notin TimerNodes /\ journal[n] # "done"
                        THEN 0
                        ELSE recorded[n]]
-    /\ UNCHANGED <<journal, exec, crashes, clock, fireCount, mailbox, delivered, applied, rollingBack, triggerCause>>
+    /\ UNCHANGED <<journal, exec, crashes, clock, fireCount, mailbox, delivered, applied, rollingBack, triggerCause, spawned, childTerminal>>
 
 ------------------------------------------------------------------------
 (* TIMER actions (the phase-36 durable-timer dimension). *)
@@ -508,7 +542,7 @@ Recover ==
 Tick ==
     /\ clock < MaxTick
     /\ clock' = clock + 1
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 (* FireTimer: a timer node becomes DUE — the clock has reached its absolute         *)
 (* FireAt. This is the timer analog of FireEvent, but DETERMINISTIC and GUARANTEED  *)
@@ -526,7 +560,7 @@ FireTimer(n) ==
     /\ clock >= FireAt[n]
     /\ wakeReady' = [wakeReady EXCEPT ![n] = TRUE]
     /\ fireCount' = [fireCount EXCEPT ![n] = fireCount[n] + 1]
-    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 ------------------------------------------------------------------------
 (* Liveness scaffolding. *)
@@ -565,6 +599,15 @@ Stuck(n) ==
     \/ (status[n] = "pending" /\ n \in MergeNodes /\ MergeDepsSatisfied(n)
           /\ (TakenTails(n) = {} \/ ~halted))
     \/ (status[n] = "pending" /\ n \notin MergeNodes /\ AllDepsSettled(n) /\ HasBypassDep(n))
+    \* M19 sub-workflow arm (inert when SubWorkflowNodes = {}). A running sub-workflow node
+    \* MUST progress: below the ceiling it spawns then parks (running with spawned=0 is Stuck
+    \* via the base `running` clause already, but once spawned it must be able to Suspend —
+    \* that too is covered by the base machinery); at/over the ceiling it must DepthRefuse.
+    \* The load-bearing new arm: a PARKED sub-workflow node whose child has NOT completed must
+    \* eventually see ChildComplete (an engine obligation, like Wake) — modeled Stuck so the
+    \* completion-signal wake has teeth. A parked node whose child IS complete (wakeReady) is
+    \* already Stuck via the base waiting/wakeReady clause -> it must Wake.
+    \/ (status[n] = "waiting" /\ n \in SubWorkflowNodes /\ spawned[n] >= 1 /\ childTerminal[n] = "none")
 
 Settled == up /\ (\A n \in Nodes : ~Stuck(n))
 
@@ -620,7 +663,7 @@ TriggerRollback ==
     \* journal, orphaning it (neither re-runnable — its dep is compensated — nor
     \* compensable — it is not done); the flush is the faithful per-level-checkpoint model.
     /\ journal' = status
-    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<status, halted, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, spawned, childTerminal>>
 
 \* Cancel: a caller-cancel / deadline aborts a still-forward run -> arm rollback with the
 \* ctx cause. It marks ONE running node `failed` (the mid-level-cancel witness — the node
@@ -646,7 +689,7 @@ Cancel ==
     /\ rollingBack'  = TRUE
     /\ triggerCause' = SagaTrigger
     /\ halted' = TRUE
-    /\ UNCHANGED <<up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded>>
+    /\ UNCHANGED <<up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, spawned, childTerminal>>
 
 \* Compensate: a rolling-back run undoes a `done` compensable node whose compensation
 \* SUCCEEDS. LIVE-Completed guard (status = "done", not journal — a crash-reverted node is
@@ -659,7 +702,7 @@ Compensate(n) ==
     /\ DownReady(n)
     /\ status' = [status EXCEPT ![n] = "compensated"]
     /\ exec'   = [exec EXCEPT ![n] = exec[n] + 1]
-    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 \* CompensateFail: a compensation that FAILS (best-effort) -> "compensation_failed"; the
 \* pass continues (other nodes still compensate). exec bumps (the attempt ran).
@@ -670,7 +713,64 @@ CompensateFail(n) ==
     /\ DownReady(n)
     /\ status' = [status EXCEPT ![n] = "compensation_failed"]
     /\ exec'   = [exec EXCEPT ![n] = exec[n] + 1]
-    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause>>
+    /\ UNCHANGED <<halted, journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
+
+------------------------------------------------------------------------
+(* M19 SUB-WORKFLOW-AWAIT arm (ph96). INERT when SubWorkflowNodes = {} (the M10/M11/M12   *)
+(* configs), so those re-run byte-behaviour-unchanged (DEC-P96-BASE). A sub-workflow node  *)
+(* is a Suspendable node that: SpawnChild (spawns the child sub-run, at most once even      *)
+(* across crash+resume) -> Suspend (parks, the existing machinery) -> ChildComplete (the    *)
+(* child reaches its journal-determined terminal, sets wakeReady) -> Wake (the existing      *)
+(* machinery re-enters it) -> Finish (completes to the child's outcome). A node at/over the  *)
+(* depth ceiling REFUSES to spawn (DepthRefuse — a loud terminal, ph95 ErrSubWorkflowMaxDepth *)
+(* — never unbounded recursion). Route/spawn/outcome are DETERMINISTIC functions of DAG +    *)
+(* journal/data (NodeDepth, ChildFailSet), NEVER a nondet pick (the ph44 faithfulness trap). *)
+
+(* SpawnChild: a running sub-workflow node below the ceiling spawns its child sub-run —     *)
+(* AT MOST ONCE. The `spawned[n] = 0` guard is the ph91 deterministic-child-ID idempotency  *)
+(* guard: it makes the spawn happen once even though the parent re-drives its node on        *)
+(* resume (spawned is durable — Recover does NOT reset it). NoDoubleSpawn keys off this;     *)
+(* the bite drops the guard. Spawning does NOT complete the child (childTerminal stays       *)
+(* "none"); the node then Suspends (parks) via the existing Suspend action.                  *)
+SpawnChild(n) ==
+    /\ up
+    /\ n \in SubWorkflowNodes
+    /\ status[n] = "running"
+    /\ NodeDepth[n] < MaxDepth
+    /\ spawned[n] = 0
+    /\ ~wakeReady[n]
+    /\ spawned' = [spawned EXCEPT ![n] = spawned[n] + 1]
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, childTerminal>>
+
+(* ChildComplete: the spawned child sub-run reaches its terminal — DETERMINISTIC by         *)
+(* ChildFailSet (a journal-determined outcome, NOT a nondet pick — the ph44 trap). It        *)
+(* records the outcome in the parent's durable journal (childTerminal) and sets wakeReady    *)
+(* so the existing Wake machinery re-enters the parked parent (the ph92 completion-signal =  *)
+(* the wake trigger). Enabled once the child is in flight (spawned>=1) and not yet terminal. *)
+ChildComplete(n) ==
+    /\ up
+    /\ n \in SubWorkflowNodes
+    /\ spawned[n] >= 1
+    /\ childTerminal[n] = "none"
+    /\ ~wakeReady[n]
+    /\ childTerminal' = [childTerminal EXCEPT ![n] = IF n \in ChildFailSet THEN "failed" ELSE "succeeded"]
+    /\ wakeReady' = [wakeReady EXCEPT ![n] = TRUE]
+    /\ UNCHANGED <<status, halted, journal, exec, up, crashes, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned>>
+
+(* DepthRefuse: a running sub-workflow node AT OR OVER the ceiling REFUSES to spawn — a      *)
+(* loud terminal failure (ph95 ErrSubWorkflowMaxDepth), never an unbounded recursion in      *)
+(* Next. spawned stays 0 (it never spawned — BoundedNesting witnesses this). Halts the       *)
+(* attempt like any hard (non-coe) failure. NodeDepth is journal-determined (durable-by-     *)
+(* data), so the refusal is a deterministic function of the chain depth, not a nondet pick.  *)
+DepthRefuse(n) ==
+    /\ up
+    /\ n \in SubWorkflowNodes
+    /\ status[n] = "running"
+    /\ NodeDepth[n] >= MaxDepth
+    /\ exec' = [exec EXCEPT ![n] = exec[n] + 1]
+    /\ status' = [status EXCEPT ![n] = "failed"]
+    /\ halted' = (halted \/ (n \notin ContinueOnError))
+    /\ UNCHANGED <<journal, up, crashes, wakeReady, clock, fireCount, mailbox, delivered, applied, recorded, rollingBack, triggerCause, spawned, childTerminal>>
 
 ------------------------------------------------------------------------
 
@@ -696,6 +796,8 @@ Next == \/ \E n \in Nodes : (Start(n) \/ Finish(n) \/ Skip(n) \/ Suspend(n) \/ W
         \/ Cancel
         \/ \E n \in Nodes : Compensate(n)
         \/ \E n \in Nodes : CompensateFail(n)
+        \* M19 sub-workflow-await actions (inert when SubWorkflowNodes = {}).
+        \/ \E n \in Nodes : (SpawnChild(n) \/ ChildComplete(n) \/ DepthRefuse(n))
         \/ Done
 
 ------------------------------------------------------------------------
@@ -789,6 +891,11 @@ Fairness ==
     \* abort, like a signal — it may or may not happen).
     /\ WF_vars(TriggerRollback)
     /\ \A n \in Nodes : WF_vars(Compensate(n) \/ CompensateFail(n))
+    \* M19 sub-workflow engine obligations are weak-fair (inert when SubWorkflowNodes = {}): a
+    \* running sub-workflow node eventually spawns (or refuses at the ceiling), and a spawned
+    \* child eventually completes -> the parked parent wakes -> the run drains.
+    /\ \A n \in Nodes : WF_vars(SpawnChild(n) \/ DepthRefuse(n))
+    /\ \A n \in Nodes : WF_vars(ChildComplete(n))
     /\ \A n \in Nodes : WF_vars(Wake(n))
     /\ \A n \in Nodes : WF_vars(FireTimer(n))
     /\ \A n \in Nodes : WF_vars(Consume(n))
@@ -1027,6 +1134,55 @@ ChoiceFailureSkipsNotBypasses ==
     \A c \in ChoiceNodes :
         \A e \in ChoiceBranches[c] :
             status[e] = "bypassed" => status[c] = "done"
+
+------------------------------------------------------------------------
+(* M19 SUB-WORKFLOW-AWAIT SAFETY invariants (ph96). Each is BITE-PROVEN (an isolated *)
+(* falsifying mutation reddens ONLY it — see the run_m19_composition_capstone.sh bite *)
+(* log). Vacuously/structurally INERT when SubWorkflowNodes = {} (the M10/M11/M12     *)
+(* configs): spawned stays all-0 and childTerminal all-"none", so every antecedent   *)
+(* never fires — they are safe to carry in those invariant lists too (preservation). *)
+(* NoDoubleSpawn is the DISCRIMINATOR (DEC-P96-DISCRIMINATOR): RED in the composition *)
+(* config when the spawn-idempotency guard is mutated, INERT in the base config.      *)
+
+(* NoDoubleSpawn (the ph91 idempotent-spawn guarantee, made formal — THE DISCRIMINATOR). *)
+(* A sub-workflow node spawns its child AT MOST ONCE across the WHOLE run, INCLUDING     *)
+(* across crash+resume: the parent re-drives its node on resume, but the durable spawned *)
+(* count + the deterministic child ID (the `spawned[n]=0` guard) prevent a second        *)
+(* distinct child. INERT in a no-sub-workflow base config (spawned stays all-0 -> <=1     *)
+(* trivially). BITE (RED in composition): drop the `spawned[n]=0` guard in SpawnChild ->  *)
+(* the node re-spawns (and re-spawns again after a Recover re-drive) -> spawned reaches 2  *)
+(* -> FALSIFIES. The base config stays GREEN under the same mutation (nothing spawns) —    *)
+(* the anti-vacuity discriminator (M12 ph50 discipline).                                  *)
+NoDoubleSpawn ==
+    \A n \in Nodes : spawned[n] <= 1
+
+(* ParkWakeExactlyOnTerminal (the ph92 completion-signal = wake trigger). A parked         *)
+(* sub-workflow parent is wake-ready ONLY after its child has reached a terminal — it never *)
+(* wakes early (child still running). BITE: set wakeReady in SpawnChild (before the child   *)
+(* completes) -> a waiting node is wakeReady with childTerminal still "none" -> FALSIFIES.   *)
+ParkWakeExactlyOnTerminal ==
+    \A n \in SubWorkflowNodes :
+        (status[n] = "waiting" /\ wakeReady[n]) => childTerminal[n] # "none"
+
+(* ChildFailParentFail (INV-01). A child that reached a FAILURE terminal fails the parent  *)
+(* sub-workflow node. Enumerates EVERY parent failure terminal (failed AND the saga        *)
+(* compensation terminals), not "failed"-only — a failed sub-workflow node may itself be    *)
+(* compensated by an enclosing saga (the [[executionerror-unwrap-poison-precedence-trap]]   *)
+(* + ph92 coe-verdict-from-DAG-parity lesson: never Failed-only). BITE: in Finish, map a    *)
+(* failed child (SubWorkflowFails) to "done" -> a failed-child parent shows done ->          *)
+(* FALSIFIES. Needs the ChildFailSet # {} config to be non-vacuous.                          *)
+ChildFailParentFail ==
+    \A n \in SubWorkflowNodes :
+        (childTerminal[n] = "failed" /\ status[n] \in Terminal) =>
+            status[n] \in {"failed","compensated","compensation_failed"}
+
+(* BoundedNesting (the ph95 DoS ceiling). A sub-workflow node AT OR OVER the depth ceiling  *)
+(* NEVER spawned — the depth-exceeded transition is a loud terminal refusal (DepthRefuse),  *)
+(* not an unbounded recursion. BITE: let SpawnChild fire regardless of NodeDepth (drop the  *)
+(* `NodeDepth[n] < MaxDepth` guard) -> a node at depth >= MaxDepth spawns -> FALSIFIES.      *)
+BoundedNesting ==
+    \A n \in SubWorkflowNodes :
+        (NodeDepth[n] >= MaxDepth) => spawned[n] = 0
 
 ------------------------------------------------------------------------
 (* LIVENESS — every behavior eventually reaches a stable Settled fixed point.      *)

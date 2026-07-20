@@ -640,7 +640,8 @@ func (b *OTelDispatchBridge) Shutdown(ctx context.Context) error
 ```
 
 > **Honesty (M18):** the read-model is a purely additive read side (write path byte-unchanged); each
-> granular query is one atomic SELECT, `Snapshot` is mutually consistent (`BEGIN DEFERRED`). Cancel is
+> granular query is one atomic SELECT **except `WorkflowStatus` (two — its dispatch row + its node
+> tally)**, `Snapshot` is mutually consistent (`BEGIN DEFERRED`). Cancel is
 > **cooperative and best-effort** — bounded by the level barrier + the 500 ms poll, **not** an instant
 > abort; a node already mid-level is not interrupted. Dispatch metrics **reset on restart** (they count
 > what this process saw). Lease `LeaseLive`/`Expiry` is a **liveness** read, never a safety input.
@@ -974,6 +975,53 @@ crashes), with zero determinism tax. See
 [ADR-0011](../architecture/adr/0011-saga-compensation-durable-rollback.md) and the
 [Saga / Compensation pattern](../guides/workflow-patterns.md#saga--compensation-durable-rollback).
 
+## Composition — sub-workflows & approvals (added M19)
+
+Opt-in nodes that spawn/await a child workflow, and an approval gate. Parent and child are
+**distinct workflows** (distinct IDs/journals/sagas; one-writer preserved). The dispatch mode is an
+**explicit** builder choice — there is no auto-router; the build-time closure-scan *enforces* the
+inline-safety boundary. See [ADR-0018](../architecture/adr/0018-sub-workflow-composition-and-approvals.md)
+and the [Sub-workflows & approvals guide](../guides/sub-workflows.md).
+
+```go
+// Approval gate — park until an approve/reject decision (signal NAME == node name).
+func (b *WorkflowBuilder) AddApproval(name string) *NodeBuilder
+func ApproveSignal(node, approver, comment, sigID string) Signal // Approved=true
+func RejectSignal(node, approver, comment, sigID string)  Signal // Approved=false → fail-fast
+type ApprovalDecision struct{ Approved bool; Approver, Comment string }
+type ApprovalRejectedError struct{ Node, Approver, Comment string } // NO Unwrap; classify via errors.As
+
+// Sub-workflow spawn/await — three explicit dispatch modes.
+func (b *WorkflowBuilder) AddSubWorkflow(name string, child *DAG) *NodeBuilder       // inline, blocks; non-suspendable child
+func (b *WorkflowBuilder) AddSubWorkflowParked(name string, child *DAG) *NodeBuilder // out-of-band, park→wake
+func (b *WorkflowBuilder) AddSubWorkflowQueued(name, childType string) *NodeBuilder  // queue (Pool), type-ref/suspendable
+func (n *NodeBuilder) WithResult(parentKey, childDataKey string) *NodeBuilder        // child must Set(childDataKey, result)
+func (n *NodeBuilder) WithInput(kv map[string]any) *NodeBuilder                      // queued node only — seeds child data
+func SubWorkflowCompletionSignal(nodeName, sigID string) Signal                      // bare trigger (no payload)
+
+// Queue path structurally needs an MP *SQLiteStore + Pool + a Registry (type→DAG), injected at Execute:
+type Workflow struct{ /* ... */ Registry *Registry; MaxSubWorkflowDepth int /* inline-path override; default 8 */ }
+
+// Optional build-time cycle check — CALL ONCE at Registry assembly, BEFORE the first RunNext/Pool run.
+func (r *Registry) ValidateNoTypeCycles() error
+```
+
+- **Result:** read the child's **data key** (not a node output) — a scalar (`int64`/string/bool/float)
+  is store-uniform; a complex result reloads as a JSON string on FB/SQLite. Collision with a foreign
+  parent value → `ErrSubWorkflowResultKeyCollision`.
+- **Failure:** child-fail → parent-node fail → parent's own M12 compensation over **parent nodes only**;
+  coe-aware (a rollback node counts as failure).
+- **WAKE:** completion-signal → `DeliverAndResume`, **no scheduler**. Gate = child **terminal** (for a
+  queue child the `work_queue` row is terminal authority), not signal presence.
+- **Nesting:** `ErrSubWorkflowMaxDepth` (default 8) on **both** paths — the load-bearing DoS bound. A
+  `MaxSubWorkflowDepth` override governs the **inline** path only (`F-P95-02`); the queue path uses the
+  package default. `ValidateNoTypeCycles` is an opt-in build-time nicety over the runtime ceiling and is
+  **the embedder's responsibility to call** (`F-P95-05`); it catches only directly-declared top-level
+  type-ref cycles (`F-P95-04`).
+- **Durability:** approvals + the queue wake ride the durable mailbox; **SQLite now implements
+  `SignalStore`** (the `signals` table, M19). Supply a **non-empty, stable `sig.ID`** per event
+  (`F-P93-SEC-1`).
+
 ## Node Status
 
 ```go
@@ -1199,6 +1247,33 @@ var ErrNoWork = errors.New("no claimable work in the queue")
 `RunNext` translates `ErrNoWork` into `ran=false, err=nil` (nothing to do), so a caller keys off
 `ran`, not the sentinel; the `Pool` backs off internally. See the
 [Work dispatch guide](../guides/dispatch.md#error-taxonomy).
+
+### Composition domain (added M19)
+
+```go
+// Build-time (surfaced from Build): an inline AddSubWorkflow child (or a transitive descendant)
+// contains a suspendable node — route it to AddSubWorkflowQueued instead.
+var ErrSubWorkflowSuspendableChild = errors.New("inline sub-workflow child contains a suspendable node: ...")
+
+// Run-time configuration (loud, never a silent/in-memory-only spawn):
+var ErrSubWorkflowRequiresStore    = errors.New("workflow cannot spawn a sub-workflow: no parent store in scope")
+var ErrSubWorkflowRequiresRegistry // ErrValidation-wrapped; a queue node reached with a nil Registry
+var ErrWaitRequiresSignalStore     // an approval/parked-await reached with no SignalStore
+
+// Run-time guards:
+var ErrSubWorkflowCycle             // child ID collides with an ancestor on the drive stack (would self-deadlock)
+var ErrSubWorkflowResultKeyCollision // declared result key collides with a foreign pre-existing parent value
+var ErrSubWorkflowMaxDepth          // ErrValidation-wrapped; nesting depth ≥ ceiling (default 8) — the DoS bound
+var ErrSubWorkflowTypeCycle         // ErrValidation-wrapped; ValidateNoTypeCycles found a declared A→B→A cycle
+
+// Approval reject (classify with errors.As — NO Unwrap):
+type ApprovalRejectedError struct{ Node, Approver, Comment string }
+```
+
+`ErrSubWorkflowMaxDepth`, `ErrSubWorkflowRequiresRegistry`, `ErrSubWorkflowTypeCycle`, and the
+`AddSubWorkflowQueued`/`WithResult`/`WithInput` misuse errors are `ErrValidation`-wrapped, so
+`errors.Is(err, ErrValidation)` is true for them. See the
+[Sub-workflows & approvals guide](../guides/sub-workflows.md).
 
 ### Saga / rollback domain (added v0.12.0)
 

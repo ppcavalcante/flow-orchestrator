@@ -26,18 +26,23 @@ func payloadAsInt64(p any) (int64, error) {
 	}
 }
 
-// signalStores returns the three SignalStore implementations over fresh backing,
-// each labelled, for table-driven coverage. File stores get a per-call t.TempDir.
+// signalStores returns the SignalStore implementations over fresh backing, each
+// labelled, for table-driven coverage. File/DB stores get a per-call t.TempDir. SQLite
+// (M19 ph93) joins the set — the conformance suite IS its semantics spec: SQLite must be
+// behaviorally indistinguishable from the other stores.
 func signalStores(t *testing.T) map[string]SignalStore {
 	t.Helper()
 	js, err := NewJSONFileStore(t.TempDir())
 	require.NoError(t, err)
 	fbs, err := NewFlatBuffersStore(t.TempDir())
 	require.NoError(t, err)
+	sq, err := NewSQLiteStore(filepath.Join(t.TempDir(), "signals.db"))
+	require.NoError(t, err)
 	return map[string]SignalStore{
 		"InMemoryStore":    NewInMemoryStore(),
 		"JSONFileStore":    js,
 		"FlatBuffersStore": fbs,
+		"SQLiteStore":      sq,
 	}
 }
 
@@ -106,6 +111,18 @@ func TestSignalStore_IdempotentByID(t *testing.T) {
 			got, err := store.TakeSignals(wf)
 			require.NoError(t, err)
 			assert.Len(t, got, 1, "re-delivering the same sig.ID must leave one entry")
+
+			// The WINNER on a re-deliver with DIFFERENT content is LAST-writer-wins, uniformly
+			// across every store — InMemory does box[id]=sig, the file stores overwrite the
+			// sig_id file, and SQLite uses ON CONFLICT DO UPDATE. A store that diverged here
+			// (e.g. SQLite ON CONFLICT DO NOTHING = first-writer) would fail THIS check even
+			// though the count check above still passes — so this pins behavioral uniformity.
+			require.NoError(t, store.DeliverSignal(wf, Signal{ID: "dup", Name: "updated", Payload: "v2"}))
+			after, err := store.TakeSignals(wf)
+			require.NoError(t, err)
+			require.Len(t, after, 1, "still one entry after a re-deliver with new content")
+			assert.Equal(t, "updated", after[0].Name, "re-deliver of the same id is LAST-writer-wins (uniform across stores)")
+			assert.Equal(t, "v2", after[0].Payload)
 		})
 	}
 }
@@ -243,4 +260,34 @@ func TestSignalStore_UnderlyingErrorRemainsReachable(t *testing.T) {
 	// yields a *json.SyntaxError).
 	var syn *json.SyntaxError
 	assert.ErrorAs(t, err, &syn, "underlying *json.SyntaxError must remain reachable via errors.As")
+}
+
+// TestSignalStore_DeleteReclaimsEarlyBufferedMailbox — F-P93-R1 regression: Delete reclaims the
+// durable mailbox EVEN for a workflow that was NEVER Saved (an early-buffered signal with no
+// snapshot). The file stores' removeSignalDir reclaims unconditionally; SQLite must too, else the
+// buffered rows leak on the DoS-sensitive channel. Delete still reports ErrNotFound (no snapshot),
+// but the mailbox is gone. Cross-store so the contract is uniform.
+func TestSignalStore_DeleteReclaimsEarlyBufferedMailbox(t *testing.T) {
+	for name, store := range signalStores(t) {
+		t.Run(name, func(t *testing.T) {
+			ws, ok := store.(WorkflowStore)
+			require.True(t, ok)
+			const wf = "wf-early-del"
+			// Deliver a signal WITHOUT ever Saving a snapshot (early buffering).
+			require.NoError(t, store.DeliverSignal(wf, Signal{ID: "s1", Name: "go", Payload: "buffered"}))
+			got, err := store.TakeSignals(wf)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+
+			// Delete a never-Saved workflow. The snapshot-absence return DIFFERS by store (InMemory
+			// returns nil, the durable stores ErrNotFound) — that pre-existing difference is NOT what
+			// this test pins. What MUST be uniform is the MAILBOX RECLAIM: the buffered signal is gone
+			// (no leak), regardless of the snapshot-absence return. (F-P93-R1.)
+			_ = ws.Delete(wf) //nolint:errcheck // the snapshot-absence return varies by store; the reclaim is what's asserted
+
+			after, terr := store.TakeSignals(wf)
+			require.NoError(t, terr)
+			assert.Empty(t, after, "Delete reclaims the early-buffered mailbox even with no snapshot (no leak; F-P93-R1)")
+		})
+	}
 }

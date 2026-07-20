@@ -27,7 +27,8 @@ MCDeps  == { <<n1,n2>>, <<n1,n3>>, <<n2,n4>>, <<n3,n4>> }
 MCFireAt == [n \in MCNodes |-> IF n = n2 THEN 2 ELSE 0]
 
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded, rollingBack, triggerCause
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause,
+          spawned, childTerminal
 
 \* M11 OR-join topology is EMPTY for the M10 diamond config — the OR-join arm is
 \* inert, so this config re-runs the extended spec byte-behaviour-unchanged
@@ -43,9 +44,16 @@ MCMergeTails     == [m \in {} |-> {}]
 MCSagaNodes    == {}
 MCCompFailSet  == {}
 MCSagaTrigger  == "none"
+\* M19 sub-workflow arm empty -> inert -> M10 re-runs byte-behaviour-unchanged (DEC-P96-BASE).
+MCSubWorkflowNodes == {}
+MCChildFailSet     == {}
+MCMaxDepth         == 3
+MCNodeDepth        == [n \in MCNodes |-> 0]
 
 INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
     ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
     ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
-    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger
+    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger,
+    SubWorkflowNodes <- MCSubWorkflowNodes, ChildFailSet <- MCChildFailSet,
+    MaxDepth <- MCMaxDepth, NodeDepth <- MCNodeDepth
 =============================================================================

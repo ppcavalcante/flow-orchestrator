@@ -42,12 +42,20 @@ MCMergeTails     == [x \in {m} |-> {bAi, bBi}]
 MCSagaNodes    == {}
 MCCompFailSet  == {}
 MCSagaTrigger  == "none"
+\* M19 sub-workflow arm empty -> inert -> re-runs byte-behaviour-unchanged (DEC-P96-BASE).
+MCSubWorkflowNodes == {}
+MCChildFailSet     == {}
+MCMaxDepth         == 3
+MCNodeDepth        == [n \in MCNodes |-> 0]
 
 VARIABLES status, halted, journal, exec, up, crashes, wakeReady, clock, fireCount,
-          mailbox, delivered, applied, recorded, rollingBack, triggerCause
+          mailbox, delivered, applied, recorded, rollingBack, triggerCause,
+          spawned, childTerminal
 
 INSTANCE M10DurableExecutor WITH Nodes <- MCNodes, Deps <- MCDeps, FireAt <- MCFireAt,
     ChoiceNodes <- MCChoiceNodes, ChoiceFailSet <- MCChoiceFailSet, MergeNodes <- MCMergeNodes,
     ChoiceBranches <- MCChoiceBranches, ChosenBranch <- MCChosenBranch, MergeTails <- MCMergeTails,
-    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger
+    SagaNodes <- MCSagaNodes, CompFailSet <- MCCompFailSet, SagaTrigger <- MCSagaTrigger,
+    SubWorkflowNodes <- MCSubWorkflowNodes, ChildFailSet <- MCChildFailSet,
+    MaxDepth <- MCMaxDepth, NodeDepth <- MCNodeDepth
 =============================================================================
