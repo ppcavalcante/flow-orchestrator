@@ -78,7 +78,7 @@ func TestNewSchedulePoller_Guards(t *testing.T) {
 	t.Run("non-mp-store", func(t *testing.T) {
 		s, err := NewSQLiteStore(t.TempDir() + "/np.db") // single-process (no WithMultiProcess)
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = s.Close() })
+		t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // cleanup
 		_, err = NewSchedulePoller(s, "owner")
 		require.ErrorIs(t, err, ErrValidation, "the poller requires an mp store")
 	})
@@ -103,7 +103,7 @@ func TestNewSchedulePoller_Guards(t *testing.T) {
 func TestScheduleOps_RequireMultiProcess(t *testing.T) {
 	s, err := NewSQLiteStore(t.TempDir() + "/sp.db") // single-process
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // cleanup
 
 	spec, err := NewIntervalSchedule("x", "T", time.Minute, time.Unix(1_700_000_000, 0).UTC())
 	require.NoError(t, err)
