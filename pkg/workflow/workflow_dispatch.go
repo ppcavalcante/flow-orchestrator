@@ -214,8 +214,8 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		// transient-infra retry budget → a coincident ErrBusy/ErrIO on its eventual terminalizing drive
 		// would wrongly dead-letter it instead of retrying. The retry budget is for FAILURES; a park
 		// (like a successful checkpoint) is not one, so it does not consume it. Best-effort.
-		_, _ = store.resetWorkQueueAttempts(item.WorkflowID) //nolint:errcheck // best-effort; a failed reset only risks over-counting, never a lost child
-		return true, nil                                     // ran=true (we drove it; it parked). The row stays claimed; TTL-lapse → reclaim → resume.
+		_, _ = store.markWorkQueueParked(item.WorkflowID) //nolint:errcheck // best-effort; a failed mark only risks over-counting a slot, never a lost child
+		return true, nil                                  // ran=true (we drove it; it parked). The row stays claimed; TTL-lapse → reclaim → resume.
 	}
 
 	if execErr != nil {

@@ -115,13 +115,21 @@ CREATE TABLE IF NOT EXISTS work_queue (
                                             -- completion target (DEC-P94-PARENT-ADDRESS-COLUMN, defense-by-construction).
                                             -- Additive/nullable, engine-set at EnqueueSubWorkflow. Orthogonal to the M16
                                             -- fencing arbiter (leases table) — never touches the fencing CAS.
-    depth           INTEGER NOT NULL DEFAULT 0 -- M19 ph95: sub-workflow NESTING depth (the COMP-CLOSE DoS ceiling).
+    depth           INTEGER NOT NULL DEFAULT 0, -- M19 ph95: sub-workflow NESTING depth (the COMP-CLOSE DoS ceiling).
                                             -- ENGINE-SET at EnqueueSubWorkflow (parent_depth+1), NEVER user-supplied —
                                             -- same defense-by-construction as parent_id: a user cannot forge a low depth
                                             -- to bypass the ceiling. A plain M17 Enqueue is depth 0 (the DEFAULT). RunNext
                                             -- projects it back into the child drive-stack so a type-ref chain is bounded
                                             -- across the dispatch (F-P94-04). NOT NULL DEFAULT 0 → a legit row is never NULL;
                                             -- the read path treats a NULL as corruption (fail-safe refuse, DEC-P95-DEPTH-DEFENSIVE-READ).
+    parked          INTEGER                 -- M20 ph98: NULL = a running (or plain-pending->claimed) row; non-NULL (unix-nanos
+                                            -- of the park) = the row is claimed BUT parked (a dispatched sub-workflow child
+                                            -- that returned ErrSuspended, DEC-P98-PARKED-COLUMN). The state string stays
+                                            -- 'claimed' (M18 read-model + dispatch state machine untouched by construction);
+                                            -- this nullable discriminator is the ONLY split. The concurrency cap counts
+                                            -- running slots as state='claimed' AND parked IS NULL -- a parked child is NOT a
+                                            -- slot (so K parked parents awaiting a capped child never deadlock the cap).
+                                            -- SET at the runNext park path; CLEARED on the reclaim/re-claim flip (running again).
 );
 -- PARTIAL index over ONLY claimable rows: the ClaimNext scan (WHERE state='pending' [AND type IN …]
 -- ORDER BY enqueued_at) is fully index-covered, and terminal rows never bloat it.
@@ -147,7 +155,26 @@ CREATE TABLE IF NOT EXISTS signals (
                                         -- don't protect a corrupt DB — the read-path robustness is the defense).
     enqueued_at INTEGER NOT NULL,      -- unix-nanos delivery time (a tiebreak; sig_id is the primary sort)
     PRIMARY KEY (workflow_id, sig_id)  -- idempotent-by-id UNIQUE + the ON CONFLICT target; NO FK to workflows
-);`
+);
+-- M20 (ph100) durable SCHEDULES: a cron / interval / one-shot schedule that fires a run of target_type onto
+-- the work_queue when next_fire_time passes. The FENCING for one-writer-per-schedule reuses the M16 leases
+-- table (claimLocked keyed by "schedule:"+id) -- NO lease columns here (a second fencing scheme is barred,
+-- DEC-P100-FENCE-PER-SCHEDULE). Additive CREATE TABLE IF NOT EXISTS (the ph80/ph87/ph93 pattern) -- an existing
+-- M17/M19 DB gains it on next open, no data loss (DEC-P100-MIGRATION). All time columns are unix-nanos read
+-- through the INJECTED lease clock (s.nowNanos, DEC-P100-CLOCK-SEAM) so a FakeClock drives the due-check.
+CREATE TABLE IF NOT EXISTS schedules (
+    id             TEXT PRIMARY KEY,       -- the caller's schedule id (idempotent re-register target, SCHED-05)
+    kind           TEXT NOT NULL,          -- 'cron' | 'interval' | 'oneshot' (the fire-advance discriminator)
+    spec           TEXT NOT NULL,          -- cron: the 5-field spec; interval: the period in nanos (as text); oneshot: ''
+    target_type    TEXT NOT NULL,          -- the work_queue dispatch type the fire enqueues (RunNext resolves type->DAG)
+    next_fire_time INTEGER NOT NULL,       -- unix-nanos of the next due slot; THE SAFETY ARBITER (poller cadence is liveness)
+    missed_policy  TEXT NOT NULL,          -- 'skip' (skip-to-next, default) | 'catchup' (catch-up-once) (DEC-P100-MISSED-RUN)
+    paused         INTEGER NOT NULL DEFAULT 0, -- 0 = active, 1 = paused (a paused schedule never fires; SCHED-03)
+    created_at     INTEGER NOT NULL,       -- unix-nanos (audit / tiebreak)
+    updated_at     INTEGER NOT NULL        -- unix-nanos of the last fire/lifecycle transition
+);
+-- CLAIMABLE index: the poller scans active, non-paused, due rows oldest-fire-first.
+CREATE INDEX IF NOT EXISTS idx_sched_due ON schedules(next_fire_time) WHERE paused=0;`
 
 // data_kv.kind discriminators — mirror the FB store's typed vectors so Load
 // reconstructs the SAME Go type the FB path yields (byte-identical Snapshot).
@@ -199,6 +226,10 @@ type SQLiteStore struct {
 	// a single `if s.metrics != nil` nil check; no counter/alloc/bridge when unset. Opt-in via
 	// WithDispatchMetrics. Distinct from the M14 per-workflow metrics (Workflow.MetricsConfig), untouched.
 	metrics *DispatchMetrics
+	// M20 (ph98): the concurrency caps (CAP-01..05). IMMUTABLE — resolved from WithCaps at construction and
+	// never mutated → ClaimNext reads it inside its BEGIN IMMEDIATE txn with no new lock. Zero-value (unset)
+	// ⇒ isUnbounded() ⇒ the cap gate is skipped ⇒ the M17 claim path is byte-behavior-unchanged (CAP-05).
+	caps Caps
 }
 
 // NewSQLiteStore opens (creating if absent) a SQLite DB at path and ensures the
@@ -269,6 +300,14 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
 		return nil, fmt.Errorf("%w: depth migration: %w", ErrIO, err)
 	}
+	// M20 ph98: additive nullable `parked` discriminator (same idempotent ADD COLUMN pattern). NULLABLE
+	// with no default → an existing M19 row backfills to NULL = "running/not-parked", the correct default
+	// (a pre-ph98 claimed row was never a parked child). Set at the runNext park path, cleared on re-claim.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE work_queue ADD COLUMN parked INTEGER`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
+		return nil, fmt.Errorf("%w: parked migration: %w", ErrIO, err)
+	}
 	// M16 (ph75): resolve the lease-liveness clock + TTL (defaults when unset). Lease liveness only.
 	clock := dur.clock
 	if clock == nil {
@@ -288,6 +327,7 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		clock:      clock,
 		leaseTTL:   leaseTTL,
 		metrics:    dur.dispatchMetrics,
+		caps:       dur.caps, // M20 ph98: immutable cap config; zero-value ⇒ unbounded ⇒ M17 unchanged.
 	}, nil
 }
 

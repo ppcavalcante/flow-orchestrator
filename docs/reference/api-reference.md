@@ -1022,6 +1022,63 @@ func (r *Registry) ValidateNoTypeCycles() error
   `SignalStore`** (the `signals` table, M19). Supply a **non-empty, stable `sig.ID`** per event
   (`F-P93-SEC-1`).
 
+## Scheduling & concurrency caps (added M20)
+
+Opt-in layers over the MP SQLite store + [dispatch queue](#work-dispatch-domain-added-m17). Schedules
+fire runs of a target `type` onto the `work_queue` on a cadence; caps bound "K of type X running at
+once". Additive — an unset cap leaves the M17 claim path unchanged; no poller ⇒ no fires. See
+[ADR-0019](../architecture/adr/0019-scheduling-and-concurrency-caps.md) and the
+[Scheduling guide](../guides/scheduling.md). **All schedule methods + cross-process caps require an MP
+store.**
+
+```go
+// Schedule specs — construct, then register. anchor/fireAt are evaluated in UTC.
+func NewCronSchedule(id, typ, spec string, anchor time.Time) (ScheduleSpec, error) // 5-field cron
+func NewIntervalSchedule(id, typ string, period time.Duration, anchor time.Time) (ScheduleSpec, error)
+func NewOneshotSchedule(id, typ string, fireAt time.Time) (ScheduleSpec, error)    // auto-deletes on fire
+func (s ScheduleSpec) WithCatchupOnce() ScheduleSpec                               // RESERVED — no-op today (missed slots coalesce into one fire)
+
+// Lifecycle (bool = "a row was affected"; idempotent).
+func (s *SQLiteStore) CreateSchedule(spec ScheduleSpec) (created bool, err error)  // re-register = no-op, byte-unchanged
+func (s *SQLiteStore) PauseSchedule(id string) (bool, error)
+func (s *SQLiteStore) ResumeSchedule(id string) (bool, error)
+func (s *SQLiteStore) DeleteSchedule(id string) (bool, error)                      // + releases the lease (re-registerable)
+
+// Poller — an in-process goroutine (NO network entry point). ownerID distinct per process.
+func NewSchedulePoller(store *SQLiteStore, ownerID string, opts ...SchedulePollerOption) (*SchedulePoller, error)
+func WithSchedulePollInterval(d time.Duration) SchedulePollerOption               // cadence = liveness only; default 1s
+func (p *SchedulePoller) Run(ctx context.Context) error                           // blocks until ctx cancelled
+
+// Concurrency caps — immutable store config. Zero value = unbounded (M17 unchanged).
+type Caps struct {
+    PerType map[string]int // per-type "K running (claimed∧¬parked) at once"; absent/≤0 = unbounded; type "" never per-type-capped
+    Global  int            // global "K of ANY type running at once"; ≤0 = no global cap
+}
+func WithCaps(caps Caps) SQLiteOption                                              // both gates AND; set once, no runtime mutation
+
+// Cron parser (surfaced for validation/reuse).
+func ParseCron(spec string) (*Schedule, error)
+func (s *Schedule) Next(after time.Time) (time.Time, error)                        // UTC; DST-correct
+
+// Missed-fire metric — a due fire a saturated cap blocked (recurring skip + one-shot retain).
+func (m *DispatchMetrics) MissedFires() int64                                      // via WithDispatchMetrics; flow_orchestrator.dispatch.missed_fires
+```
+
+- **Cron:** 5-field (min/hour/dom/month/dow) with `*`, ranges, steps, lists; **no** `L`/`W`/`#`.
+  DOM+DOW restricted → OR-union. Evaluated in **UTC**; DST-correct (spring-forward skipped, fall-back
+  fires once). No fire in the search horizon → `ErrCronNoFire`.
+- **Fire contract:** **exactly-once-enqueue** per due slot across N processes (serialized in-txn
+  re-check is the arbiter, not the fence); **at-least-once-invocation** — the run id
+  `sched:<id>:<slot>` is the idempotency key, so the target workflow must be idempotent.
+- **Caps:** backpressure, not rejection — an at-cap item is a no-op **skip**, never a failed workflow.
+  Counts **running slots only** (`claimed ∧ ¬parked`) → a parked sub-workflow child is **cap-exempt**
+  (no deadlock). Lowering a cap = reopen the store (no-kill; in-flight runs finish).
+- **Schedule × cap:** a recurring fire at cap = **missed slot** (schedule advances, nothing enqueued);
+  a one-shot at cap is **RETAINED** (stays due, fires exactly once when the cap drains — never
+  dropped). Both increment `MissedFires()`.
+- **Missed runs** (poller down across slots): missed slots **coalesce into one fire**. `WithCatchupOnce`
+  is reserved (no-op today, `==` the default).
+
 ## Node Status
 
 ```go
@@ -1274,6 +1331,25 @@ type ApprovalRejectedError struct{ Node, Approver, Comment string }
 `AddSubWorkflowQueued`/`WithResult`/`WithInput` misuse errors are `ErrValidation`-wrapped, so
 `errors.Is(err, ErrValidation)` is true for them. See the
 [Sub-workflows & approvals guide](../guides/sub-workflows.md).
+
+### Scheduling domain (added M20)
+
+```go
+// ErrSchedule: a bad schedule config (empty id/type, unparseable/corrupt spec, non-positive
+// interval, a traversal-shaped id). ErrValidation-wrapped.
+var ErrSchedule = fmt.Errorf("%w: invalid schedule", ErrValidation)
+
+// ErrCronSpec: a malformed 5-field cron spec (wrong field count, bad range/step/list, out of range).
+var ErrCronSpec = fmt.Errorf("%w: invalid cron spec", ErrValidation)
+
+// ErrCronNoFire: a valid spec that has no fire time within the bounded search horizon (never hangs
+// the poller — returned instead of looping).
+var ErrCronNoFire = fmt.Errorf("%w: cron spec has no fire time within the search horizon", ErrValidation)
+```
+
+All three are `ErrValidation`-wrapped. `CreateSchedule` / the poller / cross-process caps also return
+an `ErrValidation`-wrapped error when called on a **non-MP** store. See the
+[Scheduling guide](../guides/scheduling.md).
 
 ### Saga / rollback domain (added v0.12.0)
 

@@ -28,6 +28,9 @@ type DispatchMetrics struct {
 	supersededAborts  atomic.Int64 // a fenced drive aborted without terminalizing (disposeExecErr ErrFencedOut)
 	retriesAttempted  atomic.Int64 // a transient-fault drive was requeued for retry (MarkForRetry)
 	deadLetters       atomic.Int64 // a drive was dead-lettered (terminal MarkFailed on budget-exhausted/poison)
+	missedFires       atomic.Int64 // M20 ph103: a DUE scheduled fire was blocked by a saturated concurrency cap
+	// (fireDueLocked's !admit path — recurring skip-to-next AND one-shot RETAIN). Operator visibility that a
+	// schedule is starved by its cap (the companion to DEC-P101-ONESHOT-AT-CAP-RETAIN).
 }
 
 // NewDispatchMetrics returns a zeroed DispatchMetrics ready to attach + read.
@@ -49,6 +52,9 @@ func (m *DispatchMetrics) RetriesAttempted() int64 { return m.retriesAttempted.L
 
 // DeadLetters returns the dead-letter count.
 func (m *DispatchMetrics) DeadLetters() int64 { return m.deadLetters.Load() }
+
+// MissedFires returns the missed-fire count (M20 ph103): due scheduled fires blocked by a saturated cap.
+func (m *DispatchMetrics) MissedFires() int64 { return m.missedFires.Load() }
 
 // --- increment helpers (nil-safe: a nil *DispatchMetrics is a no-op, so call sites need no nil check
 // beyond the store's own `if s.metrics != nil` gate — but these ARE nil-safe as a defense-in-depth for a
@@ -81,6 +87,12 @@ func (m *DispatchMetrics) incRetriesAttempted() {
 func (m *DispatchMetrics) incDeadLetters() {
 	if m != nil {
 		m.deadLetters.Add(1)
+	}
+}
+
+func (m *DispatchMetrics) incMissedFire() {
+	if m != nil {
+		m.missedFires.Add(1)
 	}
 }
 

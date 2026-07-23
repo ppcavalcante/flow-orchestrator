@@ -5,6 +5,55 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0-alpha] — 2026-07-23
+
+**M20 — Scheduling + Concurrency Caps.** Two opt-in operational layers over the M16 fence +
+M17 dispatch queue: workflows can **run on a schedule** (cron / interval / one-shot), and an
+operator can **cap "at most K of type X running at once"** — both **across processes**, with
+**zero infrastructure, zero new dependency (the cron parser is hand-rolled), and zero new entry
+point** (the poller runs in-process). **Fully additive** — the public `Execute` / `dag.go` path
+is **byte-unchanged** (0-diff re-derived vs `v0.18.0-alpha`), and with no schedules and no caps
+configured the engine behaves exactly as M19, so 1.0 stays earnable. See
+[ADR-0019](docs/architecture/adr/0019-scheduling-and-concurrency-caps.md) and the
+[scheduling guide](docs/guides/scheduling.md).
+
+**Added (all additive; scheduling + caps require a `WithMultiProcess()` store):**
+- **Durable schedules** — `CreateSchedule` registers a cron, interval, or one-shot schedule in a
+  new durable `schedules` SQLite table. An **opt-in in-process poller** fires each due schedule
+  onto the M17 `work_queue`. The fire is a single `BEGIN IMMEDIATE` transaction —
+  `{ claim the schedule (fenced), enqueue exactly-once for the due slot, advance next-fire }` —
+  so a fired slot is enqueued once and only once; execution then inherits M17's at-least-once
+  invocation (a scheduled workflow must be idempotent, like any dispatched one).
+- **Hand-rolled cron parser** — a dependency-free 5-field cron engine (`cron.go`): ranges, steps,
+  and lists (no `L`/`W`/`#`), DOM-DOW as a union (OR). `Next()` is **DST-safe** (spring-forward
+  gaps are skipped; a fall-back hour fires exactly once, not twice) and **bounded** — it never
+  hangs, returning `ErrCronNoFire` past a multi-year horizon. `go.mod` / `go.sum` are byte-unchanged.
+- **Cross-process concurrency caps** — `WithCaps` sets a per-type cap ("at most K of type X
+  running") and/or a global cap. The cap is enforced by a row-`COUNT(*)` **inside** the same
+  claim/fire transaction (not a fenced counter — a counter leaks slots on crash/reclaim), so it is
+  crash- and reclaim-consistent with no reconciler. A claim counts **running only**
+  (`claimed` ∧ ¬`parked`) — parked sub-workflow parents are cap-exempt, so a cap can never deadlock
+  on K parked parents awaiting a capped child. The scheduler's admission additionally counts
+  **pending** work, so a fire that would exceed the cap is treated as a missed slot (skip-to-next)
+  rather than growing the queue backlog unbounded.
+- **One-shot-at-cap retention** — a one-shot schedule that is due while its type is at cap is
+  **retained** (not dropped) and retries on the next tick, so it fires **exactly once** even under
+  cap pressure; a recurring schedule at cap skips to its next slot.
+- **Operator visibility** — an opt-in, nil-safe **missed-fire metric** on the dispatch-metrics
+  bridge counts cap-blocked scheduled fires (incremented post-commit, so a rolled-back fire never
+  over-counts). `WithCatchupOnce` is present but **reserved** — missed slots currently coalesce to
+  a single fire, which equals the default today.
+- **Formal capstone** — three TLA+ arms, each machine-checked and bite-proven (a seeded break must
+  falsify): **NoDoubleFire** (`specs/M20Scheduling.tla` — the in-transaction re-check under the
+  serialized write lock + atomic advance is the arbiter, not the fence), **CapNeverExceeded**
+  (`specs/M20Caps.tla` — the in-transaction COUNT makes the cap TOCTOU-free), and **NoWedge**
+  (`specs/M20Parked.tla` — cap-exempt parked parents keep the system deadlock-free). A gopter arm
+  bites both safety properties over the real `SQLiteStore`.
+
+**Security:** PASSED (0 blocking, 0 code-defect). Three tracked **LOW** residuals (two carried from
+M17/M19, one new defense-in-depth observation) are documented and carried to the 1.0 backlog; none
+blocks the release.
+
 ## [0.18.0-alpha] — 2026-07-20
 
 **M19 — Composition.** Two opt-in composition seams over the existing durable executor:

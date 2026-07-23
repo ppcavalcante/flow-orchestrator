@@ -218,7 +218,7 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 	cancelledAny := false // M18 ph87: true once a reclaim-terminalize-cancelled has run in this txn (BLOCKER-2)
 	for {
 		excludeClause, excludeArgs := buildNotInFilter(tried)
-		scanSQL := `SELECT workflow_id, type, input, state, parent_id, parent_signal, depth FROM work_queue
+		scanSQL := `SELECT workflow_id, type, input, state, parent_id, parent_signal, depth, parked, cancel_requested FROM work_queue
 		            WHERE (state='pending'
 		                   OR (state='claimed'
 		                       AND EXISTS (SELECT 1 FROM leases l
@@ -233,8 +233,10 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 			input                  []byte
 			parentID, parentSignal sql.NullString // M19 ph94: NULL for a plain M17 dispatch (no parent)
 			depthCol               sql.NullInt64  // M19 ph95: scanned defensively — a NULL is corruption, NOT a silent 0
+			parkedCol              sql.NullInt64  // M20 ph98: NULL = running-slot / plain-pending; set = this reclaim candidate is a parked child re-driving
+			cancelReqCol           sql.NullInt64  // M18 ph87: set = an operator cancel is pending → this row will be TERMINALIZED, not run (cap-exempt)
 		)
-		scanErr := tx.QueryRowContext(ctx, scanSQL, scanArgs...).Scan(&wf, &typ, &input, &state, &parentID, &parentSignal, &depthCol)
+		scanErr := tx.QueryRowContext(ctx, scanSQL, scanArgs...).Scan(&wf, &typ, &input, &state, &parentID, &parentSignal, &depthCol, &parkedCol, &cancelReqCol)
 		switch {
 		case errors.Is(scanErr, sql.ErrNoRows):
 			// No runnable item. BUT if this txn terminalized any cancel-set reclaim rows (BLOCKER-2), we
@@ -265,6 +267,38 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 			continue
 		}
 		depth := int(depthCol.Int64)
+
+		// M20 ph98 — CONCURRENCY CAP GATE (DEC-P98-COUNT-IN-TXN, CAP-01..05). Gate a candidate that would
+		// NEWLY occupy a RUNNING slot: a `pending` row (about to become claimed∧¬parked) OR a reclaim of a
+		// `claimed∧parked` row (a re-driving parked child re-occupies its slot). A reclaim of a plain
+		// `claimed∧¬parked` row is SLOT-NEUTRAL (already counted) → never gated (gating it would only reduce
+		// liveness with no cap benefit, and it is the cancel-terminalize cleanup path). If the candidate would
+		// occupy a slot AND a cap applies AND the running count (EXCLUDING this row) already sits at the limit,
+		// SKIP it (tried + continue — BACKPRESSURE, left claimable-later), never claim, never reject (CAP-04).
+		//
+		// The COUNT is over durable rows INSIDE this BEGIN IMMEDIATE txn (crash-consistent, no counter to
+		// desync — [[engineer-fencing-extends-to-derived-state]]: the row-COUNT is the arbiter). Running slot =
+		// state='claimed' AND parked IS NULL (DEC-P98-PARKED-COLUMN — a parked child is claimed-but-not-a-slot,
+		// so K parked parents awaiting a capped child never deadlock). Unbounded caps ⇒ this whole block is
+		// skipped ⇒ the M17 claim path is byte-behavior-unchanged (CAP-05).
+		//
+		// CANCEL-EXEMPTION (F-P98-CR review, self-caught): a cancel_requested row reclaimed here is about to be
+		// TERMINALIZED `cancelled` (the BLOCKER-2 cleanup block below), NOT run — it will occupy NO slot. Gating
+		// its cleanup on cap availability would STRAND a cancelled parked child's terminalization (and thus its
+		// parent's failure-wake) behind a saturated cap. So a cancel-set candidate is NEVER cap-gated — it flows
+		// straight to claimLocked + the cancel-terminalize path. (A cancel-set row that is NOT a reclaim target
+		// is handled by its live owner's disposition gate, never reaching here.)
+		occupiesNewSlot := (state == wqPending || (state == wqClaimed && parkedCol.Valid)) && !cancelReqCol.Valid
+		if occupiesNewSlot && !s.caps.isUnbounded() {
+			overCap, capErr := s.claimWouldExceedCap(ctx, tx, typ, wf)
+			if capErr != nil {
+				return WorkItem{}, capErr
+			}
+			if overCap {
+				tried = append(tried, wf) // at cap → skip (backpressure); re-scan the rest in-txn for a runnable item.
+				continue
+			}
+		}
 
 		// Claim the M16 fencing lease for this id INSIDE this txn (the sole safety arbiter, untouched).
 		// A lapsed-`claimed` reclaim → claimLocked bumps the token (fencing the dead/stalled owner); a
@@ -336,14 +370,19 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 			res   sql.Result
 			upErr error
 		)
+		// M20 ph98: CLEAR the `parked` discriminator on EITHER claim path — a freshly claimed row is about to
+		// RUN (not parked). A pending row was never parked (parked already NULL; clearing is a harmless no-op);
+		// a reclaimed lapsed row that WAS parked (a re-offered sub-workflow child) is now running again under a
+		// fresh token, so it re-occupies a running slot → parked MUST return to NULL (else it would stay excluded
+		// from the cap COUNT forever, a slot leak). Riding the same flip UPDATE keeps it atomic with the claim.
 		if state == wqPending {
 			res, upErr = tx.ExecContext(ctx,
-				`UPDATE work_queue SET state='claimed', attempts=attempts+1, updated_at=?
+				`UPDATE work_queue SET state='claimed', attempts=attempts+1, parked=NULL, updated_at=?
 				 WHERE workflow_id=? AND state='pending'`,
 				unixNanoNow(), wf)
-		} else { // wqClaimed reclaim — keep state, bump attempts under the new token.
+		} else { // wqClaimed reclaim — keep state, bump attempts + clear parked under the new token.
 			res, upErr = tx.ExecContext(ctx,
-				`UPDATE work_queue SET attempts=attempts+1, updated_at=?
+				`UPDATE work_queue SET attempts=attempts+1, parked=NULL, updated_at=?
 				 WHERE workflow_id=? AND state='claimed'`,
 				unixNanoNow(), wf)
 		}
@@ -370,6 +409,43 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		}
 		return WorkItem{WorkflowID: wf, Type: typ, Input: input, Token: token, ParentID: parentID.String, ParentSignal: parentSignal.String, Depth: depth}, nil
 	}
+}
+
+// claimWouldExceedCap reports whether admitting candidate `wf` of type `typ` as a new RUNNING slot would
+// violate a configured concurrency cap (M20 ph98, DEC-M20-D6). It runs the cap COUNTs INSIDE the caller's
+// BEGIN IMMEDIATE txn (`tx`), so the check + the subsequent claim are one atomic unit (no TOCTOU — a sibling
+// worker cannot claim between our count and our flip; the write lock is held). Running slot =
+// state='claimed' AND parked IS NULL. Both COUNTs EXCLUDE `wf` itself (workflow_id<>?) so the arithmetic is
+// "would this become the (running+1)th slot, exceeding the cap?": admit iff running < cap.
+//
+// Two AND gates (DEC-M20-D6): a per-type cap (if type is capped) AND a global cap (if set). An untyped run
+// (type="") is governed by the global cap only (capForType returns capped=false for ""). Returns true iff
+// EITHER gate is at/over its limit. When neither gate applies (this type + global both uncapped) it returns
+// false without querying (the isUnbounded fast-path already short-circuits the common case at the call site).
+func (s *SQLiteStore) claimWouldExceedCap(ctx context.Context, tx *sql.Tx, typ, wf string) (overCap bool, err error) {
+	if limit, capped := s.caps.capForType(typ); capped {
+		var running int
+		if qerr := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM work_queue WHERE state='claimed' AND parked IS NULL AND type=? AND workflow_id<>?`,
+			typ, wf).Scan(&running); qerr != nil {
+			return false, classifyTxErr("claimnext cap count (type)", qerr)
+		}
+		if running >= limit {
+			return true, nil // per-type cap reached → this candidate must wait (backpressure).
+		}
+	}
+	if limit, capped := s.caps.globalCap(); capped {
+		var running int
+		if qerr := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM work_queue WHERE state='claimed' AND parked IS NULL AND workflow_id<>?`,
+			wf).Scan(&running); qerr != nil {
+			return false, classifyTxErr("claimnext cap count (global)", qerr)
+		}
+		if running >= limit {
+			return true, nil // global cap reached → wait.
+		}
+	}
+	return false, nil
 }
 
 // buildNotInFilter renders `AND workflow_id NOT IN (?,?,…)` for the re-scan exclusion set.
@@ -564,24 +640,48 @@ func (s *SQLiteStore) CancelPending(workflowID string) (bool, error) {
 	return s.flipState(workflowID, wqPending, wqCancelled)
 }
 
-// resetWorkQueueAttempts sets a claimed row's attempts back to 0 (M19 ph94, F-P94-01). Called on a
-// PARK (a suspendable dispatched child that returned ErrSuspended): a park is durable progress, not a
-// failed attempt, so it must not spend the transient-infra retry budget. Guarded to `state='claimed'`
-// (only a live-claimed row is parking under this worker); a terminal/pending row is a 0-row no-op.
-// Orthogonal to the fencing arbiter (it touches only attempts, never the token/leases).
-func (s *SQLiteStore) resetWorkQueueAttempts(workflowID string) (reset bool, err error) {
+// markWorkQueueParked records a PARK on a claimed row (M19 ph94 F-P94-01 + M20 ph98 DEC-P98-PARKED-COLUMN),
+// in ONE atomic UPDATE: (1) reset attempts to 0 — a park is durable progress, not a failed attempt, so it
+// must not spend the transient-infra retry budget; and (2) set the `parked` discriminator (unix-nanos of the
+// park) so the concurrency cap excludes this row from the running-slot COUNT (a parked sub-workflow child is
+// NOT a slot → K parked parents awaiting a capped child never deadlock the cap). The row STAYS `state='claimed'`
+// (M18 read-model + dispatch state machine untouched). Guarded to `state='claimed'` (only a live-claimed row is
+// parking under this worker); a terminal/pending row is a 0-row no-op. Called ONLY from the runNext park path.
+//
+// TOKEN-FENCED (M20 ph98, review ph98-F2): because `parked` now feeds the cap COUNT (a SAFETY-relevant
+// quantity — a masked running slot is a cap under-count → over-admission), this write MUST carry the SAME
+// `fencing_token <= held` guard its siblings MarkForRetry/flipTerminalFenced carry. Without it, a SUPERSEDED
+// worker (reclaimed mid-drive) that returns ErrSuspended would mark the RECLAIMER's actively-running row as
+// parked, masking a live slot. The fenced suspend-checkpoint SHOULD already turn a superseded park into
+// ErrFencedOut (never reaching here), but gating the write makes the cap under-count STRUCTURALLY impossible
+// rather than dependent on that invariant. A held==0 (single-process / non-mp drive) = no claim to fence →
+// the guard degenerates to the plain state CAS (the leases subquery is skipped), byte-unchanged there.
+func (s *SQLiteStore) markWorkQueueParked(workflowID string) (marked bool, err error) {
 	ctx := context.Background()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE work_queue SET attempts=0, updated_at=? WHERE workflow_id=? AND state='claimed'`,
-		unixNanoNow(), workflowID)
+	held := s.tokenState[workflowID]
+	var res sql.Result
+	if held == 0 {
+		// No claim of ours to fence (single-process / non-mp) → plain state CAS.
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE work_queue SET attempts=0, parked=?, updated_at=? WHERE workflow_id=? AND state='claimed'`,
+			unixNanoNow(), unixNanoNow(), workflowID)
+	} else {
+		// TOKEN-GUARDED: park-mark ONLY IF we still hold the current token (no re-claim bumped past us). A
+		// superseded worker (held < durable current) matches 0 rows → a no-op, never masks the reclaimer's slot.
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE work_queue SET attempts=0, parked=?, updated_at=?
+			 WHERE workflow_id=? AND state='claimed'
+			   AND EXISTS (SELECT 1 FROM leases l WHERE l.workflow_id=work_queue.workflow_id AND l.fencing_token <= ?)`,
+			unixNanoNow(), unixNanoNow(), workflowID, int64(held))
+	}
 	if err != nil {
-		return false, classifyTxErr("reset attempts", err)
+		return false, classifyTxErr("mark parked", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("%w: reset attempts rows: %w", ErrIO, err)
+		return false, fmt.Errorf("%w: mark parked rows: %w", ErrIO, err)
 	}
 	return n == 1, nil
 }

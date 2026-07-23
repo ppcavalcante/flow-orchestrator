@@ -61,6 +61,12 @@ type sqliteDurability struct {
 	leaseTTL time.Duration
 	// M18 (ph86): the optional dispatch-metrics hook (OBS-MET). nil = zero-cost (no counters, no bridge).
 	dispatchMetrics *DispatchMetrics
+	// M20 (ph98): the optional concurrency caps (CAP-01..05). nil/zero-value = UNBOUNDED — ClaimNext's cap
+	// gate is a no-op → the M17 hot path is byte-behavior-unchanged (CAP-05). Set via WithCaps; resolved
+	// into the store's immutable `caps` field at construction (never mutated after → read-only inside the
+	// ClaimNext IMMEDIATE txn under the already-held s.mu, no new lock — the fenced-derived-state trap avoided
+	// by construction: the arbiter is the row-COUNT in-txn, this is just static config).
+	caps Caps
 	// driverName overrides the "sqlite" database/sql driver name at open (TEST-ONLY, unexported —
 	// default "" → the real modernc "sqlite" driver, production byte-unchanged). A fault-injecting
 	// test driver registers itself under a distinct name and sets this via withSQLiteDriverName so

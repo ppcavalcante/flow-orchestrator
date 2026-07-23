@@ -109,6 +109,14 @@ func NewOTelDispatchBridge(store Observability, m *DispatchMetrics, mp metric.Me
 	if err != nil {
 		return nil, fmt.Errorf("%w: create dead-letter counter: %w", ErrIO, err)
 	}
+	missedFireCtr, err := meter.Int64ObservableCounter(
+		"flow_orchestrator.dispatch.missed_fires",
+		metric.WithUnit("{event}"),
+		metric.WithDescription("Cumulative missed-fire events (M20 ph103: a due scheduled fire blocked by a saturated cap)."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: create missed-fire counter: %w", ErrIO, err)
+	}
 
 	reg, err := meter.RegisterCallback(
 		func(_ context.Context, o metric.Observer) error {
@@ -123,17 +131,18 @@ func NewOTelDispatchBridge(store Observability, m *DispatchMetrics, mp metric.Me
 					o.ObserveInt64(inflightGauge, int64(len(inflight)))
 				}
 			}
-			// EVENT COUNTERS — read the in-process atomics (ALL five, review ph86-F1).
+			// EVENT COUNTERS — read the in-process atomics (ALL six, review ph86-F1 + M20 ph103 missed-fires).
 			if m != nil {
 				o.ObserveInt64(reclaimCtr, m.ReclaimAfterDeath())
 				o.ObserveInt64(fenceCtr, m.FenceRejections())
 				o.ObserveInt64(supersededCtr, m.SupersededAborts())
 				o.ObserveInt64(retryCtr, m.RetriesAttempted())
 				o.ObserveInt64(deadLetterCtr, m.DeadLetters())
+				o.ObserveInt64(missedFireCtr, m.MissedFires())
 			}
 			return nil
 		},
-		depthGauge, inflightGauge, reclaimCtr, fenceCtr, supersededCtr, retryCtr, deadLetterCtr,
+		depthGauge, inflightGauge, reclaimCtr, fenceCtr, supersededCtr, retryCtr, deadLetterCtr, missedFireCtr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("%w: register dispatch OTel callback: %w", ErrIO, err)
