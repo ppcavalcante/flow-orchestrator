@@ -28,7 +28,9 @@ store that implements `SignalStore` (InMemory / FlatBuffers / JSON, and — sinc
 without one the node returns `ErrWaitRequiresSignalStore` (a loud failure, never a forever-park).
 
 The decision signal's **name is the node name** — `ApproveSignal` / `RejectSignal` derive it, so a
-host's delivery can never drift from the node.
+host's delivery can never drift from the node. Because the name *is* the decision signal, it must be
+**non-empty**: `AddApproval("")` fails loud at `Build` with `ErrValidation` (M22) — a bare `""` name
+would build a node no host could ever satisfy (there is no empty decision signal to target).
 
 ```go
 b := workflow.NewWorkflowBuilder()
@@ -162,6 +164,16 @@ The definition-value child runs **out-of-band** (a host/producer runs it) and th
 a completion signal wakes it. Use this when you run the child yourself and signal completion with
 `SubWorkflowCompletionSignal(nodeName, sigID)`. Most embedders want `AddSubWorkflowQueued` (the queue
 producer emits the completion signal for you); `AddSubWorkflowParked` is the lower-level seam.
+
+> **A parked dispatched run does not hold a running-slot, and does not bleed its retry budget.** When a
+> queue-dispatched child (or any dispatched workflow) parks (`Waiting`), its queue row is marked `parked`:
+> (1) the concurrency cap counts **running** slots only (`claimed AND NOT parked`), so K parked parents do
+> **not** deadlock a cap-1 sub-workflow — a park frees the slot; and (2) its `attempts` counter is **reset**
+> — a park is durable progress, not a failed attempt, so a long-parked child does not silently spend its
+> transient-infra retry budget. The drive lease is left to **lapse on its TTL** (a released lease would fall
+> out of the reclaim scan and strand the row); reclaim-to-resume latency is therefore TTL-bound — tune it
+> with `WithLeaseTTL` on the store (sized above your longest level). This is the honest behavior: reclaim is
+> not instant, it is lease-lapse-bound.
 
 ---
 

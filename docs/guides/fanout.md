@@ -7,8 +7,10 @@ SQLite). See [ADR-0020](../architecture/adr/0020-dynamic-fan-out.md) for the des
 ## The shape
 
 A fan-out is a **single ordinary DAG node**. At run time its `Execute` resolves the item list once
-(journaling it durably), then runs the branch action once per item in the node's own
-`MaxConcurrency`-bounded pool, and aggregates the results as the tail of the same `Execute`.
+(journaling it durably), then runs the branch action once per item **per attempt** in the node's own
+`MaxConcurrency`-bounded pool, and aggregates the results as the tail of the same `Execute`. ("Per
+attempt": a branch interrupted mid-flight by a crash **re-executes** on resume — see
+[Crash-resume](#crash-resume--expansion-once) for the at-least-once execution contract.)
 
 ```go
 b := workflow.NewWorkflowBuilder()
@@ -18,7 +20,8 @@ b.AddFanOut("process-rows",
     func(ctx context.Context, parent *workflow.WorkflowData) ([]interface{}, error) {
         return []interface{}{101, 102, 103}, nil // e.g. IDs a query returned
     },
-    // branchAction: runs once per item. Reads its item under FanOutItemKey.
+    // branchAction: runs once per item per attempt (re-runs on crash-resume — make its
+    // effects idempotent). Reads its item under FanOutItemKey.
     workflow.ActionFunc(func(ctx context.Context, d *workflow.WorkflowData) error {
         item, _ := d.Get(workflow.FanOutItemKey)
         id, _ := item.(json.Number).Int64() // see "Item typing" below
@@ -84,6 +87,16 @@ A resolved N exceeding the cap → loud `ErrFanOutMaxWidth`. Enforced **after** 
 park, never a silent truncation. Note: the expansion is already journaled when the cap fires, so an over-wide
 re-drive fails again deterministically (the intended permanent refusal).
 
+### Concurrency + memory footprint — a bounded `min(N, MaxConcurrency)` worker pool
+
+The N branches run in the node's **own bounded worker pool**: exactly `min(N, MaxConcurrency)` worker
+goroutines pull branch indices from a work channel, so **peak live goroutines == `min(N, cap)`, not N**. A
+100k-item fan-out on a `MaxConcurrency` of 16 runs 16 branch goroutines at a time, not 100k — the memory
+footprint is bounded by the cap, independent of N. (The cap defaults to `DefaultMaxConcurrency` = 16; it is
+the node's `MaxConcurrency`, the same knob the level executor reads.) The observable behavior is unchanged
+from a per-branch launch — same discovery-order results, same FailFast cancel timing, same CollectPartial
+"all run" — only the goroutine/memory ceiling is bounded.
+
 ### Fan-in policy — FailFast (default) vs CollectPartial
 
 **FailFast (default):** the first branch failure fails the fan-out node and cancels in-flight / un-started
@@ -107,13 +120,66 @@ ID (see below). A partial failure does **not** fail the node → it does **not**
 cancelled/times out) is distinct — it propagates under both policies and the node stays non-terminal, never
 recording a poisoned partition.
 
+### Per-branch retry — `WithBranchRetries` (M22)
+
+Opt the fan-out node into per-branch retry: a failed branch re-drives up to `count` extra attempts (total
+≤ `count+1`) with a **bounded backoff** (capped exponential + jitter by default), **without** re-expanding
+the fan-out and **without** re-running succeeded siblings. The re-drive reuses the same deterministic
+child ID, so retry rides the same no-replay path as crash-resume and the result still persists exactly-once.
+
+```go
+b.AddFanOut("rows", expander, branchAction).
+    WithBranchRetries(3, 100*time.Millisecond) // ≤ 3 retries per branch, 100ms base backoff (capped+jittered)
+```
+
+Tune the policy — or mark permanent errors non-retryable — by passing `RetryableAction` option hooks:
+
+```go
+b.AddFanOut("rows", expander, branchAction).
+    WithBranchRetries(3, 100*time.Millisecond,
+        func(r *workflow.RetryableAction) { r.WithRetryIf(isTransient) }, // a non-retryable error → exactly 1 attempt
+        func(r *workflow.RetryableAction) { r.WithMaxDelay(5 * time.Second) },
+    )
+```
+
+- `count <= 0` clears the policy (back to the no-retry default; branch drive is byte-identical to no retry).
+- **Interplay with the fan-in policy.** Under **FailFast** a branch's retries exhaust *before* its terminal
+  error reaches the pool's sibling-cancel; a concurrent sibling's FailFast cancels this branch's in-flight
+  backoff within the window (the branch sub-context is cancelled). Under **CollectPartial** each failing
+  branch retries before it lands in the `__failed__` partition.
+- **Retry MULTIPLIES at-least-once execution** (see [Crash-resume](#crash-resume--expansion-once)). Retry
+  re-runs the branch effect K× *within* a run; a crash then re-drives the in-flight attempt again on resume.
+  The two compound — a retried, crash-interrupted branch effect can fire more than K times. Idempotent
+  branch effects are what makes both safe. Exactly-once **persistence** is untouched (retry sits *below*
+  the deterministic child-ID journal).
+
+`WithBranchRetries` is valid **only** on an `AddFanOut` node (else `ErrValidation`). The same
+`RetryableAction` (`WithMaxDelay` / `WithJitter` / `WithRetryIf` / `WithBackoff`) is also usable directly on
+an ordinary node's action — see the [API reference](../reference/api-reference.md#retryableaction).
+
 ### Crash-resume — expansion-once
 
 The expander runs **exactly once**. `{N + items}` is journaled durably **before** branch 1; on resume the
 node reads that journal and **never re-runs the expander** (a different N would break resume). This requires a
 `Checkpointer` store — a non-Checkpointer store fails loudly with `ErrFanOutRequiresCheckpointer` at run
 time. Each branch is a child workflow under a deterministic ID `(parentID, nodeName, index)`, so a branch
-already durably complete is a no-op on resume (crash-after-branch-k idempotency, N-wide).
+already **durably complete** is a no-op on resume (crash-after-branch-k idempotency, N-wide).
+
+**The execution contract — at-least-once EXECUTION + exactly-once PERSISTENCE.** This is the general
+durable-execution theorem (the same contract as a plain checkpointed node — it is **not** fan-out-specific).
+The engine guarantees each branch's *persisted result* exactly once, but a branch that was **in flight** when
+the process crashed (its effect ran but its `Completed` checkpoint had not yet committed) **re-executes** on
+resume. So a branch runs **at least once**, not exactly once. A non-idempotent branch effect (an INSERT
+without a dedupe key, a charge, an unconditional send) therefore **double-acts** across a crash-resume. Make
+branch effects idempotent — key them on the branch's stable unit id, or use `IdempotencyKey(data, nodeName)`
+(a crash-resume-stable dedupe key). The moat is intact: crash-resume re-runs only the crashed **node**, never
+the whole workflow — no replay tax, no determinism tax; only "zero re-work" was ever an overclaim.
+
+> **Retry multiplies at-least-once.** [Per-branch retry](#per-branch-retry--withbranchretries-m22)
+> (`WithBranchRetries`) re-drives a failed branch K× *within* a run; a crash then re-drives the in-flight
+> attempt again on resume. The two compound — a retried, crash-interrupted branch effect can fire more than
+> K times. Idempotent branch effects are the invariant
+> that makes both safe.
 
 ## Boundary + known semantics
 

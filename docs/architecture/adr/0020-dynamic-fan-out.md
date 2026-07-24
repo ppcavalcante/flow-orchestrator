@@ -38,11 +38,18 @@ the workflow is running (e.g. "one branch per row a query returned"). Four hazar
    too late — a crash between "expander returned" and "branch 1" would lose N).
 3. **Caps the width** (`WithMaxWidth`, default 1024) — enforced AFTER N is resolved but BEFORE any branch
    or child ID exists; exceeding → loud `ErrFanOutMaxWidth` (the DoS guard).
-4. **Drives N branches** in the node's **own `MaxConcurrency`-bounded goroutine pool** (read from ctx via
-   the `withMaxConcurrency` seam), under a cancellable sub-context. Each branch is a child workflow under
+4. **Drives N branches** in the node's **own `min(N, MaxConcurrency)`-worker pool** (the cap read from ctx
+   via the `withMaxConcurrency` seam), under a cancellable sub-context. Peak live goroutines == `min(N, cap)`,
+   **not N** — `min(N, cap)` workers pull indices off a work channel (M22 ph110 / F-PG-08: the original design
+   spawned N goroutines each blocking on a cap-sized semaphore, so peak==N — a 100k-item fan-out held ~100k
+   live goroutines, an OOM cliff on the headline feature; the worker-pool bounds the footprint by the cap,
+   observable behavior byte-identical). Each branch is a child workflow under
    a **deterministic ID** `subFanOutChildID(parentID, nodeName, index)` — so crash-after-branch-k
-   idempotency is the same per-child resume-idempotency as `subWorkflowAction` (a completed child is a
-   no-op on resume), N-wide.
+   idempotency is the same per-child resume-idempotency as `subWorkflowAction` (a **durably-completed**
+   child is a no-op on resume), N-wide. The execution contract is the general durable-execution theorem —
+   **at-least-once EXECUTION + exactly-once PERSISTENCE** (see [Consequences](#consequences)): a branch
+   interrupted mid-flight by a crash re-executes on resume, so a non-idempotent branch effect double-acts.
+   This is not fan-out-specific — it is the same contract as any checkpointed node.
 5. **Fans in** as the tail of the same `Execute` — aggregating `baseKey[i]` in **discovery order**
    (index-addressed, not completion order), per the fan-in policy.
 
@@ -108,9 +115,10 @@ stays non-terminal), so an interrupted run is never mis-recorded as a Completed 
 The claim — *no-replay crash-resume of runtime-N fan-out* — is machine-checked at the capstone (ph108,
 sealed @ `c48c39e`):
 
-1. **TLA+ `specs/M21FanOut.tla`** — TLC exhaustive (87 distinct states): **ExactlyNSpawn** (N children from
-   the journaled expansion, exactly-once each under crash) + **FanInWaitsForAll** (aggregate fires iff all N
-   branches terminal). `M21FanOutBreak.cfg` FALSIFIES ExactlyNSpawn (re-expand-on-resume) — bite-proven.
+1. **TLA+ `specs/M21FanOut.tla`** — TLC exhaustive (87 distinct states): **ExactlyNSpawn** (N children
+   *spawned* from the journaled expansion, exactly-once each under crash — this is the SPAWN/journal axis,
+   not branch-effect execution) + **FanInWaitsForAll** (aggregate fires iff all N branches terminal).
+   `M21FanOutBreak.cfg` FALSIFIES ExactlyNSpawn (re-expand-on-resume) — bite-proven.
 2. **Genuine 2-process kill-9 (`TestFanOutKill_2Proc`, non-short)** — real SIGKILL cycles, 6 branch effect
    rows each exactly-once, non-vacuous (~25s of kills vs ~0.3s clean). The true write→kill→read an
    in-process store-seed cannot reach.
@@ -121,6 +129,20 @@ sealed @ `c48c39e`):
 
 - **Additive and moat-preserving.** `Execute`/`dag.go`/`parallel_execution.go` public behavior byte-stable;
   1.0 stays earnable. Runs on any `Checkpointer`.
+- **Bounded footprint (M22 ph110 / F-PG-08).** The N branches run in a `min(N, MaxConcurrency)`-worker pool
+  — peak live goroutines == `min(N, cap)`, not N. The M21 design spawned N goroutines each blocking on a
+  cap-sized semaphore (peak==N — a 100k-item fan-out held ~100k goroutines, ~70GB, an OOM cliff). ph110
+  replaced that with a work-channel worker pool; observable behavior (FailFast timing, discovery-order
+  results, CollectPartial) is byte-identical. See the [fan-out guide → Concurrency + memory footprint](../../guides/fanout.md#concurrency--memory-footprint--a-bounded-minn-maxconcurrency-worker-pool).
+- **Execution contract: at-least-once EXECUTION + exactly-once PERSISTENCE.** The general durable-execution
+  theorem, not a fan-out special case (witnessed on both a plain checkpointed node and a fan-out branch in
+  the proving ground). A branch's *persisted result* is exactly-once; a branch **in flight** when the
+  process crashes re-executes on resume, so a non-idempotent branch effect double-acts. Make branch effects
+  idempotent (`IdempotencyKey` or a stable per-unit dedupe key). The moat distinction holds: crash-resume
+  re-runs only the crashed node, never the whole workflow — no replay/determinism tax; "zero re-work" was
+  the only overclaim. Per-branch retry (M22 ph112 / F-PG-10, now shipped via `WithBranchRetries`)
+  **multiplies** at-least-once — retry K× and a crash-resume re-drive compound, so idempotency is the
+  standing invariant.
 - **Single-level, single-process.** A fan-out branch itself fanning out is an explicit **non-goal** for
   v0.20.0-alpha (bounds the width×depth DoS surface + keeps the capstone tractable). True cross-process
   fan-out is deferred to M22 (Option B, opt-in, SQLite-only).

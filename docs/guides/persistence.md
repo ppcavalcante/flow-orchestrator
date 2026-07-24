@@ -511,6 +511,44 @@ Consuming is ordered take → apply → `Completed` → checkpoint → **ack**, 
 before the checkpoint re-runs the node and re-applies the same byte-identical write.
 Ack consumed signals promptly: a mailbox holds at most 2^20 un-acked entries.
 
+### Wait for a signal or a timeout (`AddWaitForSignalTimeout`) — durable first-of (M22)
+
+A durable **first-of(signal, timer)**: the node parks `Waiting` until **either** the named signal is
+delivered to the mailbox **or** a timeout deadline passes — exactly one of {signal, timeout} wins. The
+deadline is an **absolute** instant frozen at the node's first encounter, so it is **durable-remaining**
+across a crash/restart (the timeout does not reset — a node armed for 1h that crashes at 40m has ~20m left
+on resume, not a fresh hour). On a same-encounter tie (the signal is present *and* the deadline has passed)
+the **signal wins**; an early-buffered signal (delivered before the node was first reached) also wins
+immediately.
+
+This is a **wholly separate mechanism** from the node-level `WithTimeout` (which is a non-durable *execution*
+deadline on an ordinary running node). A park bypasses `WithTimeout` entirely. Requires a `Store`
+implementing `SignalStore` (else `ErrWaitRequiresSignalStore` at run time).
+
+The timeout arm sets a disposition key `"<name>.__timedOut__"` = `true` (namespaced by node name; only the
+timeout path sets it — the signal path applies the payload as `AddWaitForSignal` does and never sets it). A
+downstream **`AddChoice`** ([ChoiceNode](../reference/api-reference.md#choicenode--addchoice), M11) reads
+that key to branch signal-vs-timeout into separate subgraphs:
+
+```go
+b.AddWaitForSignalTimeout("await-approval", "approval", 24*time.Hour).DependsOn("submit")
+
+// Branch on which arm won.
+b.AddChoice("route-decision").
+    When(func(d *workflow.WorkflowData) bool {
+        v, _ := d.Get("await-approval.__timedOut__")
+        return v == true // timeout arm won → escalate
+    }, "escalate").
+    Otherwise("ship"). // signal arrived in time → proceed
+    DependsOn("await-approval")
+
+b.AddNode("escalate").WithAction(escalate).DependsOn("route-decision")
+b.AddNode("ship").WithAction(ship).DependsOn("route-decision")
+```
+
+Time is read through the workflow `Clock`, never `time.Now()` directly: the retry OUTCOME (which arm won) is
+journaled via the checkpoint, never the clock instant — so this carries no determinism tax.
+
 ### Wait for a condition (`AddWaitForCondition`)
 
 Parks while a predicate over the workflow data is false, re-evaluating on each wake

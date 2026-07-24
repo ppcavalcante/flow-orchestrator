@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // ErrFanOutRequiresCheckpointer is returned when a fan-out node runs on a store WITHOUT a durable Checkpointer
@@ -80,7 +81,16 @@ type fanOutBranch func(index int, item interface{}) *DAG
 // node injects the item under FanOutItemKey into the branch child's data BEFORE the user action runs, so the
 // action reads its item with data.Get(FanOutItemKey) (the non-generic item-via-WorkflowData contract). The
 // result the action Sets under resultFrom is read back by driveBranch for the typed node[i] keying.
-func branchDAGFromAction(branchAction Action) fanOutBranch {
+// If retry is non-nil, the user branchAction is wrapped in a RetryableAction so a failed branch re-drives up to
+// retry.count times — WITHOUT re-expanding the fan-out and WITHOUT re-running succeeded siblings (HARD-02). The
+// wrap is on the branch's INNER action here, NOT the branch node's RetryCount (that stays 0, so node.Execute never
+// double-wraps), and it sits BELOW the deterministic child-ID journal (driveBranch) → exactly-once PERSISTENCE
+// intact. The branch node still runs the wrapped action directly; a sibling FailFast cancels an in-backoff retry
+// via the branch sub-context (RetryableAction's mid-backoff select on ctx.Done), so FailFast latency is bounded.
+func branchDAGFromAction(branchAction Action, retry *branchRetryPolicy) fanOutBranch {
+	if retry != nil {
+		branchAction = retry.applyTo(branchAction)
+	}
 	return func(_ int, item interface{}) *DAG {
 		b := NewWorkflowBuilder()
 		b.AddStartNode("branch").WithAction(ActionFunc(func(ctx context.Context, d *WorkflowData) error {
@@ -116,9 +126,10 @@ func (b *WorkflowBuilder) AddFanOut(name string, expander fanOutExpander, branch
 		return node
 	}
 	node.action = &fanOutAction{
-		nodeName: name,
-		expander: expander,
-		branch:   branchDAGFromAction(branchAction),
+		nodeName:    name,
+		expander:    expander,
+		branchInner: branchAction, // retained so WithBranchRetries can rebuild the factory with a retry policy
+		branch:      branchDAGFromAction(branchAction, nil),
 	}
 	return node
 }
@@ -175,18 +186,88 @@ func (n *NodeBuilder) WithCollectPartial() *NodeBuilder {
 	return n
 }
 
+// WithBranchRetries opts the fan-out node into per-branch retry (HARD-02 / F-PG-10). A failed branch re-drives up
+// to `count` extra attempts (total ≤ count+1) with a BOUNDED backoff (capped exponential + jitter by default),
+// WITHOUT re-expanding the fan-out and WITHOUT re-running succeeded siblings — the re-drive reuses the same
+// deterministic child-ID, so retry and crash-resume share the no-replay path and the result persists exactly-once.
+// `delay` is the base backoff. Optional `opts` layer the RetryableAction knobs onto the branch wrapper — e.g.
+// `func(r *workflow.RetryableAction){ r.WithRetryIf(isTransient) }` to mark permanent errors non-retryable (a
+// non-retryable error → exactly 1 attempt), or WithMaxDelay/WithJitter/WithBackoff to tune the bound.
+//
+// count ≤ 0 clears the policy (back to no-retry, the default). Interplay with the fan-in policy: under FailFast a
+// branch's retries exhaust BEFORE its terminal error reaches the pool's sibling-cancel; a concurrent sibling
+// FailFast cancels this branch's in-flight backoff within the window (the branch sub-context is cancelled). Under
+// WithCollectPartial each failing branch retries before it lands in the __failed__ partition. Only valid on an
+// AddFanOut node.
+func (n *NodeBuilder) WithBranchRetries(count int, delay time.Duration, opts ...func(*RetryableAction)) *NodeBuilder {
+	a, ok := n.action.(*fanOutAction)
+	if !ok {
+		n.actionErr = fmt.Errorf("%w: WithBranchRetries is only valid on an AddFanOut node", ErrValidation)
+		return n
+	}
+	if count <= 0 {
+		a.branchRetry = nil
+		a.branch = branchDAGFromAction(a.branchInner, nil)
+		return n
+	}
+	var configure func(*RetryableAction)
+	if len(opts) > 0 {
+		configure = func(r *RetryableAction) {
+			for _, opt := range opts {
+				opt(r)
+			}
+		}
+	}
+	a.branchRetry = &branchRetryPolicy{count: count, delay: delay, configure: configure}
+	a.branch = branchDAGFromAction(a.branchInner, a.branchRetry)
+	return n
+}
+
 // fanOutAction is the production fan-out node. It generalizes subWorkflowAction 1→N: N deterministic child runs
 // under (parentID, nodeName, index)-derived IDs, driven by the node's OWN bounded pool under a cancellable
 // sub-context, aggregated in discovery order. The expander result is journaled (expansion-once) before any branch.
 type fanOutAction struct {
 	nodeName       string
 	expander       fanOutExpander
+	branchInner    Action // the raw user branch action, retained so WithBranchRetries can rebuild `branch` with a retry policy
 	branch         fanOutBranch
-	resultFrom     string // the branch child DATA key each branch's result is read from (typed, value_long-faithful)
-	resultKey      string // the parent BASE key; per-branch results land TYPED under resultKey[i] + a count key
-	maxWidth       int    // per-node width cap (≤0 → DefaultFanOutMaxWidth); exceed → ErrFanOutMaxWidth
-	collectPartial bool   // FANOUT-05: true → all branches run, node Completes with a {succeeded, failed} partition; false (default) → FailFast
+	resultFrom     string             // the branch child DATA key each branch's result is read from (typed, value_long-faithful)
+	resultKey      string             // the parent BASE key; per-branch results land TYPED under resultKey[i] + a count key
+	maxWidth       int                // per-node width cap (≤0 → DefaultFanOutMaxWidth); exceed → ErrFanOutMaxWidth
+	collectPartial bool               // FANOUT-05: true → all branches run, node Completes with a {succeeded, failed} partition; false (default) → FailFast
+	branchRetry    *branchRetryPolicy // HARD-02/F-PG-10: per-branch retry policy; nil (default) → no retry, branch drive byte-identical to pre-ph112
 }
+
+// branchRetryPolicy is the per-branch fan-out retry configuration (HARD-02 / F-PG-10). When set (via
+// WithBranchRetries), each branch's inner action is wrapped in a RetryableAction inside branchDAGFromAction, so a
+// failed branch re-drives up to `count` times WITHOUT re-expanding the fan-out and WITHOUT re-running succeeded
+// siblings. Retry sits BELOW the deterministic child-ID journal → exactly-once PERSISTENCE is untouched; it
+// MULTIPLIES at-least-once EXECUTION (the ph111 contract). A nil policy = no retry.
+type branchRetryPolicy struct {
+	count     int                    // max retries (extra attempts beyond the first); total attempts ≤ count+1
+	delay     time.Duration          // base backoff delay
+	configure func(*RetryableAction) // optional caller hook to layer WithMaxDelay/WithJitter/WithRetryIf/WithBackoff
+}
+
+// applyTo wraps a branch action in a bounded RetryableAction. The default policy is BOUNDED (capped exp backoff +
+// jitter), never a tight loop; a caller `configure` hook may override the cap/jitter/classifier. Called only when
+// the policy is non-nil.
+func (p *branchRetryPolicy) applyTo(action Action) Action {
+	r := NewRetryableAction(action, p.count, p.delay).
+		WithMaxDelay(defaultBranchRetryMaxDelay).
+		WithJitter(defaultBranchRetryJitter)
+	if p.configure != nil {
+		p.configure(r)
+	}
+	return r
+}
+
+// Default bounded-backoff knobs for a per-branch retry policy (overridable via WithBranchRetries opts). A cap +
+// jitter is what makes the default policy a bounded storm rather than a tight loop (CONTEXT {Q}2).
+const (
+	defaultBranchRetryMaxDelay = 30 * time.Second
+	defaultBranchRetryJitter   = 0.2
+)
 
 // fanOutItemsKey is the reserved parent-data key the expansion-once journal lives in. Namespaced by node name
 // (internal "__fanout_items__:" prefix) so it cannot collide with a user data key OR two fan-out nodes in one
@@ -300,36 +381,67 @@ func (a *fanOutAction) Execute(ctx context.Context, parentData *WorkflowData) er
 	branchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sem := make(chan struct{}, capN)
+	// BOUNDED WORKER-POOL (ph110 / F-PG-08): min(n,capN) worker goroutines pull branch indices from a work channel,
+	// so peak goroutines == min(n,cap) — NOT n. (The prior "spawn n goroutines each blocking on a capN-sized sem"
+	// had peak==n: a 100k-item fan-out spawned ~100k live goroutines / ~70GB, an OOM cliff on the headline feature.)
+	// The observable contract is byte-identical: same FailFast immediate-cancel timing, same un-started skip via
+	// branchCtx, same discovery-order results[idx], same CollectPartial "all run, no cancel", driveBranch unchanged.
 	results := make([]interface{}, n)
 	errs := make([]error, n)
-	var wg sync.WaitGroup
 
-	for i := 0; i < n; i++ {
-		// FailFast: once a sibling has failed (branchCtx cancelled), do NOT launch un-started branches. Record a
-		// cancellation error for the skipped index so the aggregate loop below fails the node deterministically.
-		if branchCtx.Err() != nil {
-			errs[i] = branchCtx.Err()
-			continue
-		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-branchCtx.Done():
-				errs[idx] = branchCtx.Err()
+	numWorkers := capN
+	if numWorkers > n {
+		numWorkers = n
+	}
+	work := make(chan int, numWorkers) // small buffer; the feeder blocks so it can observe FailFast cancel promptly.
+
+	// FEEDER: hands indices 0..n-1 to the workers in order. On FailFast cancel (branchCtx.Err()!=nil) it stops
+	// feeding AND sets errs[idx]=branchCtx.Err() for EVERY un-fed index — the exact equivalent of the old pre-launch
+	// skip (":312"). This is load-bearing: an un-fed index left nil/nil would be read by the fan-in aggregate as a
+	// SUCCESS keying results[idx]==nil (a silent wrong-result). Invariant: every index ends with a real result+nil
+	// err, or a non-nil err — never nil/nil for an un-processed index.
+	go func() {
+		defer close(work)
+		for i := 0; i < n; i++ {
+			if branchCtx.Err() != nil {
+				for j := i; j < n; j++ {
+					errs[j] = branchCtx.Err()
+				}
 				return
 			}
-			res, berr := a.driveBranch(branchCtx, store, parentID, idx, itemForBranch(items[idx]))
-			results[idx] = res
-			errs[idx] = berr
-			if berr != nil && !a.collectPartial {
-				cancel() // FailFast (default): first failure cancels in-flight + un-started siblings.
-				// CollectPartial: do NOT cancel — every branch runs to completion.
+			select {
+			case work <- i:
+			case <-branchCtx.Done():
+				for j := i; j < n; j++ {
+					errs[j] = branchCtx.Err()
+				}
+				return
 			}
-		}(i)
+		}
+	}()
+
+	// WORKERS: min(n,cap) goroutines, each pulls indices until work is drained. A fed-but-not-yet-started index whose
+	// branchCtx already cancelled records the cancellation error and skips driveBranch (mirrors the old in-goroutine
+	// <-branchCtx.Done() arm). Each processed index writes results[idx]+errs[idx]; a FailFast failure cancel()s.
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range work {
+				if branchCtx.Err() != nil {
+					errs[idx] = branchCtx.Err()
+					continue
+				}
+				res, berr := a.driveBranch(branchCtx, store, parentID, idx, itemForBranch(items[idx]))
+				results[idx] = res
+				errs[idx] = berr
+				if berr != nil && !a.collectPartial {
+					cancel() // FailFast (default): first failure cancels in-flight + un-started siblings.
+					// CollectPartial: do NOT cancel — every branch runs to completion.
+				}
+			}
+		}()
 	}
 	wg.Wait()
 

@@ -247,6 +247,7 @@ func (b *WorkflowBuilder) Build() (*DAG, error)
 
 // Feature-specific node builders (documented in their own sections):
 //   AddTimer / AddWaitForSignal / AddWaitForCondition  — Durable continuations (v0.10.0)
+//   AddWaitForSignalTimeout                            — Durable first-of(signal, timer) (M22)
 //   AddChoice / AddMerge                               — Conditional branching (v0.11.0)
 ```
 
@@ -732,6 +733,16 @@ func (w *Workflow) WithClock(c Clock) *Workflow
 func NewWaitForSignalNode(name, signalName string) *Node
 func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder
 
+// AddWaitForSignalTimeout (M22) — durable first-of(signal, timer). Parks Waiting
+// until EITHER signalName is delivered OR the timeout deadline passes; exactly one
+// wins (signal-first on a same-encounter tie). The deadline is ABSOLUTE, frozen at
+// first encounter → durable-remaining across a crash/restart (not reset). The timeout
+// arm sets "<name>.__timedOut__" = true so a downstream AddChoice can branch
+// signal-vs-timeout. Distinct from the non-durable node WithTimeout. Requires a
+// SignalStore (else ErrWaitRequiresSignalStore).
+func NewWaitForSignalOrTimeoutNode(name, signalName string, timeout time.Duration) *Node
+func (b *WorkflowBuilder) AddWaitForSignalTimeout(name, signalName string, timeout time.Duration) *NodeBuilder
+
 // NewWaitForConditionNode ("await") parks while predicate(data) is false,
 // re-evaluating on each wake, and converges when it flips.
 func NewWaitForConditionNode(name string, predicate func(*WorkflowData) bool) *Node
@@ -985,6 +996,9 @@ and the [Sub-workflows & approvals guide](../guides/sub-workflows.md).
 
 ```go
 // Approval gate — park until an approve/reject decision (signal NAME == node name).
+// name MUST be non-empty (M22): the node name IS the decision signal name, so a "" name
+// builds an unsatisfiable node (no host can target the empty decision signal). An empty
+// name now fails LOUD at Build with ErrValidation (previously built silently).
 func (b *WorkflowBuilder) AddApproval(name string) *NodeBuilder
 func ApproveSignal(node, approver, comment, sigID string) Signal // Approved=true
 func RejectSignal(node, approver, comment, sigID string)  Signal // Approved=false → fail-fast
@@ -1097,6 +1111,12 @@ func (n *NodeBuilder) WithResults(baseKey, branchKey string) *NodeBuilder // typ
 func (n *NodeBuilder) WithMaxWidth(n int) *NodeBuilder                    // width cap; ≤0 → DefaultFanOutMaxWidth (1024)
 func (n *NodeBuilder) WithCollectPartial() *NodeBuilder                   // all N run; node Completes with a {succeeded, failed} partition
 
+// Per-branch retry (M22). A failed branch re-drives ≤ count times (total ≤ count+1) with a BOUNDED backoff
+// (capped exp + jitter by default), WITHOUT re-expanding or re-running succeeded siblings. count ≤ 0 clears
+// the policy. opts layer RetryableAction knobs (WithRetryIf/WithMaxDelay/WithJitter/WithBackoff) onto the
+// branch wrapper. Only valid on an AddFanOut node (else ErrValidation).
+func (n *NodeBuilder) WithBranchRetries(count int, delay time.Duration, opts ...func(*RetryableAction)) *NodeBuilder
+
 const FanOutItemKey = "__fanout_item__" // the reserved key a branch reads its item from
 const DefaultFanOutMaxWidth = 1024      // default per-node width ceiling
 ```
@@ -1112,9 +1132,35 @@ const DefaultFanOutMaxWidth = 1024      // default per-node width ceiling
   `baseKey.__count__` = N, `baseKey.__failed__` = failed indices (JSON string), `baseKey[i]` = the typed
   result for a succeeded i (absent for a failed i). Read a failed branch's child journal by its
   deterministic ID for the error. A partial failure does **not** trigger a parent M12 compensation.
+- **Concurrency + footprint (M22):** the N branches run in a `min(N, MaxConcurrency)`-worker pool — **peak
+  live goroutines == `min(N, cap)`, not N**. A 100k-item fan-out on a cap of 16 runs 16 branches at a time;
+  the memory footprint is bounded by the cap, not N.
 - **Crash-resume:** the expander runs **exactly once** (journaled before branch 1); requires a
   `Checkpointer` store (else `ErrFanOutRequiresCheckpointer`). **N=0** → empty aggregate; **N=1** → same path
   as N>1. Single-level, single-process (cross-process fan-out deferred to M22).
+- **Execution contract — at-least-once EXECUTION + exactly-once PERSISTENCE:** the general durable-execution
+  theorem (same as any checkpointed node, not fan-out-specific). A branch's *persisted result* is
+  exactly-once, but a branch **in flight** at a crash re-executes on resume — so a non-idempotent branch
+  effect double-acts. Make branch effects idempotent (`IdempotencyKey` or a stable per-unit dedupe key).
+  Per-branch retry (`WithBranchRetries`, M22) **multiplies** at-least-once. The moat is intact: crash-resume
+  re-runs only the crashed node, never the whole workflow (no replay/determinism tax).
+
+### RetryableAction — bounded retry wrapper for any action
+
+`RetryableAction` wraps any `Action` with retry + backoff. Usable directly on an ordinary node's action, and
+the option hooks are what `WithBranchRetries` layers onto a fan-out branch.
+
+```go
+func NewRetryableAction(action Action, maxRetries int, delay time.Duration) *RetryableAction
+func (r *RetryableAction) WithBackoff(factor float64) *RetryableAction  // exponential factor (default 2.0)
+func (r *RetryableAction) WithMaxDelay(d time.Duration) *RetryableAction // cap the backoff; d ≤ 0 = uncapped (default)
+func (r *RetryableAction) WithJitter(f float64) *RetryableAction         // randomize each delay by ≤ f (0..1); 0 = none (default). Timing only — never journaled, no determinism tax
+func (r *RetryableAction) WithRetryIf(pred func(error) bool) *RetryableAction // non-retryable classification: pred==false → exactly 1 attempt, terminal
+```
+
+`WithMaxDelay` + `WithJitter` default to off (byte-for-byte the pre-M22 behavior for callers that never set
+them). A fan-out branch's default policy (via `WithBranchRetries`) is BOUNDED — 30s max delay, 0.2 jitter —
+overridable through the `opts` hooks.
 
 ## Node Status
 

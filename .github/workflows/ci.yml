@@ -58,7 +58,11 @@ jobs:
             exit 1
           fi
       - name: Test (race)
-        run: go test ./... -race
+        # -timeout 30m: the full -race suite is heavy; a rare intermittent full-run has
+        # approached go's default 600s -timeout (F-VERIFY-P112-FLAKE — zero data race,
+        # suite weight). Explicit headroom keeps CI from stranding on the aggregate
+        # timeout while staying a hard ceiling on a genuine hang.
+        run: go test ./... -race -timeout 30m
       - name: det-tax ceiling (non-race, BLOCKING)
         # The zero-determinism-tax alloc ceiling (TestPerfCeiling_DetTax) measures
         # allocs via testing.Benchmark().AllocsPerOp(), which the race detector inflates

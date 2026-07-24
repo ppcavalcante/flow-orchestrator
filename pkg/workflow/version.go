@@ -1,7 +1,7 @@
 package workflow
 
 // Version is the current version of Flow Orchestrator
-const Version = "0.20.0-alpha"
+const Version = "0.21.0-alpha"
 
 // VersionInfo contains detailed version information about the Flow Orchestrator library.
 // This can be used by applications to check compatibility and report issues.

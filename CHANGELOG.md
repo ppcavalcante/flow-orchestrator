@@ -5,6 +5,51 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0-alpha] — 2026-07-24
+
+**M22 — Production Hardening.** Envelope + ergonomics hardening off a whole-surface proving-ground
+stress pass, all **additive** — the static-DAG executor and the dispatch/fencing machinery stay
+**0-diff**.
+
+**Added:**
+- **Bounded fan-out worker pool.** The fan-out node now drives its branches through a
+  `min(N, cap)` worker pool: it spawns **at most `cap` goroutines**, not one per item, so a
+  wide fan-out (large `N`, small `MaxConcurrency`) no longer spikes goroutine count to `N`. Peak
+  concurrency is provably `min(N, cap)`; the un-fed-index discipline (every index ends with a real
+  result **or** a non-nil error, never nil/nil) and the FailFast termination proof are preserved.
+- **Per-branch fan-out retry** — **`.WithBranchRetries(count, delay, ...opts)`** on an `AddFanOut`
+  node: a failed branch re-drives up to `count` times with a **bounded** (capped-exponential +
+  jittered) backoff, **without re-expanding** the fan-out and **without re-running** succeeded
+  siblings. Retry sits below the deterministic child-ID journal, so exactly-once **persistence** is
+  untouched (it multiplies at-least-once **execution**). A sibling FailFast cancels an in-backoff
+  branch within the window.
+- **Capped backoff + jitter on `RetryableAction`** — new additive **`WithMaxDelay(d)`** /
+  **`WithJitter(f)`** builders; zero values reproduce prior behavior byte-for-byte. Non-retryable
+  classification is the existing `WithRetryIf` (a predicate returning false → exactly one attempt).
+- **Durable first-of(signal, timer)** — **`AddWaitForSignalTimeout(name, signalName, timeout)`**:
+  parks until **either** the named signal arrives **or** an absolute deadline passes — exactly one
+  wins (signal-first on a same-encounter tie), the deadline is **durable-remaining across restart**
+  (not reset), and the winner is observable (a timeout sets a disposition key a downstream
+  `ChoiceNode` can branch on). An additive sibling — `AddWaitForSignal` / `AddTimer` / `WithTimeout`
+  are byte-unchanged.
+
+**Changed:**
+- **Honest durability contract** in the docs: the guarantee is **at-least-once EXECUTION +
+  exactly-once PERSISTENCE** (a crashed node's action re-runs on resume; its persisted result is
+  written once). Prior wording implying "zero re-work" was corrected; make non-idempotent side
+  effects idempotent.
+- **`AddApproval("")` now fails loudly at `Build`** with a typed validation error naming the fix
+  (previously it built silently into an unsatisfiable node). A **behavior change**: an empty approval
+  name is now a build error. Valid (non-empty) usage is unchanged.
+- **Clearer reconvergence error** — an implicit OR-join (a plain node reconverging two branches of
+  one `ChoiceNode`) now names the specific offending branch entries + the fix (`use AddMerge`).
+- **CI / Makefile**: the full `-race` suite runs with an explicit `-timeout 30m` (headroom for the
+  heavy race build; still a hard ceiling on a genuine hang).
+
+Fan-out throughput note: on the SQLite dispatch path, group-commit durability
+(`NewSQLiteStore(path, SQLiteBatched(K))` in your `StoreFactory`) amortizes the fsync cost for a
+large throughput win over `Strict` — already a one-liner, no new API.
+
 ## [0.20.0-alpha] — 2026-07-24
 
 **M21 — Dynamic Fan-out.** Map a branch action over **N items discovered at runtime** → **N

@@ -627,6 +627,8 @@ It's important to understand the following limitations of the DAG execution mode
 
 3. **Limited Dynamic Workflow Structure**: The DAG structure is fixed once built. While you can use dynamic node creation during the building phase, you cannot add or remove nodes during execution.
 
+   A direct consequence: a **per-instance conditional gate** — "include this approval step only for *this* run" — is **not** a per-instance shape change (that would mutate the DAG). The DAG is DATA and is identical across runs; the moat's `checkGraphIdentity` resume guard depends on it. Express run-varying control flow one of two ways instead: (a) **always place the gate node** and let its action no-op when the run's data says skip; or (b) **route with a `ChoiceNode`** whose predicate reads the run's data, so the not-taken branch is `Bypassed`. Both keep the DAG static; neither adds or removes a node per instance.
+
 4. **No Native Support for Loops**: DAGs by definition cannot contain cycles, which means the engine doesn't support native looping constructs. Looping must be implemented within node actions or by dynamically creating multiple nodes during the build phase.
 
 5. **Same-Process Execution**: All workflow actions execute within the same process, which limits the engine's ability to implement true distributed patterns like Sagas. While you can make external calls from actions, the engine itself operates in a single process.

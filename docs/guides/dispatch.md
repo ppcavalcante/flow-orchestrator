@@ -110,6 +110,26 @@ Each worker derives a distinct `ownerID` from the prefix (`"host-A-0"`, `"host-A
 `WithPoolSize` has no upper cap — the caller owns capacity policy (each worker holds one `*sql.DB`
 handle; the write lock + `busy_timeout` serialize contention regardless).
 
+### Dispatch throughput — enable group-commit in the factory
+
+Dispatch throughput is dominated by the per-level `fsync`. A `Strict` store `fsync`s every checkpoint;
+`SQLiteBatched(k)` amortizes the sync across up to `k` completed levels — roughly a **16×** dispatch
+throughput win at `k=16` in the proving-ground measurement, at the cost of losing **≤ k** completed levels
+on a power loss (bounded, re-run idempotently on resume). It is a one-liner in your `StoreFactory`:
+
+```go
+factory := func() (*workflow.SQLiteStore, error) {
+    return workflow.NewSQLiteStore("./shared.db",
+        workflow.WithMultiProcess(),
+        workflow.SQLiteBatched(16), // group-commit: ~16× dispatch throughput; ≤16 levels at risk on power loss
+    )
+}
+```
+
+More `WithPoolSize` workers does **not** by itself scale a `Strict` store (they serialize on the write
+lock + sync); the durability mode is the lever. See the [Persistence guide](./persistence.md) for the full
+`Strict` vs `Batched(k)` durability contract.
+
 ## The honesty contract — exactly-once PERSISTENCE, at-least-once INVOCATION
 
 **The durable journal is written exactly once per level even under competing consumers** (the M16

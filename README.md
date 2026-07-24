@@ -44,7 +44,12 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.20.0-alpha`** (M21 — Dynamic Fan-out: map a
+> **no stable (`v1`+) release**. The latest is **`v0.21.0-alpha`** (M22 — Production Hardening:
+> a bounded `min(N, cap)` fan-out worker pool (fan-out spawns at most `cap` goroutines, not all `N`),
+> honest at-least-once-EXECUTION / exactly-once-PERSISTENCE durability contract, per-branch fan-out
+> retry with capped-jitter backoff (`WithBranchRetries`), a durable first-of(signal, timer) node
+> (`AddWaitForSignalTimeout`), and operability polish — all additive, the static-DAG executor and
+> dispatch/fencing machinery **0-diff** — on top of M21 — Dynamic Fan-out: map a
 > branch action over `N` items discovered at runtime → `N` parallel branches, as one ordinary DAG
 > node whose `Execute` journals the expansion once and drives its own `MaxConcurrency`-bounded pool
 > (`AddFanOut` + `WithResults` / `WithMaxWidth` / `WithCollectPartial`) — crash-resume reconstructs
@@ -73,10 +78,10 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 > (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status), the M9
 > durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
 > work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
-> currently **`v0.20.0-alpha`** — so the command above is correct. Pinning the exact version
-> (`@v0.20.0-alpha`) is optional but recommended for reproducibility, and the API may change between
+> currently **`v0.21.0-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.21.0-alpha`) is optional but recommended for reproducibility, and the API may change between
 > alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) reads
-> `0.20.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
+> `0.21.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -555,7 +560,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.20.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.20.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.21.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.21.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap

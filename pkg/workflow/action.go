@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"time"
 )
 
@@ -167,6 +168,8 @@ type RetryableAction struct {
 	delay      time.Duration
 	backoff    float64
 	retryIf    func(error) bool
+	maxDelay   time.Duration // backoff cap; 0 (default) = uncapped (pre-existing behavior)
+	jitter     float64       // 0..1 fraction of the delay to randomize; 0 (default) = no jitter (pre-existing behavior)
 }
 
 // NewRetryableAction creates a new retryable action.
@@ -189,9 +192,36 @@ func (r *RetryableAction) WithBackoff(factor float64) *RetryableAction {
 	return r
 }
 
-// WithRetryIf sets a predicate for which errors to retry
+// WithRetryIf sets a predicate for which errors to retry. This IS the non-retryable
+// classification: a predicate returning false for an error makes that error terminal —
+// exactly one attempt, no backoff loop (see Execute :226). Use it to mark permanent
+// failures (bad input, auth, not-found) as non-retryable while transient errors retry.
 func (r *RetryableAction) WithRetryIf(predicate func(error) bool) *RetryableAction {
 	r.retryIf = predicate
+	return r
+}
+
+// WithMaxDelay caps the exponential backoff delay. Once the computed delay reaches d it
+// stops growing (bounds a retry storm's per-attempt wait). d <= 0 (default) leaves the
+// backoff uncapped — byte-for-byte the pre-existing behavior for callers that never set it.
+func (r *RetryableAction) WithMaxDelay(d time.Duration) *RetryableAction {
+	r.maxDelay = d
+	return r
+}
+
+// WithJitter randomizes each backoff delay by up to fraction f (0..1) of its value, so
+// concurrent retriers de-correlate rather than thundering-herd. f is clamped to [0,1];
+// f == 0 (default) applies no jitter — byte-for-byte the pre-existing behavior. The
+// randomness is wall-clock timing ONLY: the retry OUTCOME is journaled via the result,
+// never the sleep duration, so this does not touch the determinism moat.
+func (r *RetryableAction) WithJitter(f float64) *RetryableAction {
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	r.jitter = f
 	return r
 }
 
@@ -230,6 +260,19 @@ func (r *RetryableAction) Execute(ctx context.Context, data *WorkflowData) error
 		// Wait before retry with exponential backoff
 		backoffMultiplier := math.Pow(r.backoff, float64(attempt))
 		delay := time.Duration(float64(r.delay) * backoffMultiplier)
+
+		// Cap the backoff (maxDelay==0 → uncapped, the pre-existing path).
+		if r.maxDelay > 0 && delay > r.maxDelay {
+			delay = r.maxDelay
+		}
+		// Apply jitter (jitter==0 → unchanged, the pre-existing path). Scale into
+		// [delay*(1-jitter), delay] so jitter only ever SHORTENS — never exceeds the cap
+		// above. math/rand/v2 is wall-clock timing only; the retry outcome is journaled
+		// via the result, not the sleep, so the determinism moat is untouched.
+		if r.jitter > 0 {
+			// nolint:gosec // G404: jitter is non-cryptographic backoff timing, not a security value.
+			delay = time.Duration(float64(delay) * (1 - r.jitter + r.jitter*rand.Float64()))
+		}
 
 		select {
 		case <-ctx.Done():

@@ -8,8 +8,12 @@ build: generate-fb
 	go build ./...
 
 # Run tests
+# -timeout 30m: the full -race suite is heavy; a rare intermittent full-run has
+# approached go's default 600s -timeout (F-VERIFY-P112-FLAKE — zero data race,
+# suite weight). The explicit 30m headroom keeps the release gate from stranding
+# on the aggregate timeout while staying a hard ceiling on a genuine hang.
 test: generate-fb
-	go test -race ./...
+	go test -race -timeout 30m ./...
 
 # Run property-based tests
 property-tests: generate-fb
@@ -17,7 +21,7 @@ property-tests: generate-fb
 
 # Run tests with coverage
 test-coverage: generate-fb
-	go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+	go test -race -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./...
 	go tool cover -html=coverage.txt -o coverage.html
 
 # Run tests with coverage for core packages only (excluding examples, benchmarks, and generated code)
@@ -29,7 +33,7 @@ test-coverage-focused: generate-fb
 codecov-coverage: generate-fb
 	@echo "Generating coverage report for codecov..."
 	@# Run tests for all packages
-	@go test -race ./...
+	@go test -race -timeout 30m ./...
 	@# Generate coverage report for relevant packages only
 	@go test -race -coverprofile=coverage.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
 	@echo "Coverage report generated at coverage.txt"

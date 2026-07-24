@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // Reconvergence validator (M11 phase 42, D-P42-STRICT). Only STRUCTURED,
@@ -161,8 +162,19 @@ func validateReconvergence(dag *DAG) error {
 		// same ChoiceNode (that is an implicit OR-join — it must be a MergeNode).
 		for choiceName, entries := range byChoice {
 			if len(entries) > 1 {
-				return fmt.Errorf("%w: node %q reconverges %d branches of ChoiceNode %q (use AddMerge)",
-					ErrUnstructuredMerge, n.Name, len(entries), choiceName)
+				// Name the offending branch entries (the colliding reconvergence
+				// points), sorted for a deterministic message, so the operator sees
+				// exactly which dependencies to fix — not just how many (F-PG-06).
+				// "branch entries" is precise for both a direct and a transitive
+				// reconvergence (the entry is the nearest-branch node, not necessarily
+				// a literal DependsOn name up a transitive chain — review F-114-01).
+				offending := make([]string, 0, len(entries))
+				for e := range entries {
+					offending = append(offending, e)
+				}
+				sort.Strings(offending)
+				return fmt.Errorf("%w: node %q reconverges %d branches of ChoiceNode %q via branch entries %v (use AddMerge to OR-join them)",
+					ErrUnstructuredMerge, n.Name, len(entries), choiceName, offending)
 			}
 		}
 	}

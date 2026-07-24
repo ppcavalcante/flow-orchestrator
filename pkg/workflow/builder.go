@@ -120,6 +120,24 @@ func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder
 	return node
 }
 
+// AddWaitForSignalTimeout adds a declared first-of(signal, timer) node (M22 ph113):
+// when reached it parks the run (Waiting) until EITHER the named signal is delivered to
+// the durable mailbox OR the timeout deadline passes — exactly one wins. The deadline is
+// an ABSOLUTE instant frozen at first encounter, so it is durable-remaining across a
+// crash/restart (not reset). On a same-encounter tie (signal present AND deadline
+// passed) the SIGNAL wins. The timeout arm sets a disposition key (timedOutKey(name))
+// so a downstream M11 ChoiceNode can branch signal-vs-timeout into separate subgraphs.
+// Requires a Store implementing SignalStore (else ErrWaitRequiresSignalStore at run
+// time). Returns a NodeBuilder for dependency wiring; the action is set directly, so do
+// NOT also call WithAction (that would replace it and hide the park). This is a wholly
+// separate mechanism from the non-durable WithTimeout (an exec-deadline on an ordinary
+// node) — a park bypasses WithTimeout entirely.
+func (b *WorkflowBuilder) AddWaitForSignalTimeout(name, signalName string, timeout time.Duration) *NodeBuilder {
+	node := b.AddNode(name)
+	node.action = &waitForSignalOrTimeoutAction{nodeName: name, signalName: signalName, duration: timeout}
+	return node
+}
+
 // AddSubWorkflow adds a declared sub-workflow node (M19 ph91): when reached it spawns and
 // awaits the definition-value child DAG IN-PROCESS under a deterministic child ID
 // (f(parentID, name)) with the child's own journal — parent and child are DISTINCT
@@ -247,6 +265,13 @@ func (b *WorkflowBuilder) AddSubWorkflowQueued(name, childType string) *NodeBuil
 func (b *WorkflowBuilder) AddApproval(name string) *NodeBuilder {
 	node := b.AddNode(name)
 	node.action = &approvalAction{nodeName: name, signalName: name}
+	if name == "" {
+		// An approval node's decision signal name is derived 1:1 from its node name
+		// (so ApproveSignal/RejectSignal cannot drift). A bare "" name is a silent
+		// footgun — the node builds but can never be satisfied (no host can target
+		// the empty decision signal). Fail loud + actionable at Build instead.
+		node.actionErr = fmt.Errorf("%w: AddApproval requires a non-empty name (it IS the decision signal name — deliver the decision with ApproveSignal(name)/RejectSignal(name))", ErrValidation)
+	}
 	return node
 }
 
