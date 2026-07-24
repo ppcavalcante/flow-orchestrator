@@ -35,6 +35,13 @@ type DAG struct {
 	// or DAG.WithExecutionConfig.
 	config ExecutionConfig
 
+	// hasFanOut is true iff any node's action is a *fanOutAction (M21). Precomputed
+	// at AddNode so DAG.Execute can GATE the withMaxConcurrency ctx-wrap on it: a
+	// workflow with no fan-out node pays ZERO — no per-drive context.WithValue alloc
+	// on the universal hot path (the det-tax moat). The wrap is only needed so a
+	// fan-out node reads its own MaxConcurrency bound from ctx.
+	hasFanOut bool
+
 	// mu protects concurrent access to the DAG
 	mu sync.RWMutex
 }
@@ -90,6 +97,11 @@ func (d *DAG) AddNode(node *Node) error {
 	}
 
 	d.Nodes[node.Name] = node
+	// Precompute the fan-out flag (M21 det-tax gate): so DAG.Execute wraps the ctx with the MaxConcurrency seam
+	// ONLY for a DAG that actually contains a fan-out node — a non-fan-out workflow pays zero on the hot path.
+	if _, ok := node.Action.(*fanOutAction); ok {
+		d.hasFanOut = true
+	}
 	return nil
 }
 
@@ -410,11 +422,16 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 		}
 	}
 
-	// M21 ph105: inject the per-level concurrency bound onto the ctx a node's Execute receives ONCE per drive
-	// (not per level — the value is constant across levels, so a per-iteration context.WithValue would allocate on
-	// the hot path). A node that runs its OWN bounded pool (a fan-out) reads the same MaxConcurrency the level
-	// executor uses. Additive: non-fan-out nodes never read it, so their behavior is byte-identical.
-	levelCtx := withMaxConcurrency(ctx, d.config.MaxConcurrency)
+	// M21 ph105 (GATED, det-tax fix): inject the per-level concurrency bound onto the ctx a fan-out node's Execute
+	// reads its OWN pool bound from — but ONLY when the DAG actually contains a fan-out node (d.hasFanOut,
+	// precomputed at AddNode). A workflow with NO fan-out pays ZERO: no per-drive context.WithValue alloc on the
+	// universal hot path (the earlier UNCONDITIONAL wrap added +1 alloc/drive on every workflow → breached the
+	// det-tax ceiling on amd64; a non-fan-out drive is now genuinely byte-identical to pre-M21). Set ONCE per drive
+	// (constant across levels), never per-level.
+	levelCtx := ctx
+	if d.hasFanOut {
+		levelCtx = withMaxConcurrency(ctx, d.config.MaxConcurrency)
+	}
 
 	// Execute each level in sequence
 	for levelIndex, level := range levels {
