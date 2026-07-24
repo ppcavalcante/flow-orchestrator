@@ -58,7 +58,8 @@ keeps full int64 range.
 ### Result typing — `WithResults` writes typed, indexed, in discovery order
 
 ```go
-.WithResults(baseKey, branchKey)
+b.AddFanOut("rows", expander, branchAction).
+    WithResults(baseKey, branchKey)
 ```
 
 Each branch's `branchKey` DATA value (a scalar the branch action `Set`s) is written into parent data under
@@ -74,7 +75,8 @@ r0, _    := parent.Get("row-results[0]")        // typed result for branch 0
 ### Width cap — `WithMaxWidth` (default 1024)
 
 ```go
-.WithMaxWidth(500) // non-positive restores the default DefaultFanOutMaxWidth (1024)
+b.AddFanOut("rows", expander, branchAction).
+    WithMaxWidth(500) // non-positive restores the default DefaultFanOutMaxWidth (1024)
 ```
 
 A resolved N exceeding the cap → loud `ErrFanOutMaxWidth`. Enforced **after** the expander resolves N but
@@ -92,7 +94,7 @@ side effect, not the cause).
 node **Completes** even with k failures, exposing a partition:
 
 ```go
-.WithCollectPartial()
+b.AddFanOut("rows", expander, branchAction).WithCollectPartial()
 // after the run:
 count,  _ := parent.Get("row-results.__count__")  // = N
 failed, _ := parent.Get("row-results.__failed__") // JSON string, e.g. "[2,5]" — the failed branch indices
