@@ -29,11 +29,15 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.19.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.20.0-alpha
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release and there is
-> **no stable (`v1`+) release**. The latest is **`v0.19.0-alpha`** (M20 — Scheduling + Concurrency
+> **no stable (`v1`+) release**. The latest is **`v0.20.0-alpha`** (M21 — Dynamic Fan-out: map a
+> branch action over `N` runtime-discovered items → `N` parallel branches as one ordinary DAG node
+> (`AddFanOut` + `WithResults` / `WithMaxWidth` / `WithCollectPartial`), crash-resume with zero
+> re-expansion on any `Checkpointer`, the static-DAG executor 0-diff, machine-checked (TLA+ + a
+> genuine 2-proc kill-9 + gopter) — built on M20 — Scheduling + Concurrency
 > Caps: opt-in durable cron / interval / one-shot schedules fired by an in-process poller + cross-
 > process concurrency caps (“at most K of type X running”), hand-rolled cron with zero new dependency
 > — built on M19 — Composition: opt-in
@@ -51,11 +55,11 @@ require github.com/ppcavalcante/flow-orchestrator v0.19.0-alpha
 > wait-for-signal/condition, the `Waiting` status), and the M9 crash-resume core, all with no
 > determinism tax).
 > Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.19.0-alpha`** — so the command above is
+> resolves to the highest pre-release — currently **`v0.20.0-alpha`** — so the command above is
 > correct. Pinning the exact version
-> (`go get github.com/ppcavalcante/flow-orchestrator@v0.19.0-alpha`) is optional but recommended
+> (`go get github.com/ppcavalcante/flow-orchestrator@v0.20.0-alpha`) is optional but recommended
 > for reproducibility, and the API may change between alpha minors. The in-code version
-> (`pkg/workflow.Version`) reads `0.19.0-alpha`. See
+> (`pkg/workflow.Version`) reads `0.20.0-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH
@@ -182,7 +186,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.19.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.20.0-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

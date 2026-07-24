@@ -410,6 +410,12 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 		}
 	}
 
+	// M21 ph105: inject the per-level concurrency bound onto the ctx a node's Execute receives ONCE per drive
+	// (not per level — the value is constant across levels, so a per-iteration context.WithValue would allocate on
+	// the hot path). A node that runs its OWN bounded pool (a fan-out) reads the same MaxConcurrency the level
+	// executor uses. Additive: non-fan-out nodes never read it, so their behavior is byte-identical.
+	levelCtx := withMaxConcurrency(ctx, d.config.MaxConcurrency)
+
 	// Execute each level in sequence
 	for levelIndex, level := range levels {
 		// Stop scheduling further levels if the context has been cancelled or
@@ -436,8 +442,9 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 		// per-level concurrency limit. Fail-fast (non-continue-on-error)
 		// failures are returned; when several fail concurrently they are ALL
 		// captured (not just the first). Continue-on-error failures are tolerated
-		// and never returned here (observable via node status).
-		levelFailures, parkedNodes := executeNodesInLevel(ctx, level, data, d.config.MaxConcurrency, tracer)
+		// and never returned here (observable via node status). levelCtx carries the
+		// per-level concurrency bound for a fan-out node's own pool (set once above).
+		levelFailures, parkedNodes := executeNodesInLevel(levelCtx, level, data, d.config.MaxConcurrency, tracer)
 
 		// Cancellation ALWAYS wins (DEC-CHUNK6, FORK 1 = a). If the context was
 		// cancelled or timed out, return the wrapped ctx error regardless of

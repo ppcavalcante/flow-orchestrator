@@ -62,3 +62,27 @@ func syncFrom(ctx context.Context) func() error {
 	}
 	return nil
 }
+
+// maxConcurrencyCtxKey carries the per-drive per-level concurrency limit (M21 ph105). The level executor already
+// builds its semaphore from ExecutionConfig.MaxConcurrency (parallel_execution.go:82), but that value never flowed
+// INTO a node's ctx — so a node that runs its OWN bounded pool (a fan-out) had no way to read the same bound. The
+// executor now injects it once per drive (dag.go, wrapping the ctx handed to executeNodesInLevel) on the SAME ctx
+// the node's Execute already receives. Carried on ctx for the same concurrency-safety reason as the checkpoint
+// callback (each drive has its own ctx-scoped value). Purely additive: a node that never reads it is unaffected.
+type maxConcurrencyCtxKey struct{}
+
+// withMaxConcurrency returns a child context carrying n as the per-level concurrency limit.
+func withMaxConcurrency(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, maxConcurrencyCtxKey{}, n)
+}
+
+// maxConcurrencyFrom extracts the injected per-level concurrency limit, returning 0 when none was injected. 0 (and
+// any non-positive value) is the caller's signal to coerce to DefaultMaxConcurrency — identical to the
+// executor's own <=0 coercion (parallel_execution.go:79-81), so a fan-out driven outside the wired executor still
+// gets a sane bounded pool rather than an unbounded one.
+func maxConcurrencyFrom(ctx context.Context) int {
+	if n, ok := ctx.Value(maxConcurrencyCtxKey{}).(int); ok {
+		return n
+	}
+	return 0
+}

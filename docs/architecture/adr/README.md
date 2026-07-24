@@ -65,6 +65,7 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 | [0017](0017-cancel-of-running-workflow.md) | Cancel-of-running — a durable intent flag, cooperative delivery, and reclaim-terminalizes | Accepted | M18 |
 | [0018](0018-sub-workflow-composition-and-approvals.md) | Sub-workflow composition & approvals — a phased-hybrid exec-model, completion-signal WAKE, and the SQLite signal mailbox | Accepted | M19 |
 | [0019](0019-scheduling-and-concurrency-caps.md) | Scheduling + concurrency caps — in-txn re-check as the no-double-fire arbiter, COUNT-in-txn as the cap arbiter, parked-exempt, one-shot RETAIN | Accepted | M20 |
+| [0020](0020-dynamic-fan-out.md) | Dynamic fan-out — one journaled node that expands once and drives N MaxConcurrency-bounded branches; expansion-once as the no-replay leg, `json.Number` item fidelity, FailFast vs CollectPartial | Accepted | M21 |
 
 ## How to Create a New ADR
 

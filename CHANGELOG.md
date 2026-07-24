@@ -5,6 +5,49 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0-alpha] — 2026-07-24
+
+**M21 — Dynamic Fan-out.** Map a branch action over **N items discovered at runtime** → **N
+parallel branches**, expressed as **one ordinary DAG node** (`AddFanOut`) whose `Execute` resolves
+and **journals the expansion exactly once**, then drives its own `MaxConcurrency`-bounded goroutine
+pool. On crash-resume the node **reconstructs the exact same N branches from the journal with zero
+re-expansion** — **no determinism/replay tax**, on **any `Checkpointer`** (in-memory / JSON /
+SQLite). The static-DAG executor is **0-diff** (`Execute`, `parallel_execution.go`, and
+`workflow.go` are byte-unchanged — the moat holds: N lives inside the node, never in the graph). The
+core no-replay-crash-resume claim is **machine-checked three ways**: TLA+ (`ExactlyNSpawn` +
+`FanInWaitsForAll`, bite-proven) + a **genuine 2-process kill-9** crash test + a **gopter** property
+arm. See [ADR-0020](docs/architecture/adr/0020-dynamic-fan-out.md) and the
+[fan-out guide](docs/guides/fanout.md).
+
+**Added (all additive; requires a `Checkpointer` store):**
+- **`AddFanOut(name, expander, branchAction)`** — declares a fan-out node. The `expander` returns
+  the runtime item slice (resolved + journaled once under a reserved `__fanout_items__:<node>` key);
+  each branch runs `branchAction` with its item injected under the reserved `FanOutItemKey`
+  (`"__fanout_item__"`), read via `data.Get(FanOutItemKey)`. Items are JSON-decoded with
+  `UseNumber()`, so `int64` values above 2^53 keep full fidelity.
+- **`.WithResults(baseKey, branchResultKey)`** — aggregates each branch's result into indexed parent
+  keys `baseKey[i]` in **discovery order**, plus `baseKey.__count__`.
+- **`.WithMaxWidth(n)`** — overrides the default width cap (`DefaultFanOutMaxWidth = 1024`); an
+  expander exceeding the cap fails **loud and early** with `ErrFanOutMaxWidth`, before any branch is
+  materialized (an expansion-DoS bound).
+- **`.WithCollectPartial()`** — opt-in: instead of FailFast (any branch failure fails the node and
+  cancels siblings), all N branches run and the node **Completes with a partition** — `baseKey[i]`
+  successes + `baseKey.__failed__` (a store-uniform JSON index list) + `baseKey.__count__`; a
+  contained partial failure does **not** trigger M12 saga compensation.
+- New sentinels: `ErrFanOutRequiresCheckpointer`, `ErrFanOutMaxWidth`, `ErrFanOutResultKeyCollision`.
+
+**Guarantees / invariants:**
+- **Expansion-once** — the item set is journaled before the branch loop; a resumed or re-driven
+  fan-out reads the journal instead of re-calling the expander, so N never drifts. Journal
+  corruption (non-string, malformed JSON, or a count/length mismatch) fails safe with
+  `ErrValidation` — never a wrong-N fan or a panic.
+- **External-cancel safety** — a parent-context cancellation mid-fan-out leaves the node
+  **non-terminal** (no durably-persisted poisoned partition), under both policies.
+- **Single-level** — nested fan-out is intentionally out of scope (a clean follow-on).
+
+**Unchanged:** `go.mod` / `go.sum` byte-identical (no new dependency); no new entry point or network
+surface; one-writer-per-workflow (M16 fencing) preserved.
+
 ## [0.19.0-alpha] — 2026-07-23
 
 **M20 — Scheduling + Concurrency Caps.** Two opt-in operational layers over the M16 fence +

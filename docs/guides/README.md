@@ -17,6 +17,7 @@ Welcome to the Flow Orchestrator Guides section. These guides provide in-depth i
 - [**Sub-workflows & Approvals**](./sub-workflows.md) - Composition: a node that spawns/awaits a child workflow, and the approval gate (M19)
 - [**Work Dispatch**](./dispatch.md) - Competing-consumers job queue over the multi-process SQLite store (M17)
 - [**Scheduling & Concurrency Caps**](./scheduling.md) - Cron/interval/one-shot schedules + "K of type X running at once" caps (M20)
+- [**Dynamic Fan-out**](./fanout.md) - Map a branch action over N runtime-discovered items → N parallel branches → fan-in (M21)
 - [**Error Handling**](./error-handling.md) - Strategies for handling errors in workflows
 - [**Benchmarks**](./benchmarks.md) - Performance benchmarks and analysis
 

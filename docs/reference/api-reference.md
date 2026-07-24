@@ -1079,6 +1079,43 @@ func (m *DispatchMetrics) MissedFires() int64                                   
 - **Missed runs** (poller down across slots): missed slots **coalesce into one fire**. `WithCatchupOnce`
   is reserved (no-op today, `==` the default).
 
+## Dynamic fan-out (added M21)
+
+Map a branch action over **N items discovered at run time** → N parallel branches → fan-in. A fan-out is a
+**single ordinary DAG node**; `Execute`/`dag.go` are byte-unchanged. Runs on any `Checkpointer` store. See
+[ADR-0020](../architecture/adr/0020-dynamic-fan-out.md) and the
+[Fan-out guide](../guides/fanout.md).
+
+```go
+// Declare the fan-out node. expander resolves N items ONCE (journaled); branchAction runs once per item.
+func (b *WorkflowBuilder) AddFanOut(name string, expander, branchAction) *NodeBuilder
+//   expander     func(ctx context.Context, parent *WorkflowData) ([]interface{}, error)
+//   branchAction Action — reads its item via data.Get(FanOutItemKey)
+
+// Node options (only valid on an AddFanOut node; else ErrValidation).
+func (n *NodeBuilder) WithResults(baseKey, branchKey string) *NodeBuilder // typed baseKey[i] + baseKey.__count__, discovery order
+func (n *NodeBuilder) WithMaxWidth(n int) *NodeBuilder                    // width cap; ≤0 → DefaultFanOutMaxWidth (1024)
+func (n *NodeBuilder) WithCollectPartial() *NodeBuilder                   // all N run; node Completes with a {succeeded, failed} partition
+
+const FanOutItemKey = "__fanout_item__" // the reserved key a branch reads its item from
+const DefaultFanOutMaxWidth = 1024      // default per-node width ceiling
+```
+
+- **Item typing:** the branch reads its item via `data.Get(FanOutItemKey)` decoded with `UseNumber()` — a
+  number arrives as **`json.Number`** (call `.Int64()`/`.Float64()`; full int64 range). A default decode
+  into `interface{}` yields `float64` and **corrupts an int64 item above 2^53**.
+- **Result typing (`WithResults`):** each branch's `branchKey` scalar is written TYPED under `baseKey[i]` in
+  **discovery order** (an int64 reloads as int64 on all three stores), plus `baseKey.__count__` = N.
+- **Fan-in — FailFast (default):** first branch failure fails the node + cancels in-flight/un-started
+  siblings.
+- **Fan-in — CollectPartial:** all N branches run; the node **Completes** even with k failures, exposing
+  `baseKey.__count__` = N, `baseKey.__failed__` = failed indices (JSON string), `baseKey[i]` = the typed
+  result for a succeeded i (absent for a failed i). Read a failed branch's child journal by its
+  deterministic ID for the error. A partial failure does **not** trigger a parent M12 compensation.
+- **Crash-resume:** the expander runs **exactly once** (journaled before branch 1); requires a
+  `Checkpointer` store (else `ErrFanOutRequiresCheckpointer`). **N=0** → empty aggregate; **N=1** → same path
+  as N>1. Single-level, single-process (cross-process fan-out deferred to M22).
+
 ## Node Status
 
 ```go
@@ -1350,6 +1387,24 @@ var ErrCronNoFire = fmt.Errorf("%w: cron spec has no fire time within the search
 All three are `ErrValidation`-wrapped. `CreateSchedule` / the poller / cross-process caps also return
 an `ErrValidation`-wrapped error when called on a **non-MP** store. See the
 [Scheduling guide](../guides/scheduling.md).
+
+### Fan-out domain (added M21)
+
+```go
+// ErrFanOutRequiresCheckpointer: a fan-out node ran on a store WITHOUT a durable Checkpointer.
+// Expansion-once needs a durable {N} to survive a crash, so this fails loud + early.
+var ErrFanOutRequiresCheckpointer = errors.New("fan-out cannot run: no durable checkpoint configured (use Workflow.Execute with a Checkpointer Store)")
+
+// ErrFanOutMaxWidth: the expander resolved more branches than WithMaxWidth (default 1024) allows —
+// the unbounded-N DoS guard, enforced after N resolves and before branch 1 (never a park/truncation).
+var ErrFanOutMaxWidth = errors.New("fan-out width exceeds the configured maximum")
+
+// ErrFanOutResultKeyCollision: a declared result key (baseKey, baseKey[i], or the count/failed key)
+// collides with a pre-existing foreign parent data key (loud, never last-writer-wins).
+var ErrFanOutResultKeyCollision = errors.New("fan-out declared result key collides with an existing parent data key")
+```
+
+See the [Fan-out guide](../guides/fanout.md).
 
 ### Saga / rollback domain (added v0.12.0)
 
