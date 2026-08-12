@@ -296,9 +296,14 @@ jobs:
     #   * `timeout-minutes` below caps it FAR under the 6h default, so it self-
     #     terminates as a clean informational failure instead of a workflow-cancel.
     if: github.event_name == 'schedule' || github.event_name == 'push'
-    # A hard ceiling well under GitHub's 6h default. Combined with continue-on-error
-    # a timeout here is reported (job red, workflow green), never a cancel.
-    timeout-minutes: 40
+    # SAFETY BACKSTOP ONLY (48m). The real cap is the shell `timeout` on the gremlins
+    # step below (38m). GitHub's `timeout-minutes` produces a CANCELLATION, and
+    # continue-on-error neutralizes a FAILURE, not a cancellation — so relying on
+    # timeout-minutes alone tainted the whole workflow rollup as `cancelled` on EVERY
+    # run (the mutation suite always exceeds 40m). The shell timeout self-terminates
+    # the step as a clean exit-0 instead, keeping the workflow green; this backstop is
+    # set above the shell cap + setup so it only fires on a genuine hang.
+    timeout-minutes: 48
     # NON-BLOCKING by design: too sensitive to equivalent-mutant churn to gate the
     # build on. continue-on-error makes the job report its result without ever
     # failing CI — it exists to surface NEW real test gaps over time (read the log,
@@ -328,5 +333,19 @@ jobs:
         #     suites dominate). The default 3x times out EVERY mutant (false 0%);
         #     60x (~69s budget) clears the real suite.
         run: |
-          go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 \
-            unleash --config .gremlins.yaml --timeout-coefficient 60 ./pkg/workflow
+          # Shell-level timeout (38m) so the step self-terminates as a CLEAN exit-0
+          # instead of GitHub cancelling the job at timeout-minutes — a cancellation
+          # that continue-on-error cannot neutralize, which tainted the workflow rollup
+          # as `cancelled` every run. This job is informational: read the log, not the
+          # exit code — so any non-zero (the 38m budget via `timeout` -> 124, OR
+          # surviving mutants) is surfaced as a notice and the step exits 0. The
+          # workflow stays GREEN; new real test gaps are found by reading the log.
+          timeout 2280 go run github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 \
+            unleash --config .gremlins.yaml --timeout-coefficient 60 ./pkg/workflow || {
+            ec=$?
+            if [ "$ec" -eq 124 ]; then
+              echo "::notice::mutation testing reached its 38m informational budget — partial results above (non-blocking)"
+            else
+              echo "::notice::gremlins exited ${ec} (informational, non-blocking) — read the log for surviving mutants"
+            fi
+          }

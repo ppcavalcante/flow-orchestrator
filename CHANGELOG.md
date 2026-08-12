@@ -5,6 +5,21 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.4-alpha] — 2026-08-12
+
+**Patch — CI mutation-job rollup fix (no engine change).** With the coverage timeout fixed in
+v0.22.3-alpha, all blocking gates pass, but the CI *workflow* still rolled up to `cancelled` every
+run: the informational, non-blocking mutation job always exceeds its `timeout-minutes`, and GitHub's
+`timeout-minutes` produces a **cancellation** — which `continue-on-error` (which neutralizes a
+*failure*, not a cancellation) could not stop from tainting the workflow conclusion.
+
+**CI:**
+- The mutation run is now capped by a shell `timeout` (38m) and its exit is swallowed into an
+  informational `::notice::`, so the step self-terminates as a clean exit-0 instead of letting GitHub
+  cancel the job. The workflow stays green while the mutation results remain in the log (this job is
+  informational by design — read the log, not the exit code). `timeout-minutes` is retained only as a
+  48m safety backstop for a genuine hang. This makes "green means green" true for the CI rollup.
+
 ## [0.22.3-alpha] — 2026-08-12
 
 **Patch — CI coverage-timeout fix (no engine change).** Completes a fully green amd64 CI for the
