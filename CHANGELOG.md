@@ -5,6 +5,22 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.2-alpha] — 2026-08-12
+
+**Patch — coverage-gate fix (no engine change).** Closes a pre-existing coverage regression M23
+opened, exposed once v0.22.1-alpha's CI ran every job to completion (v0.22.0's run aborted early on
+the det-tax failure). M23's audit deletion of `internal/workflow/memory/node_pool.go` removed a
+fully-covered file without recalibrating the coverage baseline, mechanically dropping the `memory`
+package from 91.7% to 89.7% — below the 90% floor. The uncovered code was genuine: `AppendBuffer`'s
+grow branch and `Put`'s nil/oversized edges. This is a test-only + baseline change; no library
+behavior is affected.
+
+**Tests:**
+- Added `TestAppendBuffer_GrowPath` / `TestAppendBuffer_GrowFromEmpty` (force the buffer-grow branch
+  that the existing test never reached — it appended only 43 bytes into a 64-byte buffer) and
+  `TestPut_NilAndOversized`. `internal/workflow/memory` is now at 100% coverage; its ratchet baseline
+  moves 91.7 → 100.0.
+
 ## [0.22.1-alpha] — 2026-08-12
 
 **Patch — det-tax gate root-cause fix.** No behavior change to the engine's public surface; a

@@ -44,7 +44,7 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.22.1-alpha`** (M23 — Sealed Graph + Complete
+> **no stable (`v1`+) release**. The latest is **`v0.22.2-alpha`** (M23 — Sealed Graph + Complete
 > Mediation: the Node/DAG/Workflow surface is **sealed** — post-Build mutators removed, internals
 > behind read accessors — with complete per-node action mediation via a sealed action view, a
 > structural `DefinitionDigest()` that rejects a changed graph on resume, engine-reserved keys a
@@ -86,8 +86,8 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 > (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status), the M9
 > durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
 > work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
-> currently **`v0.22.1-alpha`** — so the command above is correct. Pinning the exact version
-> (`@v0.22.1-alpha`) is optional but recommended for reproducibility, and the API may change between
+> currently **`v0.22.2-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.22.2-alpha`) is optional but recommended for reproducibility, and the API may change between
 > alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) on a
 > released tag matches that tag; on a development branch it is regenerated at release time and may
 > lag. See [CHANGELOG.md](CHANGELOG.md).
@@ -578,7 +578,7 @@ repo; `12-observability` is a separate module — run it with `cd examples/12-ob
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.22.1-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.22.1-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.22.2-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.22.2-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap
