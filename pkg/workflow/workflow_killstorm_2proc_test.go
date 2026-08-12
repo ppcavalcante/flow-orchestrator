@@ -36,10 +36,10 @@ const killStormType = "ks-chain"
 func ksRegistry() *Registry {
 	reg := NewRegistry()
 	_ = reg.Register(killStormType, func() (*DAG, error) { //nolint:errcheck // fixed valid registration
-		d := NewDAG(killStormType)
+		d := newDAGForTest(killStormType)
 		// n0 increments a durable side-effect counter (clause (d) — a KV incremented in the body).
 		// On a re-claim after a kill, n0 may re-run (body ≥1×) but the PERSISTED terminal is once.
-		if err := d.AddNode(NewNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+		if err := d.addNode(newNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 			prev := 0
 			if v, ok := data.Get("sidefx"); ok {
 				if n, ok := v.(int64); ok {
@@ -53,10 +53,10 @@ func ksRegistry() *Registry {
 		}))); err != nil {
 			return nil, err
 		}
-		if err := d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))); err != nil {
+		if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))); err != nil {
 			return nil, err
 		}
-		return d, d.AddDependency("n0", "n1")
+		return d, d.addDependency("n0", "n1")
 	})
 	return reg
 }

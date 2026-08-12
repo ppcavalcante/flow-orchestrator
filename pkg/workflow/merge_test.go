@@ -18,18 +18,18 @@ import (
 // the default action is a pass-through join (Completes, no user action).
 func TestMerge_Representation(t *testing.T) {
 	n := newMergeNode("done", []string{"a", "b"})
-	ma, ok := n.Action.(*mergeAction)
+	ma, ok := n.action.(*mergeAction)
 	require.True(t, ok, "a MergeNode's action is a *mergeAction (the OR-join marker)")
 	assert.Equal(t, []string{"a", "b"}, ma.tails)
 	assert.Nil(t, ma.userAction, "default is a pass-through join")
 	// Pass-through Execute Completes cleanly.
-	require.NoError(t, n.Action.Execute(context.Background(), NewWorkflowData("wf")))
+	require.NoError(t, n.action.Execute(context.Background(), NewWorkflowData("wf")))
 }
 
 // minimalChoiceMerge builds the smallest valid structured choice-merge:
 // seed -> route.When(pickX,"x").Otherwise("y"); done = merge.From("x","y"). The
 // merge optionally carries a user join action.
-func minimalChoiceMerge(t *testing.T, pickX bool, mergeAct interface{}) *DAG {
+func minimalChoiceMerge(t *testing.T, pickX bool, mergeAct func(ctx context.Context, data *WorkflowData) error) *DAG {
 	t.Helper()
 	wb := NewWorkflowBuilder().WithWorkflowID("mcm")
 	wb.AddStartNode("seed").WithAction(choiceNoop())
@@ -40,7 +40,7 @@ func minimalChoiceMerge(t *testing.T, pickX bool, mergeAct interface{}) *DAG {
 	wb.AddNode("y").WithAction(choiceNoop())
 	mb := wb.AddMerge("done").From("x", "y")
 	if mergeAct != nil {
-		mb.WithAction(mergeAct)
+		mb.WithActionFunc(mergeAct)
 	}
 	dag, err := wb.Build()
 	require.NoError(t, err)
@@ -54,8 +54,8 @@ func TestMerge_BuilderWiresTails(t *testing.T) {
 	node, ok := dag.GetNode("done")
 	require.True(t, ok)
 	depNames := map[string]bool{}
-	for _, d := range node.DependsOn {
-		depNames[d.Name] = true
+	for _, d := range node.dependsOn {
+		depNames[d.name] = true
 	}
 	assert.True(t, depNames["x"] && depNames["y"], "merge depends on both From tails")
 }
@@ -81,14 +81,10 @@ func TestMerge_WithAction(t *testing.T) {
 	require.NoError(t, dag.Execute(context.Background(), NewWorkflowData("mcm")))
 	assert.True(t, ran, "the supplied merge join action runs on fire")
 
-	// An unsupported action type is a Build error (caught at node creation, before
-	// reconvergence validation).
-	wbBad := NewWorkflowBuilder().WithWorkflowID("merge-bad")
-	wbBad.AddStartNode("a").WithAction(choiceNoop())
-	wbBad.AddMerge("done").From("a").WithAction(42) // unsupported type
-	_, err := wbBad.Build()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported merge action")
+	// AUD-041: an unsupported merge action type is now a COMPILE error —
+	// MergeBuilder.WithAction takes a typed Action (and WithActionFunc a typed func),
+	// so a mistyped value cannot reach Build at all. The former runtime "unsupported
+	// merge action" rejection is gone by construction.
 }
 
 // --- T2: strict reconvergence validator (D-P42-STRICT) ------------------------

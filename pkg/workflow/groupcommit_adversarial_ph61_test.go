@@ -300,7 +300,7 @@ func TestAdv_ph61_RealPark_DurableUnderBatched(t *testing.T) {
 	dag, err := b.Build()
 	require.NoError(t, err)
 
-	wf := &Workflow{DAG: dag, WorkflowID: "rp", Store: store}
+	wf := &Workflow{dag: dag, WorkflowID: "rp", Store: store}
 	require.ErrorIs(t, wf.Execute(context.Background()), ErrSuspended)
 
 	loaded, err := store.Load("rp")
@@ -361,7 +361,7 @@ func TestAdv_ph61_CompletionFloorAfterAllDeferred(t *testing.T) {
 	store, err := NewFlatBuffersStore(dir, WithDurabilityMode(Batched(10_000)))
 	require.NoError(t, err)
 	dag := buildLinearDAG(t, "cf", 50)
-	wf := &Workflow{DAG: dag, WorkflowID: "cf", Store: store}
+	wf := &Workflow{dag: dag, WorkflowID: "cf", Store: store}
 	require.NoError(t, wf.Execute(context.Background()))
 
 	loaded, err := store.Load("cf")
@@ -450,7 +450,7 @@ func TestAdv_ph61_BatchedCrashResume_ReRunsLostLevelsIdempotently(t *testing.T) 
 	// Workflow.Execute auto-loads the persisted state by WorkflowID and resumes. ---
 	store2, err := NewFlatBuffersStore(dir, WithDurabilityMode(Batched(k)))
 	require.NoError(t, err)
-	wf := &Workflow{DAG: buildCountingDAG(), WorkflowID: id, Store: store2}
+	wf := &Workflow{dag: buildCountingDAG(), WorkflowID: id, Store: store2}
 	require.NoError(t, wf.Execute(context.Background()))
 
 	mu.Lock()
@@ -497,10 +497,10 @@ func TestAdv_ph61_SagaRollbackDurableUnderBatched(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("saga")
 	b.AddStartNode("a").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return nil })).
-		WithCompensation(func(context.Context, *WorkflowData) error { atomic.AddInt64(&comp, 1); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { atomic.AddInt64(&comp, 1); return nil })
 	b.AddNode("b").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return nil })).
-		WithCompensation(func(context.Context, *WorkflowData) error { atomic.AddInt64(&comp, 1); return nil }).
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { atomic.AddInt64(&comp, 1); return nil }).
 		DependsOn("a")
 	b.AddNode("boom").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
@@ -508,7 +508,7 @@ func TestAdv_ph61_SagaRollbackDurableUnderBatched(t *testing.T) {
 	dag, err := b.Build()
 	require.NoError(t, err)
 
-	wf := &Workflow{DAG: dag, WorkflowID: "saga", Store: store}
+	wf := &Workflow{dag: dag, WorkflowID: "saga", Store: store}
 	require.Error(t, wf.Execute(context.Background()), "the saga fails at 'boom'")
 	require.Equal(t, int64(2), atomic.LoadInt64(&comp), "a and b compensate")
 

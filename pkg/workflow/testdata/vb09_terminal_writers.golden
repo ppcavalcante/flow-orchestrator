@@ -1,0 +1,51 @@
+# VB-09 -- the golden set of non-test sites that write a terminal NodeStatus or a node
+# output OUTSIDE executeNodesInLevel.
+#
+# A MEMBER IS A CLAIM ABOUT THIS ENGINE'S COMPLETE-MEDIATION PROPERTY. Each line is a place
+# node state reaches a terminal value without passing the executor's mediation point. Some
+# are legitimate -- restoring a persisted run is one -- but every one of them is an
+# assertion that the executor is not the only writer, and a NEW one has to be argued.
+#
+# ADDING A LINE HERE IS NOT A FIX. It is a claim, and it belongs in a pull request with the
+# reason the new writer is sound. Removing a line is equally a claim: confirm the site was
+# removed rather than renamed or moved behind an indirection this AST deriver cannot follow.
+#
+# THIS FILE IS GENERATED BUT NEVER AUTO-UPDATED. It is regenerated only by a deliberate,
+# separately documented act; nothing in the failing path will offer to do it for you.
+#
+# FORMAT, one member per line, tab-separated, sorted byte-wise:
+#   <path>\t<enclosing symbol>\t<kind>\t<status>\t#<occurrence within that group>
+# There is NO LINE NUMBER in the key. A line-keyed golden reds on every unrelated edit above
+# a member; line and column appear only in the failure message, as a locator.
+# status "n/a" marks an output write; "indeterminate" marks a status argument the syntactic
+# deriver cannot decide -- included on purpose, never dropped.
+pkg/testutil/workflow.go	(*TestAction).ToAction	setoutput	n/a	#0
+pkg/testutil/workflow.go	CreateTestAction	setoutput	n/a	#0
+pkg/workflow/approval.go	(*approvalAction).Execute	setoutput	n/a	#0
+pkg/workflow/canonical.go	(*WorkflowData).canonicalizeForStore	fieldwrite	n/a	#0
+pkg/workflow/choice.go	(*choiceAction).bypassExcept	setnodestatus	bypassed	#0
+pkg/workflow/dag.go	markSkippedFrom	setnodestatus	indeterminate	#0
+pkg/workflow/node.go	(*Node).execute	setnodestatus	completed	#0
+pkg/workflow/node.go	(*Node).execute	setnodestatus	completed	#1
+pkg/workflow/node.go	(*Node).execute	setnodestatus	failed	#0
+pkg/workflow/node.go	(*Node).execute	setnodestatus	failed	#1
+pkg/workflow/node.go	(*Node).execute	setnodestatus	failed	#2
+pkg/workflow/saga_rollback.go	compensateLevel	setnodestatus	compensated	#0
+pkg/workflow/saga_rollback.go	compensateLevel	setnodestatus	compensationfailed	#0
+pkg/workflow/signal.go	(*waitForSignalAction).Execute	setoutput	n/a	#0
+pkg/workflow/signal_timeout.go	(*waitForSignalOrTimeoutAction).Execute	setoutput	n/a	#0
+pkg/workflow/signal_timeout.go	(*waitForSignalOrTimeoutAction).Execute	setoutput	n/a	#1
+pkg/workflow/workflow_data.go	(*WorkflowData).Clone	fieldwrite	indeterminate	#0
+pkg/workflow/workflow_data.go	(*WorkflowData).Clone	fieldwrite	n/a	#0
+pkg/workflow/workflow_data.go	(*WorkflowData).SetNodeStatus	fieldwrite	indeterminate	#0
+pkg/workflow/workflow_data.go	(*WorkflowData).SetNodeStatus	fieldwrite	indeterminate	#1
+pkg/workflow/workflow_data.go	(*WorkflowData).SetOutput	fieldwrite	n/a	#0
+pkg/workflow/workflow_data.go	(*WorkflowData).SetOutput	fieldwrite	n/a	#1
+pkg/workflow/workflow_data.go	(*WorkflowData).loadSnapshotInternal	fieldwrite	indeterminate	#0
+pkg/workflow/workflow_data.go	(*WorkflowData).loadSnapshotInternal	fieldwrite	indeterminate	#1
+pkg/workflow/workflow_data.go	(*WorkflowData).loadSnapshotInternal	fieldwrite	n/a	#0
+pkg/workflow/workflow_data.go	(*WorkflowData).loadSnapshotInternal	fieldwrite	n/a	#1
+pkg/workflow/workflow_store.go	(*FlatBuffersStore).Load	setnodestatus	indeterminate	#0
+pkg/workflow/workflow_store.go	(*FlatBuffersStore).Load	setoutput	n/a	#0
+pkg/workflow/workflow_store_sqlite_codec.go	scanNodes	setnodestatus	indeterminate	#0
+pkg/workflow/workflow_store_sqlite_codec.go	scanNodes	setoutput	n/a	#0

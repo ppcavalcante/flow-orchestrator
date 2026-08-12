@@ -122,13 +122,13 @@ func (a *waitForSignalAction) Execute(ctx context.Context, data *WorkflowData) e
 	return ErrSuspended
 }
 
-// NewWaitForSignalNode builds a declared WaitForSignalNode: when reached it parks
+// newWaitForSignalNode builds a declared WaitForSignalNode: when reached it parks
 // the run (Waiting) until a signal named signalName is delivered to the workflow's
 // mailbox, then applies the payload and converges. The action is set DIRECTLY (not
 // via the middleware stack) so the suspension marker stays visible to node.Execute
 // (middleware wrapping would hide it — chunk-1 forward constraint).
-func NewWaitForSignalNode(name, signalName string) *Node {
-	return NewNode(name, &waitForSignalAction{nodeName: name, signalName: signalName})
+func newWaitForSignalNode(name, signalName string) *Node {
+	return newNode(name, &waitForSignalAction{nodeName: name, signalName: signalName})
 }
 
 // waitForConditionAction is a declared suspension node (D37-08, "await"): it parks
@@ -152,12 +152,12 @@ func (a *waitForConditionAction) Execute(_ context.Context, data *WorkflowData) 
 	return ErrSuspended
 }
 
-// NewWaitForConditionNode builds a declared WaitForConditionNode: when reached it
+// newWaitForConditionNode builds a declared WaitForConditionNode: when reached it
 // parks the run while predicate(data) is false, re-evaluating on each wake, and
 // converges when it flips. Set directly (not via middleware) to keep the marker
 // visible (chunk-1 forward constraint).
-func NewWaitForConditionNode(name string, predicate func(*WorkflowData) bool) *Node {
-	return NewNode(name, &waitForConditionAction{predicate: predicate})
+func newWaitForConditionNode(name string, predicate func(*WorkflowData) bool) *Node {
+	return newNode(name, &waitForConditionAction{predicate: predicate})
 }
 
 // DeliverSignal durably enqueues sig to this workflow's mailbox (enqueue-only —

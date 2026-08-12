@@ -96,7 +96,8 @@ func NewOneshotSchedule(id, typ string, fireAt time.Time) (ScheduleSpec, error) 
 	return ScheduleSpec{ID: id, kind: schedOneshot, spec: "", targetType: typ, firstFire: fireAt}, nil
 }
 
-// WithCatchupOnce sets the catch-up-once missed-run policy (persisted as `missed_policy='catchup'`). RESERVED —
+// WithCatchupOnce sets the catch-up-once missed-run policy (persisted as `missed_policy='catchup'`).
+// RESERVED: (STABILITY.md marker — exported + durably accepted, but no distinct behaviour yet).
 // V-M20-01 / DEC-P103-CATCHUP-RESERVED: it is CURRENTLY IDENTICAL to the default skip-to-next. A due schedule
 // whose next-fire is far in the past coalesces ALL missed slots into a SINGLE fire on the next poll and jumps to
 // the first future slot, regardless of policy (advanceSchedule fires once + advances; the `policy` arg is not yet

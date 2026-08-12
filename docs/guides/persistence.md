@@ -46,6 +46,15 @@ store := workflow.NewInMemoryStore()
 
 **Best for**: Development, testing, ephemeral workflows
 
+> **Caution — the in-memory store accepts values the durable stores reject.** It holds
+> Go values directly and never serializes them, so it has no encoding constraints at
+> all: a signal payload that cannot be JSON-marshalled (a channel, a function) or that
+> nests deeper than `encoding/json`'s decoder limit is fine here and fails with
+> `ErrValidation` on the JSON, FlatBuffers and SQLite stores. A workflow developed and
+> tested entirely against `InMemoryStore` can therefore fail on first deploy against a
+> durable store, on a payload every test accepted. If you use it for tests, run at
+> least one pass against the store you deploy on.
+
 ### JSON File Store
 
 Persists as human-readable JSON files:
@@ -184,11 +193,15 @@ if err != nil {
     log.Fatalf("Failed to create store: %v", err)
 }
 
-// Create a workflow with the DAG and store
-wf := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "order-processing",
-    Store:      store,
+// THE IDIOM, once: if a workflow is DURABLE, its store goes on the BUILDER and you leave
+// via FromBuilder. Build() is for a bare, store-less *DAG and will REFUSE a
+// store-configured builder — a bare *DAG cannot carry a store, so Execute would run
+// silently non-durable, and that silent lie is what the refusal exists to prevent.
+builder.WithWorkflowID("order-processing").WithStore(store)
+
+wf, err := workflow.FromBuilder(builder)
+if err != nil {
+    log.Fatalf("Failed to build workflow: %v", err)
 }
 
 // Execute the workflow with persistence
@@ -211,14 +224,16 @@ func resumeWorkflow(workflowID string) error {
         return fmt.Errorf("no existing workflow state: %w", err)
     }
     
-    // Rebuild the workflow DAG (same structure as before)
-    dag := rebuildWorkflowDAG()
-    
-    // Create a workflow with the existing state
-    wf := &workflow.Workflow{
-        DAG:        dag,
-        WorkflowID: workflowID,
-        Store:      store,
+    // Rebuild the workflow definition (same structure as before). A *DAG is never
+    // reloaded from the store — the store holds the JOURNAL; the graph is code you
+    // re-declare. checkGraphIdentity reconciles the two by node identity on resume.
+    builder := rebuildWorkflowBuilder().
+        WithWorkflowID(workflowID).
+        WithStore(store)
+
+    wf, err := workflow.FromBuilder(builder)
+    if err != nil {
+        return err
     }
     
     // Resume the workflow
@@ -311,7 +326,7 @@ to a downstream system as an idempotency key and the downstream collapses the
 re-execution into one logical operation:
 
 ```go
-node := workflow.NewNode("charge-card", workflow.ActionFunc(
+b.AddNode("charge-card").WithAction(workflow.ActionFunc(
     func(ctx context.Context, data *workflow.WorkflowData) error {
         key := workflow.IdempotencyKey(data, "charge-card")
         // Pass key to the payment API as its idempotency key; on a resume
@@ -443,8 +458,9 @@ re-runs and either re-parks or converges.
 
 Requirements: suspension needs a `Checkpointer` store (otherwise
 `ErrSuspendRequiresCheckpointer`); wait-for-signal additionally needs a store that
-implements `SignalStore` (otherwise `ErrWaitRequiresSignalStore`). All three built-in
-stores satisfy both.
+implements `SignalStore` (otherwise `ErrWaitRequiresSignalStore`). All **four** built-in
+stores satisfy both — `InMemoryStore`, `JSONFileStore`, `FlatBuffersStore` and
+`SQLiteStore`.
 
 ### Durable timers (`AddTimer`)
 
@@ -509,7 +525,18 @@ The consuming node applies the payload **idempotently** and also exposes it as t
 node's output (readable by dependents via `data.GetOutput("await-approval")`).
 Consuming is ordered take → apply → `Completed` → checkpoint → **ack**, so a crash
 before the checkpoint re-runs the node and re-applies the same byte-identical write.
-Ack consumed signals promptly: a mailbox holds at most 2^20 un-acked entries.
+Ack consumed signals promptly: a mailbox holds at most 2^20 un-acked entries, and
+`DeliverSignal` refuses a delivery that would exceed the bound with `ErrValidation`.
+
+> **Platform limitation on the file-backed stores.** That write-side refusal is held across
+> concurrent deliveries by an advisory `flock(2)` on the mailbox directory — a unix-only
+> primitive. **On non-unix builds (including Windows) it is best-effort:** racing deliveries
+> can each see the same pre-count and all be admitted, pushing the mailbox above the bound.
+> The read still rejects an over-bound mailbox, so nothing is silently corrupted, but
+> recovery is out-of-band only (delete entry files under `<baseDir>/<workflowID>.signals/`)
+> because the cap is not configurable and `TakeSignals` — the only way to enumerate the IDs
+> `AckSignals` requires — is precisely the call that fails. `SQLiteStore` enforces its bound
+> inside a single SQL statement and is unaffected on every platform.
 
 ### Wait for a signal or a timeout (`AddWaitForSignalTimeout`) — durable first-of (M22)
 
@@ -571,12 +598,14 @@ Cross-*process* serialization for one `WorkflowID` remains the host's responsibi
 
 ## SQLite store details (decomposed, row-based)
 
-Added in **M15**, `SQLiteStore` is a third first-class `WorkflowStore` that stores the run
+Added in **M15**, `SQLiteStore` is the fourth first-class `WorkflowStore` and stores the run
 **decomposed into rows** rather than as one blob per file (the FB/JSON model). It is fully
 **additive** — it implements the same frozen `WorkflowStore` base, plus the optional
-`Checkpointer`, `Syncer`, and the two M15 optional interfaces below. (It does **not**
-implement `SignalStore`, so `WaitForSignal` needs one of the other stores — see
-[Durable continuations](#wait-for-a-signal-addwaitforsignal--human-in-the-loop).) Backed by
+`Checkpointer`, `Syncer`, `SignalStore` (since **M19**; the package carries the compile-time
+assertion `var _ SignalStore = (*SQLiteStore)(nil)`), and the two M15 optional interfaces
+below. **It is the store the queued sub-workflow path requires**, and it supports
+`WaitForSignal` — see
+[Durable continuations](#wait-for-a-signal-addwaitforsignal--human-in-the-loop). Backed by
 pure-Go `modernc.org/sqlite` (no cgo — `CGO_ENABLED=0` is preserved).
 
 ### Schema (per-node rows)
@@ -702,13 +731,10 @@ store, err := workflow.NewSQLiteStore("./shared.db",
 if err != nil { log.Fatal(err) }
 defer store.Close()
 
-dag, err := builder.Build() // ... your DAG ...
+builder.WithWorkflowID("order-123").
+    WithStore(store) // the SAME *SQLiteStore instance opened above
+wf, err := workflow.FromBuilder(builder)
 if err != nil { log.Fatal(err) }
-wf := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "order-123",
-    Store:      store, // the SAME *SQLiteStore instance opened above
-}
 wf.WithMultiProcessLocker("worker-" + hostID) // claim/fence this workflow for this owner
 
 err = wf.Execute(ctx)

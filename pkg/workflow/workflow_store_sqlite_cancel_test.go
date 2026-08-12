@@ -112,8 +112,8 @@ func TestPostReclaimReRead_CancelBeforeExecute(t *testing.T) {
 	ctr := newRunCounter()
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("T", func() (*DAG, error) {
-		d := NewDAG("T")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n0"); return nil })))
+		d := newDAGForTest("T")
+		return d, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n0"); return nil })))
 	}))
 	_, err := s.Enqueue("wf", "T", nil)
 	require.NoError(t, err)
@@ -155,9 +155,9 @@ func TestCtxWatcher_CancelTerminalizesNotResumes(t *testing.T) {
 	n0Entered := make(chan struct{})
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("chain", func() (*DAG, error) {
-		d := NewDAG("chain")
+		d := newDAGForTest("chain")
 		// n0: signal entry, then block until the ctx is cancelled (models a long-running node at level 0).
-		if err := d.AddNode(NewNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
+		if err := d.addNode(newNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
 			ctr.inc("n0")
 			close(n0Entered)
 			<-ctx.Done() // block until cancel → return the ctx error (a well-behaved node)
@@ -166,10 +166,10 @@ func TestCtxWatcher_CancelTerminalizesNotResumes(t *testing.T) {
 			return nil, err
 		}
 		// n1 at level 1 — must NEVER run (cancel stops progression at the level barrier after n0).
-		if err := d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
+		if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
 			return nil, err
 		}
-		return d, d.AddDependency("n0", "n1")
+		return d, d.addDependency("n0", "n1")
 	}))
 	_, err := s.Enqueue("wf", "chain", nil)
 	require.NoError(t, err)

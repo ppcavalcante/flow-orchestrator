@@ -29,11 +29,21 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.21.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.22.0-alpha
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release and there is
-> **no stable (`v1`+) release**. The latest is **`v0.21.0-alpha`** (M21 — Dynamic Fan-out: map a
+> **no stable (`v1`+) release**. The latest is **`v0.22.0-alpha`** (M23 — Sealed Graph + Complete
+> Mediation: a **sealed** Node/DAG/Workflow surface, complete per-node action mediation, a structural
+> definition digest that rejects a changed graph on resume, engine-reserved keys, a build-time
+> `WithBoundary` verifier-dominance check, and a store-only approval nonce — an independent-audit
+> hardening pass, all **additive/defensive**, executor **0-diff** for valid graphs — built on
+> **`v0.21.0-alpha`** (M22 — Production Hardening:
+> envelope + ergonomics hardening off a whole-surface proving-ground pass, all **additive** — a
+> bounded fan-out worker pool (`min(N, cap)` goroutines, not one per item), per-branch fan-out retry
+> (`WithBranchRetries`), capped backoff + jitter on `RetryableAction` (`WithMaxDelay` / `WithJitter`),
+> and a durable first-of(signal, timer) via `AddWaitForSignalTimeout`) — built on **`v0.20.0-alpha`**
+> (M21 — Dynamic Fan-out: map a
 > branch action over `N` runtime-discovered items → `N` parallel branches as one ordinary DAG node
 > (`AddFanOut` + `WithResults` / `WithMaxWidth` / `WithCollectPartial`), crash-resume with zero
 > re-expansion on any `Checkpointer`, the static-DAG executor 0-diff, machine-checked (TLA+ + a
@@ -55,11 +65,11 @@ require github.com/ppcavalcante/flow-orchestrator v0.21.0-alpha
 > wait-for-signal/condition, the `Waiting` status), and the M9 crash-resume core, all with no
 > determinism tax).
 > Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.21.0-alpha`** — so the command above is
+> resolves to the highest pre-release — currently **`v0.22.0-alpha`** — so the command above is
 > correct. Pinning the exact version
-> (`go get github.com/ppcavalcante/flow-orchestrator@v0.21.0-alpha`) is optional but recommended
+> (`go get github.com/ppcavalcante/flow-orchestrator@v0.22.0-alpha`) is optional but recommended
 > for reproducibility, and the API may change between alpha minors. The in-code version
-> (`pkg/workflow.Version`) reads `0.21.0-alpha`. See
+> (`pkg/workflow.Version`) reads `0.22.0-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH
@@ -186,7 +196,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.21.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.22.0-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

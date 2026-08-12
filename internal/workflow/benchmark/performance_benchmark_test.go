@@ -27,7 +27,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 					for i := 0; i < b.N; i++ {
 						b.StopTimer()
 						// Create a DAG with independent nodes for maximum parallelism
-						dag := workflow.NewDAG(fmt.Sprintf("parallel-bench-%d-%d", size, workers))
+						spec := newDAGSpec(fmt.Sprintf("parallel-bench-%d-%d", size, workers))
 
 						// Add independent nodes
 						for j := 0; j < size; j++ {
@@ -37,9 +37,10 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 								time.Sleep(100 * time.Microsecond)
 								return nil
 							})
-							node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-							mustAddNode(dag, node)
+							spec.node(fmt.Sprintf("node%d", j), action)
 						}
+
+						dag := spec.build()
 
 						data := workflow.NewWorkflowData("parallel-bench")
 
@@ -69,7 +70,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 					for i := 0; i < b.N; i++ {
 						b.StopTimer()
 						// Create a DAG with independent nodes for maximum parallelism
-						dag := workflow.NewDAG(fmt.Sprintf("parallel-bench-%d-%d", size, workers))
+						spec := newDAGSpec(fmt.Sprintf("parallel-bench-%d-%d", size, workers))
 
 						// Add independent nodes
 						for j := 0; j < size; j++ {
@@ -79,9 +80,10 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 								time.Sleep(100 * time.Microsecond)
 								return nil
 							})
-							node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-							mustAddNode(dag, node)
+							spec.node(fmt.Sprintf("node%d", j), action)
 						}
+
+						dag := spec.build()
 
 						data := workflow.NewWorkflowData("parallel-bench")
 
@@ -111,7 +113,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 					for i := 0; i < b.N; i++ {
 						b.StopTimer()
 						// Create a DAG with independent nodes for maximum parallelism
-						dag := workflow.NewDAG(fmt.Sprintf("parallel-bench-%d-%d", size, workers))
+						spec := newDAGSpec(fmt.Sprintf("parallel-bench-%d-%d", size, workers))
 
 						// Add independent nodes
 						for j := 0; j < size; j++ {
@@ -121,9 +123,10 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 								time.Sleep(100 * time.Microsecond)
 								return nil
 							})
-							node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-							mustAddNode(dag, node)
+							spec.node(fmt.Sprintf("node%d", j), action)
 						}
+
+						dag := spec.build()
 
 						data := workflow.NewWorkflowData("parallel-bench")
 
@@ -153,7 +156,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 			// Create DAG with nodes of varying durations
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				dag := workflow.NewDAG(fmt.Sprintf("mixed-duration-bench-%d", size))
+				spec := newDAGSpec(fmt.Sprintf("mixed-duration-bench-%d", size))
 
 				// Add nodes with varying durations
 				for j := 0; j < size; j++ {
@@ -164,9 +167,10 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						time.Sleep(duration)
 						return nil
 					})
-					node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-					mustAddNode(dag, node)
+					spec.node(fmt.Sprintf("node%d", j), action)
 				}
+
+				dag := spec.build()
 
 				data := workflow.NewWorkflowData("mixed-duration-bench")
 
@@ -195,7 +199,7 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				dag := workflow.NewDAG(fmt.Sprintf("mixed-duration-bench-%d", size))
+				spec := newDAGSpec(fmt.Sprintf("mixed-duration-bench-%d", size))
 
 				// Add nodes with varying durations
 				for j := 0; j < size; j++ {
@@ -206,9 +210,10 @@ func BenchmarkParallelExecutionPerformance(b *testing.B) {
 						time.Sleep(duration)
 						return nil
 					})
-					node := workflow.NewNode(fmt.Sprintf("node%d", j), action)
-					mustAddNode(dag, node)
+					spec.node(fmt.Sprintf("node%d", j), action)
 				}
+
+				dag := spec.build()
 
 				data := workflow.NewWorkflowData("mixed-duration-bench")
 
@@ -397,7 +402,7 @@ func benchmarkConcurrentWorkflowDataConfig(b *testing.B, size, workers int, conf
 
 // createRandomDAG creates a random DAG with the specified number of nodes and connection probability
 func createRandomDAG(size int, connectionProb float64) *workflow.DAG {
-	dag := workflow.NewDAG(fmt.Sprintf("random-dag-%d", size))
+	spec := newDAGSpec(fmt.Sprintf("random-dag-%d", size))
 
 	// Create nodes
 	for i := 0; i < size; i++ {
@@ -406,18 +411,17 @@ func createRandomDAG(size int, connectionProb float64) *workflow.DAG {
 			data.Set(fmt.Sprintf("key-%d", i), fmt.Sprintf("value-%d", i))
 			return nil
 		})
-		node := workflow.NewNode(fmt.Sprintf("node%d", i), action)
-		mustAddNode(dag, node)
+		spec.node(fmt.Sprintf("node%d", i), action)
 	}
 
 	// Add random dependencies
 	for i := 0; i < size; i++ {
 		for j := 0; j < i; j++ {
 			if rand.Float64() < connectionProb {
-				mustAddDep(dag, fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", j))
+				spec.dep(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", j))
 			}
 		}
 	}
 
-	return dag
+	return spec.build()
 }

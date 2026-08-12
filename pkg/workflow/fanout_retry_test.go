@@ -70,9 +70,9 @@ func TestBranchRetry_StormBounded(t *testing.T) {
 		})
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-retry-storm"
-	w.DAG = dag
+	w.dag = dag
 
 	start := time.Now()
 	err = w.Execute(context.Background())
@@ -104,9 +104,9 @@ func TestBranchRetry_NonRetryableExactlyOnce(t *testing.T) {
 		})
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-retry-nonretryable"
-	w.DAG = dag
+	w.dag = dag
 
 	start := time.Now()
 	err = w.Execute(context.Background())
@@ -143,9 +143,9 @@ func TestBranchRetry_PerBranchRedriveSiblingsUntouched(t *testing.T) {
 		WithBranchRetries(2, time.Millisecond)
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-retry-perbranch"
-	w.DAG = dag
+	w.dag = dag
 	require.NoError(t, w.Execute(context.Background()), "branch %d succeeds on retry → the run completes", failIdx)
 
 	require.Equal(t, int32(1), expanderCalls.Load(), "expander ran ONCE — no fan-out re-expansion on a branch retry")
@@ -205,9 +205,9 @@ func TestBranchRetry_FailFastCancelsInFlightBackoff(t *testing.T) {
 		})
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-retry-failfast"
-	w.DAG = dag
+	w.dag = dag
 
 	start := time.Now()
 	err = w.Execute(context.Background())
@@ -256,7 +256,7 @@ func TestBranchRetry_CrashMidRetry_ExactlyOncePersisted(t *testing.T) {
 
 	// Pre-seed sibling doneIdx's child as Completed under its DETERMINISTIC id (driveBranch's terminal-fast-path).
 	seedBranch := fanBranch(func(_ context.Context, idx int, _ interface{}) (interface{}, error) { return int64(idx * 10), nil })
-	childDone := &Workflow{DAG: seedBranch(doneIdx, doneIdx), WorkflowID: subFanOutChildID(parentID, "fan", doneIdx), Store: store}
+	childDone := &Workflow{dag: seedBranch(doneIdx, doneIdx), WorkflowID: FanOutChildID(parentID, "fan", doneIdx), Store: store}
 	require.NoError(t, childDone.Execute(context.Background()))
 
 	// Resume: counting expander (proves no re-expansion) + per-index counters + the crashed branch failing once.
@@ -273,9 +273,9 @@ func TestBranchRetry_CrashMidRetry_ExactlyOncePersisted(t *testing.T) {
 		WithBranchRetries(2, time.Millisecond)
 	dag, berr := b.Build()
 	require.NoError(t, berr)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = parentID
-	w.DAG = dag
+	w.dag = dag
 	require.NoError(t, w.Execute(context.Background()), "resume re-drives the crashed branch and the fan-out completes")
 
 	require.Equal(t, int32(0), expanderCalls.Load(), "expander NOT called on resume (journal read) — no re-expansion")
@@ -293,7 +293,7 @@ func TestBranchRetry_CrashMidRetry_ExactlyOncePersisted(t *testing.T) {
 	}
 
 	// EXACTLY-ONCE PERSISTENCE: the crashed branch's result lives under the SAME deterministic child-ID, once.
-	childID := subFanOutChildID(parentID, "fan", crashIdx)
+	childID := FanOutChildID(parentID, "fan", crashIdx)
 	childData, cerr := store.Load(childID)
 	require.NoError(t, cerr)
 	require.True(t, childUnambiguouslyComplete(childData), "crashed branch durably Complete under its deterministic child-id")

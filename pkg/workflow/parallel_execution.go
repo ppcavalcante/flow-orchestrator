@@ -82,10 +82,11 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 	semaphore := make(chan struct{}, maxConcurrency)
 
 	// Execute each node in this level in parallel
+launchLoop:
 	for _, node := range level {
 		// Skip nodes that already reached a terminal state (Completed by a prior
 		// pass, or Failed/Skipped — e.g. marked Skipped by the cross-level sweep).
-		if status, _ := data.GetNodeStatus(node.Name); isTerminalStatus(status) {
+		if status, _ := data.GetNodeStatus(node.name); isTerminalStatus(status) {
 			continue
 		}
 
@@ -104,8 +105,8 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 		//      (depResolved / isSkipCause), so launch and skip/bypass cannot drift.
 		role := dependentRole(node)
 		dependenciesComplete := true
-		for _, dep := range node.DependsOn {
-			depStatus, _ := data.GetNodeStatus(dep.Name)
+		for _, dep := range node.dependsOn {
+			depStatus, _ := data.GetNodeStatus(dep.name)
 			if depResolved(dep, depStatus, role) {
 				continue
 			}
@@ -120,7 +121,7 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 			// not-taken branch interior). assign=false means "not decidable yet"
 			// (a Pending/Running/Waiting dep) — leave the node for a later pass.
 			if status, assign := classifyBlockedStatus(node, data, role); assign {
-				data.SetNodeStatus(node.Name, status)
+				data.SetNodeStatus(node.name, status)
 			}
 			continue
 		}
@@ -137,17 +138,17 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 		// code-review 42-F1/adversarial 42-AF2). Zero taken (every join tail bypassed)
 		// -> the merge is itself Bypassed and never runs (composes downward, MH-2).
 		// Role-gated: AND nodes pay nothing.
-		if ma, isMerge := node.Action.(*mergeAction); isMerge { // == role==mergeDependent
+		if ma, isMerge := node.action.(*mergeAction); isMerge { // == role==mergeDependent
 			tailSet := make(map[string]bool, len(ma.tails))
 			for _, t := range ma.tails {
 				tailSet[t] = true
 			}
 			takenTails := 0
-			for _, dep := range node.DependsOn {
-				if !tailSet[dep.Name] {
+			for _, dep := range node.dependsOn {
+				if !tailSet[dep.name] {
 					continue // not a From join tail (Choice-dep or an extra DependsOn)
 				}
-				depStatus, _ := data.GetNodeStatus(dep.Name)
+				depStatus, _ := data.GetNodeStatus(dep.name)
 				// "taken" = the AND resolution (Completed || coe-Failed); a Bypassed
 				// tail is satisfied, not taken.
 				if depResolved(dep, depStatus, andDependent) {
@@ -155,9 +156,28 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 				}
 			}
 			if takenTails == 0 {
-				data.SetNodeStatus(node.Name, Bypassed)
+				data.SetNodeStatus(node.name, Bypassed)
 				continue
 			}
+		}
+
+		// Acquire a concurrency slot BEFORE spawning the goroutine (AUD-017/C-01).
+		// The pre-fix code spawned one goroutine per runnable node and acquired the
+		// semaphore INSIDE it, so a wide level created one PARKED goroutine per node
+		// (5,000 nodes -> ~5,000 goroutines) while only maxConcurrency actions ran —
+		// contradicting the DefaultMaxConcurrency contract, which names goroutine
+		// explosion as the thing it prevents. Acquiring here bounds the live
+		// goroutine count to maxConcurrency (+1 for this producer). The select keeps
+		// the launch loop cancellation-responsive: on fail-fast (levelCtx cancelled
+		// by a sibling failure) or caller cancellation we stop launching NEW nodes
+		// immediately and drain the ones already in flight at the barrier below.
+		// Nodes not launched stay non-terminal and are re-evaluated on the level
+		// loop's next pass (or the drive aborts on the recorded failure). A
+		// continue-on-error failure does NOT cancel, so it does not break the loop.
+		select {
+		case semaphore <- struct{}{}:
+		case <-levelCtx.Done():
+			break launchLoop
 		}
 
 		// Launch goroutine for node execution
@@ -165,8 +185,7 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 		go func(n *Node) {
 			defer wg.Done()
 
-			// Acquire semaphore
-			semaphore <- struct{}{}
+			// Release the concurrency slot acquired by the producer above.
 			defer func() { <-semaphore }()
 
 			// Open a span for this node, named after the node for a readable
@@ -176,18 +195,18 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 			// is off the tracer is noop and this is zero-cost. The span is a
 			// DAG-run construct (Node.Execute stays untraced when called
 			// standalone). (DEC-CHUNK5.)
-			spanCtx, span := tracer.Start(levelCtx, n.Name)
+			spanCtx, span := tracer.Start(levelCtx, n.name)
 			defer span.End()
 
 			// Execute the node with the (cancellable, span-carrying) context
-			err := n.Execute(spanCtx, data)
+			err := n.execute(spanCtx, data)
 
 			// Annotate the span from engine-controlled state only: the final
 			// node status and the configured retry count. On failure, record
 			// the action's own error (its contract) and set the span status to
 			// Error. No WorkflowData values/keys/paths are read into the span —
 			// the chunk-2 no-leak discipline extends to traces.
-			status, _ := data.GetNodeStatus(n.Name)
+			status, _ := data.GetNodeStatus(n.name)
 			span.SetAttributes(nodeSpanAttributes(n, status)...)
 
 			if err != nil {
@@ -198,12 +217,12 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 				// the checkpoint flush + ErrSuspended return. Checked before the
 				// span is marked Error — a park is a clean outcome, not an error.
 				if errors.Is(err, ErrSuspended) {
-					parkChan <- n.Name
+					parkChan <- n.name
 					return
 				}
 				span.RecordError(err)
 				span.SetStatus(codes.Error, "node execution failed")
-				if n.ContinueOnError {
+				if n.continueOnError {
 					// Continue-on-error: the node is already marked Failed by
 					// n.Execute. Do NOT cancel siblings and do NOT record a
 					// fail-fast failure — the workflow proceeds and dependents
@@ -215,7 +234,7 @@ func executeNodesInLevel(ctx context.Context, level []*Node, data *WorkflowData,
 				// node name for context) is carried as-is — no WorkflowData
 				// values or engine state are added here.
 				cancel()
-				failChan <- NodeError{NodeName: n.Name, Err: err}
+				failChan <- NodeError{NodeName: n.name, Err: err}
 			}
 		}(node)
 	}
@@ -254,7 +273,7 @@ const (
 // role is carried by the node's action type — a *mergeAction marks a MergeNode
 // (the marker survives even a user join action, see mergeAction). (M11 ph42.)
 func dependentRole(node *Node) depRole {
-	if _, isMerge := node.Action.(*mergeAction); isMerge {
+	if _, isMerge := node.action.(*mergeAction); isMerge {
 		return mergeDependent
 	}
 	return andDependent
@@ -270,7 +289,7 @@ func depResolved(dep *Node, depStatus NodeStatus, role depRole) bool {
 	if depStatus == Completed {
 		return true
 	}
-	if dep.ContinueOnError && depStatus == Failed {
+	if dep.continueOnError && depStatus == Failed {
 		return true
 	}
 	if role == mergeDependent {
@@ -318,8 +337,8 @@ func isSkipCause(depStatus NodeStatus) bool {
 //  4. any Bypassed dep                                      -> Bypassed  (pure not-taken branch interior)
 func classifyBlockedStatus(node *Node, data *WorkflowData, role depRole) (NodeStatus, bool) {
 	var sawFailCause, sawNonTerminal, sawBypassed, sawResolved bool
-	for _, dep := range node.DependsOn {
-		depStatus, _ := data.GetNodeStatus(dep.Name)
+	for _, dep := range node.dependsOn {
+		depStatus, _ := data.GetNodeStatus(dep.name)
 		switch {
 		case depResolved(dep, depStatus, role):
 			sawResolved = true // a taken path that ran (Completed or coe-Failed)

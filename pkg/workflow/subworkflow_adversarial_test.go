@@ -80,16 +80,14 @@ func TestSubWorkflow_ResultFidelity_ScalarShapes_AllStores(t *testing.T) {
 	}
 }
 
-// TestSubWorkflow_ResultFidelity_ComplexShapes_StoreProperty — F91-1, dispositioned as a
-// DOCUMENTED STORE PROPERTY (not a sub-workflow defect). A COMPLEX child result (map/slice/nil)
-// is NOT store-uniform: InMemory preserves the Go type, but FlatBuffers + SQLite serialize any
-// non-scalar to a JSON *string* on reload (workflow_store.go:655 `default: JSON string`;
-// workflow_store_sqlite_codec.go same). This is the SAME pre-existing, store-wide behavior that
-// governs EVERY complex data value — the store only type-columns the scalars (int64 via
-// value_long, plus string/bool/float) — NOT a sub-workflow-specific bug. applyResult's doc-
-// comment (SCOPE note) documents exactly this: a scalar result is backend-uniform; a complex
-// result follows the store's serialization. This test CHARACTERIZES the property so a future
-// reader (or a store-uniformity change) sees it explicitly.
+// TestSubWorkflow_ResultFidelity_ComplexShapes_StoreProperty — F91-1, now closed by AUD-026's
+// canonical cross-store value contract. A COMPLEX child result (map/slice/nil) is store-UNIFORM:
+// every store, including InMemory, reloads it as the SAME canonical JSON string. Previously
+// InMemory alone preserved the Go type while FlatBuffers + SQLite serialized any non-scalar to a
+// JSON string — the divergence AUD-026 eliminates by canonicalizing the two over-faithful stores
+// down to the honest common denominator (see canonical.go). A scalar result stays a typed value
+// on every store (TestSubWorkflow_ResultFidelity_ScalarShapes_AllStores); a complex result is now
+// uniformly a string rather than something a consumer could rely on being a map on InMemory only.
 func TestSubWorkflow_ResultFidelity_ComplexShapes_StoreProperty(t *testing.T) {
 	complexShapes := []struct {
 		name string
@@ -108,18 +106,21 @@ func TestSubWorkflow_ResultFidelity_ComplexShapes_StoreProperty(t *testing.T) {
 				perStore[sc.name] = got
 			}
 
-			// InMemory preserves the Go type.
-			assert.Equal(t, tc.val, perStore["InMemory"], "InMemory preserves the typed value")
-
-			// FlatBuffers + SQLite serialize a complex value to a string — the documented,
-			// store-wide property (not a sub-workflow bug). A scalar result would be uniform;
-			// see TestSubWorkflow_ResultFidelity_ScalarShapes_AllStores for the uniform case.
-			for _, serialized := range []string{"FlatBuffers", "SQLite"} {
-				_, isStr := perStore[serialized].(string)
+			// AUD-026: a complex result is now store-UNIFORM. Every store — INCLUDING
+			// InMemory — reloads it as the SAME canonical JSON string, so a sub-workflow
+			// tested on InMemory behaves identically in production on FB/SQLite. (Before
+			// AUD-026 InMemory alone preserved the Go type, which is the "passes on
+			// InMemory, differs in prod" trap the contract closes.)
+			for _, sname := range []string{"InMemory", "FlatBuffers", "SQLite"} {
+				_, isStr := perStore[sname].(string)
 				assert.True(t, isStr,
-					"%s serializes a complex %s result to a string (documented store property; declare a scalar result for backend-uniformity)",
-					serialized, tc.name)
+					"%s reloads a complex %s result as its canonical JSON string (uniform; declare a scalar result to keep a typed value)",
+					sname, tc.name)
 			}
+			assert.Equal(t, perStore["InMemory"], perStore["FlatBuffers"],
+				"every store agrees on the canonical form of a complex %s result", tc.name)
+			assert.Equal(t, perStore["InMemory"], perStore["SQLite"],
+				"every store agrees on the canonical form of a complex %s result", tc.name)
 		})
 	}
 }
@@ -136,9 +137,9 @@ func buildDiamond(t *testing.T, depth int, leaf *DAG) *DAG {
 	t.Helper()
 	level := leaf
 	for range depth {
-		d := NewDAG("diamond")
-		require.NoError(t, d.AddNode(NewNode("a", &subWorkflowAction{nodeName: "a", child: level})))
-		require.NoError(t, d.AddNode(NewNode("b", &subWorkflowAction{nodeName: "b", child: level})))
+		d := newDAGForTest("diamond")
+		require.NoError(t, d.addNode(newNode("a", &subWorkflowAction{nodeName: "a", child: level})))
+		require.NoError(t, d.addNode(newNode("b", &subWorkflowAction{nodeName: "b", child: level})))
 		level = d
 	}
 	return level
@@ -166,10 +167,10 @@ func TestSubWorkflow_ScanDiamond_TerminatesAndCatchesShared(t *testing.T) {
 // recursing to a stack overflow. Bite: removing the visited-set (a shallow scanChildInlineSafe)
 // makes this overflow the goroutine stack — a build-time DoS on an otherwise-legitimate graph.
 func TestSubWorkflow_ScanCycle_TerminatesNoOverflow(t *testing.T) {
-	a := NewDAG("cycle-a")
-	b := NewDAG("cycle-b")
-	require.NoError(t, a.AddNode(NewNode("toB", &subWorkflowAction{nodeName: "toB", child: b})))
-	require.NoError(t, b.AddNode(NewNode("toA", &subWorkflowAction{nodeName: "toA", child: a})))
+	a := newDAGForTest("cycle-a")
+	b := newDAGForTest("cycle-b")
+	require.NoError(t, a.addNode(newNode("toB", &subWorkflowAction{nodeName: "toB", child: b})))
+	require.NoError(t, b.addNode(newNode("toA", &subWorkflowAction{nodeName: "toA", child: a})))
 
 	// Must return (no stack overflow) — the visited-set breaks the cycle. Both nodes are
 	// non-suspendable, so a clean cyclic graph scans clean (nil); the point is TERMINATION.
@@ -189,8 +190,8 @@ func TestSubWorkflow_ScanCycle_TerminatesNoOverflow(t *testing.T) {
 func TestSubWorkflow_DeepNestedSuspendable_Refused(t *testing.T) {
 	deep := childWithSuspendable(t) // the suspendable lives at the bottom
 	for range 4 {
-		wrap := NewDAG("wrap")
-		require.NoError(t, wrap.AddNode(NewNode("down", &subWorkflowAction{nodeName: "down", child: deep})))
+		wrap := newDAGForTest("wrap")
+		require.NoError(t, wrap.addNode(newNode("down", &subWorkflowAction{nodeName: "down", child: deep})))
 		deep = wrap
 	}
 	pb := NewWorkflowBuilder().WithWorkflowID("wf-deep")
@@ -209,8 +210,8 @@ func TestSubWorkflow_DeepNestedSuspendable_Refused(t *testing.T) {
 // honesty guard as a backstop when the static scan is defeated.
 func TestSubWorkflow_MiddlewareHiddenSuspendable_FailsSafeNoHang(t *testing.T) {
 	// An ordinary ActionFunc (NOT a suspendableAction) that returns the park sentinel.
-	hidden := NewDAG("hidden")
-	require.NoError(t, hidden.AddNode(NewNode("fakepark", ActionFunc(func(context.Context, *WorkflowData) error {
+	hidden := newDAGForTest("hidden")
+	require.NoError(t, hidden.addNode(newNode("fakepark", ActionFunc(func(context.Context, *WorkflowData) error {
 		return ErrSuspended
 	}))))
 
@@ -220,9 +221,9 @@ func TestSubWorkflow_MiddlewareHiddenSuspendable_FailsSafeNoHang(t *testing.T) {
 	require.NoError(t, err, "a hidden (non-marker) suspend escapes the static scan by design")
 
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-hidden"
-	w.DAG = dag
+	w.dag = dag
 
 	done := make(chan error, 1)
 	go func() { done <- w.Execute(context.Background()) }()
@@ -269,7 +270,7 @@ func TestSubWorkflow_MultiNodeChild_GranularResume(t *testing.T) {
 	childDAG := twoNodeChild(t, &n1c, &n2c)
 
 	// Seed a partial child journal: n1 Completed (without running its action), n2 Pending.
-	childID := subWorkflowChildID("wf-resume", "sub")
+	childID := SubWorkflowChildID("wf-resume", "sub")
 	seed := NewWorkflowData(childID)
 	seed.SetNodeStatus("n1", Completed)
 	seed.SetNodeStatus("n2", Pending)
@@ -303,8 +304,8 @@ func TestSubWorkflow_MultiNodeChild_TerminalNoReRun(t *testing.T) {
 	childDAG := twoNodeChild(t, &n1c, &n2c)
 
 	// Pre-run the child to full completion under its deterministic ID (crash-before-parent).
-	childID := subWorkflowChildID("wf-mn-terminal", "sub")
-	seeded := &Workflow{DAG: childDAG, WorkflowID: childID, Store: store}
+	childID := SubWorkflowChildID("wf-mn-terminal", "sub")
+	seeded := &Workflow{dag: childDAG, WorkflowID: childID, Store: store}
 	require.NoError(t, seeded.Execute(context.Background()))
 	require.EqualValues(t, 1, n1c.Load())
 	require.EqualValues(t, 1, n2c.Load())
@@ -323,16 +324,16 @@ func TestSubWorkflow_MultiNodeChild_TerminalNoReRun(t *testing.T) {
 // length prefix disambiguates the (parentID, nodeName) split: ("ab","c") != ("a","bc").
 func TestSubWorkflow_DeterministicChildID_NoCollision(t *testing.T) {
 	// Same node name, different parents -> different IDs.
-	assert.NotEqual(t, subWorkflowChildID("parentA", "sub"), subWorkflowChildID("parentB", "sub"),
+	assert.NotEqual(t, SubWorkflowChildID("parentA", "sub"), SubWorkflowChildID("parentB", "sub"),
 		"distinct parents must not compute the same child ID")
 	// Same parent, different node names -> different IDs.
-	assert.NotEqual(t, subWorkflowChildID("p", "subX"), subWorkflowChildID("p", "subY"),
+	assert.NotEqual(t, SubWorkflowChildID("p", "subX"), SubWorkflowChildID("p", "subY"),
 		"distinct node names must not compute the same child ID")
 	// Framing: the (parentID, nodeName) split is unambiguous.
-	assert.NotEqual(t, subWorkflowChildID("ab", "c"), subWorkflowChildID("a", "bc"),
+	assert.NotEqual(t, SubWorkflowChildID("ab", "c"), SubWorkflowChildID("a", "bc"),
 		"the length-prefix framing must disambiguate the parentID/nodeName boundary")
 	// Determinism: the same inputs always yield the same ID (resume-stability).
-	assert.Equal(t, subWorkflowChildID("p", "sub"), subWorkflowChildID("p", "sub"),
+	assert.Equal(t, SubWorkflowChildID("p", "sub"), SubWorkflowChildID("p", "sub"),
 		"the same (parent, node) must always yield the same child ID")
 }
 
@@ -378,9 +379,9 @@ func TestSubWorkflow_ResultCollision_CrossValueLoud(t *testing.T) {
 	pb.AddSubWorkflow("sub", childProducing(t, int64(222), nil)).DependsOn("before").WithResult("result", "result")
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-xcollide"
-	w.DAG = dag
+	w.dag = dag
 
 	err = w.Execute(context.Background())
 	require.ErrorIs(t, err, ErrSubWorkflowResultKeyCollision, "a differing pre-existing value is a loud collision")

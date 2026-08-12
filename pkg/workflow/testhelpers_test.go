@@ -9,14 +9,14 @@ import "testing"
 // name; kept here because that package's are not importable from package workflow.
 func mustAddNode(t *testing.T, dag *DAG, node *Node) {
 	t.Helper()
-	if err := dag.AddNode(node); err != nil {
+	if err := dag.addNode(node); err != nil {
 		t.Fatalf("AddNode(%v): %v", node, err)
 	}
 }
 
 func mustAddDep(t *testing.T, dag *DAG, from, to string) {
 	t.Helper()
-	if err := dag.AddDependency(from, to); err != nil {
+	if err := dag.addDependency(from, to); err != nil {
 		t.Fatalf("AddDependency(%q,%q): %v", from, to, err)
 	}
 }

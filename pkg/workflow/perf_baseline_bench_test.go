@@ -20,9 +20,9 @@ func perfNoop(context.Context, *WorkflowData) error { return nil }
 // buildWide: one root fanning out to N parallel leaves (one wide level).
 func buildWide(n int) *DAG {
 	b := NewWorkflowBuilder().WithWorkflowID("wide")
-	b.AddStartNode("root").WithAction(perfNoop)
+	b.AddStartNode("root").WithActionFunc(perfNoop)
 	for i := 0; i < n; i++ {
-		b.AddNode(fmt.Sprintf("leaf-%d", i)).WithAction(perfNoop).DependsOn("root")
+		b.AddNode(fmt.Sprintf("leaf-%d", i)).WithActionFunc(perfNoop).DependsOn("root")
 	}
 	dag, err := b.Build()
 	if err != nil {
@@ -35,10 +35,10 @@ func buildWide(n int) *DAG {
 func buildDeep(n int) *DAG {
 	b := NewWorkflowBuilder().WithWorkflowID("deep")
 	prev := "n-0"
-	b.AddStartNode(prev).WithAction(perfNoop)
+	b.AddStartNode(prev).WithActionFunc(perfNoop)
 	for i := 1; i < n; i++ {
 		name := fmt.Sprintf("n-%d", i)
-		b.AddNode(name).WithAction(perfNoop).DependsOn(prev)
+		b.AddNode(name).WithActionFunc(perfNoop).DependsOn(prev)
 		prev = name
 	}
 	dag, err := b.Build()
@@ -64,10 +64,10 @@ func buildLargeData(payloadKB int) *DAG {
 	}
 	b := NewWorkflowBuilder().WithWorkflowID("large")
 	prev := "d-0"
-	b.AddStartNode(prev).WithAction(set(prev))
+	b.AddStartNode(prev).WithActionFunc(set(prev))
 	for i := 1; i < 10; i++ {
 		name := fmt.Sprintf("d-%d", i)
-		b.AddNode(name).WithAction(set(name)).DependsOn(prev)
+		b.AddNode(name).WithActionFunc(set(name)).DependsOn(prev)
 		prev = name
 	}
 	dag, err := b.Build()
@@ -104,7 +104,7 @@ func benchRun(b *testing.B, dag *DAG, store string) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wf := &Workflow{DAG: dag, WorkflowID: fmt.Sprintf("w%d", i), Store: newStore()}
+		wf := &Workflow{dag: dag, WorkflowID: fmt.Sprintf("w%d", i), Store: newStore()}
 		perfSink = wf.Execute(ctx)
 	}
 }

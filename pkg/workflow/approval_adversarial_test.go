@@ -212,7 +212,7 @@ func TestApproval_Adversarial_EndToEnd_AllThreeStores(t *testing.T) {
 			w := buildApprovalWorkflow(t, store, "wf-appr", &afterN)
 
 			require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
-			require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "alice", "ship it", "d1")))
+			require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "alice", "ship it", "d1", w.ApprovalNonce("gate"))))
 			require.NoError(t, w.Execute(context.Background()), "round-tripped approve resumes")
 
 			final, err := store.Load("wf-appr")
@@ -237,7 +237,7 @@ func TestApproval_Adversarial_EndToEnd_AllThreeStores(t *testing.T) {
 			w := buildApprovalWorkflow(t, store, "wf-rej", &afterN)
 
 			require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
-			require.NoError(t, w.DeliverSignal(RejectSignal("gate", "bob", "no budget", "d1")))
+			require.NoError(t, w.DeliverSignal(RejectSignal("gate", "bob", "no budget", "d1", w.ApprovalNonce("gate"))))
 
 			err := w.Execute(context.Background())
 			require.Error(t, err, "%s: a round-tripped reject must fail the run", storeName)
@@ -329,7 +329,7 @@ func TestApproval_AuditReadbackDecodesOnAllStores(t *testing.T) {
 		var afterN atomic.Int32
 		w := buildApprovalWorkflow(t, store, "wf-f1", &afterN)
 		require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
-		require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "alice", "ship it", "d1")))
+		require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "alice", "ship it", "d1", w.ApprovalNonce("gate"))))
 		require.NoError(t, w.Execute(context.Background()))
 		final, err := store.Load("wf-f1")
 		require.NoError(t, err)

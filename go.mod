@@ -2,6 +2,15 @@ module github.com/ppcavalcante/flow-orchestrator
 
 go 1.25.0
 
+// toolchain (AUD-051): a CONTRIBUTOR building with GOTOOLCHAIN=auto (the default)
+// is transparently switched to go1.25.11 — the patched release toolchain that
+// closes the reachable stdlib advisories a bare 1.25.0/1.25.1 dev toolchain still
+// carries (govulncheck-clean; see DEC-M5-toolchain). The `go 1.25.0` line above
+// remains the LANGUAGE floor. CI pins exact versions via setup-go and runs with
+// GOTOOLCHAIN=local so this directive never auto-upgrades the 1.25.0 matrix arm
+// (which exists to test the true floor).
+toolchain go1.25.11
+
 require github.com/google/flatbuffers v25.2.10+incompatible
 
 require (

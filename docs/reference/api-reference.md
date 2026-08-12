@@ -10,7 +10,8 @@ The `Workflow` type represents a complete workflow execution unit:
 
 ```go
 type Workflow struct {
-    DAG        *DAG            // The workflow structure
+    // DAG is SEALED as of v0.22.0 (M23 SEAL-06) — read it with the DAG() accessor.
+    // Construct a *Workflow with FromBuilder(builder), never as a literal.
     WorkflowID string          // Unique identifier
     Store      WorkflowStore   // Optional persistence layer
     // MetricsConfig opts the internally-built WorkflowData into operation-metrics
@@ -18,6 +19,14 @@ type Workflow struct {
     // hot path unchanged. Set e.g. metrics.NewConfig().WithEnabled(true).
     MetricsConfig *metrics.Config
 }
+
+// FromBuilder is the ONLY exported path to a runnable *Workflow (v0.22.0). It carries
+// the builder's WorkflowID, store and clock onto the returned value, and returns a
+// graph that already bears the builder's stamp. It can fail — handle the error.
+func FromBuilder(builder *WorkflowBuilder) (*Workflow, error)
+
+// DAG returns the workflow's graph. Read accessor for the sealed field (v0.22.0).
+func (w *Workflow) DAG() *DAG
 
 // Execute runs the workflow
 func (w *Workflow) Execute(ctx context.Context) error
@@ -31,28 +40,54 @@ func (w *Workflow) GetMetrics() *metrics.MetricsCollector
 
 The `DAG` type represents the structure of a workflow:
 
+A `*DAG` is **produced by the builder and is read-only thereafter** (M23 SEAL-06). It has no
+exported fields and no exported mutators: `NewDAG`, `NewDAGWithCapacity`, `(*DAG).AddNode` and
+`(*DAG).AddDependency` were unexported in v0.22.0, and a graph that did not come from
+`WorkflowBuilder.Build` will not execute. Declare structure on the builder instead — see
+[`WorkflowBuilder`](#workflowbuilder).
+
 ```go
 type DAG struct {
-    // Internal fields omitted
+    // Unexported fields; a *DAG is an opaque, validated handle.
 }
 
-// NewDAG creates a new DAG
-func NewDAG(name string) *DAG
-
-// AddNode adds a node to the DAG
-func (d *DAG) AddNode(node *Node) error
-
-// AddDependency adds a dependency between nodes
-func (d *DAG) AddDependency(from, to string) error
-
-// Validate checks the DAG for cycles and other issues
-func (d *DAG) Validate() error
-
-// Execute runs the DAG with the provided context and data
+// Execute runs the DAG with the provided context and data.
+// Refuses a graph that did not come from the builder (ErrDAGNotBuilt).
 func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error
+
+// Name reports the DAG's identifier, fixed at construction.
+func (d *DAG) Name() string
+
+// GetNode returns a node by name. The *Node is an opaque handle.
+func (d *DAG) GetNode(name string) (*Node, bool)
+
+// GetLevels returns the topological levels. Fresh slices; the *Node elements are opaque.
+func (d *DAG) GetLevels() [][]*Node
+
+// TopologicalSort returns the nodes in a single flat dependency order.
+func (d *DAG) TopologicalSort() ([]*Node, error)
+
+// Validate checks the DAG for cycles.
+func (d *DAG) Validate() error
 
 // WithExecutionConfig sets the per-level concurrency config (added v0.3.0)
 func (d *DAG) WithExecutionConfig(config ExecutionConfig) *DAG
+
+// WithTracerProvider sets the OpenTelemetry tracer provider.
+func (d *DAG) WithTracerProvider(tp trace.TracerProvider) *DAG
+```
+
+#### Sentinels (v0.22.0)
+
+```go
+// ErrDAGNotBuilt — a *DAG that did not come from WorkflowBuilder.Build was used to
+// execute or to render a run verdict.
+var ErrDAGNotBuilt error
+
+// ErrWorkflowNoDAG — a *Workflow was driven with no graph at all. Deliberately distinct
+// from ErrDAGNotBuilt: "there is no graph" and "this graph is not sanctioned" are
+// different faults.
+var ErrWorkflowNoDAG error
 ```
 
 #### ExecutionConfig
@@ -78,27 +113,32 @@ The `Node` type represents a single unit of work:
 
 ```go
 type Node struct {
-    Name            string         // Unique identifier
-    Action          Action         // The executable work
-    DependsOn       []*Node        // Dependencies
-    RetryCount      int            // Number of retry attempts
-    Timeout         time.Duration  // Maximum execution time
-    ContinueOnError bool           // If true, a failure of this node does not fail the workflow (added v0.7.0)
+    // Unexported fields; a *Node is an opaque handle. All seven fields were sealed in
+    // v0.22.0 (M23 SEAL-01) and the six post-build mutators were deleted with them.
 }
 
-// NewNode creates a new node
-func NewNode(name string, action Action) *Node
+// Name reports the node's identifier, fixed at mint.
+func (n *Node) Name() string
 
-// WithRetries sets the retry count
-func (n *Node) WithRetries(count int) *Node
+// GetDependencies returns a DEFENSIVE COPY of the node's dependencies.
+func (n *Node) GetDependencies() []*Node
 
-// WithTimeout sets the execution timeout
-func (n *Node) WithTimeout(timeout time.Duration) *Node
+// HasDependency answers by name, exposing nothing mutable.
+func (n *Node) HasDependency(nodeName string) bool
+```
 
-// WithContinueOnError marks the node so that its failure does not fail the
-// workflow: the node is recorded as Failed and the rest of the DAG continues
-// (added v0.7.0). See "Failure Semantics" below.
-func (n *Node) WithContinueOnError() *Node
+**Node options moved to the builder in v0.22.0.** `NewNode`, `(*Node).WithRetries`,
+`WithTimeout`, `WithContinueOnError`, `WithDependencies`, `AddDependency` and
+`AddDependencies` are gone — a node's policy is declared once, at declaration, and a
+built graph is not re-configurable afterwards. The replacements are `*NodeBuilder`
+methods:
+
+```go
+b.AddNode("process").
+    WithAction(processAction).
+    WithRetries(3).
+    WithTimeout(5 * time.Second).
+    DependsOn("fetch")
 ```
 
 ### Action
@@ -236,6 +276,18 @@ func (b *WorkflowBuilder) WithWorkflowID(id string) *WorkflowBuilder
 // error — use FromBuilder for a persistent, crash-safe run.
 func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder
 
+// WithDefinitionBudget sets optional size caps enforced at Build (AUD-068):
+// an over-budget graph is rejected with ErrValidation naming the axis. The
+// zero value imposes no limits, so the budget is fully opt-in.
+func (b *WorkflowBuilder) WithDefinitionBudget(budget DefinitionBudget) *WorkflowBuilder
+
+// DefinitionBudget bounds a definition's size; a zero field disables that axis.
+type DefinitionBudget struct {
+    MaxNodes int // max node count (0 = unlimited)
+    MaxEdges int // max dependency edges, generated choice/merge edges included (0 = unlimited)
+    MaxWidth int // max static level width / concurrently-runnable nodes (0 = unlimited)
+}
+
 // AddStartNode adds a start node (no dependencies)
 func (b *WorkflowBuilder) AddStartNode(name string) *NodeBuilder
 
@@ -260,8 +312,13 @@ type NodeBuilder struct {
     // Internal fields omitted
 }
 
-// WithAction sets the node's action (accepts an Action or a compatible func)
-func (b *NodeBuilder) WithAction(action interface{}) *NodeBuilder
+// WithAction sets the node's action. Takes an Action (an interface value); a
+// bare func must be wrapped with workflow.ActionFunc first.
+func (b *NodeBuilder) WithAction(action Action) *NodeBuilder
+
+// WithActionFunc sets the node's action from a bare func, wrapping it in
+// ActionFunc for you (the convenience sibling of WithAction).
+func (b *NodeBuilder) WithActionFunc(fn func(ctx context.Context, data *WorkflowData) error) *NodeBuilder
 
 // WithRetries sets the retry count
 func (b *NodeBuilder) WithRetries(count int) *NodeBuilder
@@ -274,8 +331,9 @@ func (b *NodeBuilder) WithTimeout(timeout time.Duration) *NodeBuilder
 func (b *NodeBuilder) WithContinueOnError() *NodeBuilder
 
 // WithCompensation sets the node's compensating action for saga rollback (added v0.12.0).
+// Takes an Action; wrap a bare func with workflow.ActionFunc (or use WithCompensationFunc).
 // See "Saga / Compensation" below.
-func (b *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder
+func (b *NodeBuilder) WithCompensation(action Action) *NodeBuilder
 
 // DependsOn adds dependencies
 func (b *NodeBuilder) DependsOn(nodeNames ...string) *NodeBuilder
@@ -358,8 +416,9 @@ type WorkflowStore interface {
 func NewInMemoryStore() *InMemoryStore
 
 // NewJSONFileStore creates a JSON file-based store (human-readable, recovery-friendly;
-// use FlatBuffersStore for the faster binary format)
-func NewJSONFileStore(baseDir string) (*JSONFileStore, error)
+// use FlatBuffersStore for the faster binary format). Variadic options tune the store
+// (e.g. WithJSONMaxFileSize / WithJSONMaxElements).
+func NewJSONFileStore(baseDir string, opts ...JSONFileStoreOption) (*JSONFileStore, error)
 
 // NewFlatBuffersStore creates a FlatBuffers-based store. Variadic options configure
 // the durability-flush mode (added v0.13.0); with no options the default is Strict
@@ -372,8 +431,8 @@ func NewFlatBuffersStore(baseDir string, opts ...func(*FlatBuffersStore)) (*Flat
 // default (single-writer connection + in-process lease); opt into multi-process competing
 // consumers with WithMultiProcess() (M16 — then it also implements ClaimStore). Holds a DB
 // handle: call Close() at shutdown. Implements the frozen WorkflowStore base plus the
-// optional Checkpointer / Syncer / IncrementalCheckpointer / WorkflowQuery interfaces (NOT
-// SignalStore). See the SQLite store section below and ADR-0014/ADR-0015.
+// optional Checkpointer / Syncer / IncrementalCheckpointer / WorkflowQuery interfaces, and
+// SignalStore (M19). See the SQLite store section below and ADR-0014/ADR-0015.
 func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error)
 ```
 
@@ -424,8 +483,8 @@ type Syncer interface {
 `SQLiteStore` is a third first-class store that persists the run **decomposed into rows**
 (one row per node) rather than as one blob per run. It is **fully additive** — it implements
 the frozen `WorkflowStore` base plus the optional `Checkpointer` / `Syncer` interfaces above,
-plus two M15 optional interfaces below. (It does **not** implement `SignalStore` —
-`WaitForSignal` needs one of the other stores.) Backed by pure-Go
+plus two M15 optional interfaces below. It also implements `SignalStore` (M19), so
+`WaitForSignal` / `WaitForSignalTimeout` are backed by it. Backed by pure-Go
 `modernc.org/sqlite` (no cgo). **Single-process by default; multi-process is opt-in** via
 `WithMultiProcess()` (M16 — see [below](#multi-process-safety--competing-consumers-added-m16)).
 It has its own durability option type
@@ -522,7 +581,7 @@ type ClaimStore interface {
     // Claim acquires (or re-claims a lapsed) lease for workflowID on behalf of ownerID (an
     // opaque, stable, per-process identity), returning a fresh monotonic token. INSERT-or-CAS.
     // Returns ErrClaimLost if a LIVE lease is held by a different owner.
-    Claim(workflowID, ownerID string) (FencingToken, error)
+    Claim(ctx context.Context, workflowID, ownerID string) (FencingToken, error)
     // Renew extends the lease expiry under the held token. Returns ErrFencedOut if superseded
     // (the drive must abort). Checkpoints ALSO renew automatically inside their CAS txn.
     Renew(workflowID string, token FencingToken) error
@@ -680,16 +739,14 @@ var ErrWaitRequiresSignalStore error
 ### Durable timers
 
 ```go
-// NewTimerNode builds a declared TimerNode: when reached it parks the run (Waiting)
-// until an ABSOLUTE due-time (clock.Now()+d, frozen at the first encounter and
-// persisted), then fires and converges. The due-time survives crash/suspend; an
-// overdue timer fires immediately on the next resume/Tick. A durable timer is a
-// LOWER BOUND on a wake-up, not a hard real-time deadline — the first encounter
-// always parks, so even a zero/elapsed duration parks once then fires on the next
-// resume.
-func NewTimerNode(name string, d time.Duration) *Node
-
-// (builder form) — retry/timeout are not meaningful on a timer; do not also WithAction.
+// AddTimer declares a TimerNode: when reached it parks the run (Waiting) until an
+// ABSOLUTE due-time (clock.Now()+d, frozen at the first encounter and persisted),
+// then fires and converges. The due-time survives crash/suspend; an overdue timer
+// fires immediately on the next resume/Tick. A durable timer is a LOWER BOUND on a
+// wake-up, not a hard real-time deadline — the first encounter always parks, so even
+// a zero/elapsed duration parks once then fires on the next resume.
+//
+// Retry/timeout are not meaningful on a timer; do not also WithAction.
 func (b *WorkflowBuilder) AddTimer(name string, d time.Duration) *NodeBuilder
 
 // Tick is the host-driven wake API: the host calls it on its own schedule with the
@@ -726,11 +783,10 @@ func (w *Workflow) WithClock(c Clock) *Workflow
 ### Wait-for-signal and wait-for-condition
 
 ```go
-// NewWaitForSignalNode builds a declared node: when reached it parks the run
-// (Waiting) until a Signal named signalName is delivered to the workflow's durable
-// mailbox, then applies the payload idempotently (also surfaced as the node's output)
-// and converges. Requires a Store implementing SignalStore.
-func NewWaitForSignalNode(name, signalName string) *Node
+// AddWaitForSignal declares a node that, when reached, parks the run (Waiting) until
+// a Signal named signalName is delivered to the workflow's durable mailbox, then
+// applies the payload idempotently (also surfaced as the node's output) and
+// converges. Requires a Store implementing SignalStore.
 func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder
 
 // AddWaitForSignalTimeout (M22) — durable first-of(signal, timer). Parks Waiting
@@ -740,14 +796,18 @@ func (b *WorkflowBuilder) AddWaitForSignal(name, signalName string) *NodeBuilder
 // arm sets "<name>.__timedOut__" = true so a downstream AddChoice can branch
 // signal-vs-timeout. Distinct from the non-durable node WithTimeout. Requires a
 // SignalStore (else ErrWaitRequiresSignalStore).
-func NewWaitForSignalOrTimeoutNode(name, signalName string, timeout time.Duration) *Node
 func (b *WorkflowBuilder) AddWaitForSignalTimeout(name, signalName string, timeout time.Duration) *NodeBuilder
 
-// NewWaitForConditionNode ("await") parks while predicate(data) is false,
+// AddWaitForCondition ("await") parks while predicate(data) is false,
 // re-evaluating on each wake, and converges when it flips.
-func NewWaitForConditionNode(name string, predicate func(*WorkflowData) bool) *Node
 func (b *WorkflowBuilder) AddWaitForCondition(name string, predicate func(*WorkflowData) bool) *NodeBuilder
 ```
+
+> **Suspension nodes are declared on the builder only (v0.22.0, M23 SEAL-01).** The
+> standalone constructors `NewTimerNode`, `NewWaitForSignalNode`,
+> `NewWaitForSignalOrTimeoutNode` and `NewWaitForConditionNode` were unexported along
+> with `NewNode` — a node's kind and policy are declared once, on the builder, and a
+> built graph is not re-configurable afterwards. Use the `Add*` forms above.
 
 ### Signal delivery
 
@@ -777,14 +837,26 @@ consume ordering is take (non-destructive) → idempotent apply → node `Comple
 checkpoint → **then** ack, so a crash before the checkpoint re-runs the node and
 re-applies the same byte-identical write. Hosts must ack promptly; a mailbox holds at
 most 2^20 un-acked entries (over-delivery beyond that is a host-contract violation,
-rejected with `ErrCorruptData`).
+rejected with `ErrCorruptData`). `DeliverSignal` also refuses a delivery that would exceed
+the bound, with `ErrValidation`.
+
+> **Platform limitation.** On the file-backed stores that write-side refusal is enforced
+> across concurrent deliveries by an advisory `flock(2)` on the mailbox directory, which
+> exists only on unix. **On non-unix builds (including Windows) the write-side bound is
+> best-effort:** deliveries that race can each observe the same pre-count and all be
+> admitted, leaving the mailbox above 2^20. Reads still reject such a mailbox, so nothing
+> is silently corrupted — but draining it requires deleting entry files directly, since the
+> cap is not configurable and `TakeSignals` (the only way to enumerate the IDs `AckSignals`
+> needs) is the call that fails. `SQLiteStore` is unaffected: its bound is enforced inside a
+> single SQL statement and holds on every platform.
 
 ### SignalStore interface
 
 ```go
 // SignalStore is an OPTIONAL interface a WorkflowStore MAY implement (additive,
 // type-asserted exactly like Checkpointer) to carry a durable signal mailbox. All
-// three built-in stores implement it. The mailbox lives OUTSIDE the WorkflowData
+// FOUR built-in stores implement it, SQLiteStore included (since M19). The mailbox
+// lives OUTSIDE the WorkflowData
 // snapshot so an external deliverer's write can never clobber a running checkpoint.
 type SignalStore interface {
     DeliverSignal(workflowID string, sig Signal) error   // idempotent by sig.ID; rejects empty ID
@@ -825,10 +897,10 @@ the branching semantics are machine-checked in TLA+.
 ### ChoiceNode — `AddChoice`
 
 ```go
-func (b *WorkflowBuilder) AddChoice(name string) *choiceBuilder
-func (c *choiceBuilder) When(pred func(*WorkflowData) bool, target string) *choiceBuilder
-func (c *choiceBuilder) Otherwise(target string) *choiceBuilder
-func (c *choiceBuilder) DependsOn(deps ...string) *choiceBuilder
+func (b *WorkflowBuilder) AddChoice(name string) *ChoiceBuilder
+func (c *ChoiceBuilder) When(pred func(*WorkflowData) bool, target string) *ChoiceBuilder
+func (c *ChoiceBuilder) Otherwise(target string) *ChoiceBuilder
+func (c *ChoiceBuilder) DependsOn(deps ...string) *ChoiceBuilder
 ```
 
 A `ChoiceNode` is a pure **routing decision**. When it runs it evaluates its `When` arms
@@ -852,10 +924,11 @@ itself always `Completed` (it makes a decision — it is never `Bypassed`).
 ### MergeNode — `AddMerge`
 
 ```go
-func (b *WorkflowBuilder) AddMerge(name string) *mergeBuilder
-func (m *mergeBuilder) From(tails ...string) *mergeBuilder
-func (m *mergeBuilder) WithAction(action interface{}) *mergeBuilder // Action or func(context.Context, *WorkflowData) error
-func (m *mergeBuilder) DependsOn(deps ...string) *mergeBuilder
+func (b *WorkflowBuilder) AddMerge(name string) *MergeBuilder
+func (m *MergeBuilder) From(tails ...string) *MergeBuilder
+func (m *MergeBuilder) WithAction(action Action) *MergeBuilder     // wrap a bare func with workflow.ActionFunc
+func (m *MergeBuilder) WithActionFunc(fn func(ctx context.Context, data *WorkflowData) error) *MergeBuilder
+func (m *MergeBuilder) DependsOn(deps ...string) *MergeBuilder
 ```
 
 A `MergeNode` is the **OR-join** below a choice's branches. It **fires iff ≥1 taken
@@ -917,13 +990,15 @@ the outcome is reported honestly via a typed `*SagaError`.
 ### Declaring a compensation — `WithCompensation`
 
 ```go
-func (b *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder
+func (b *NodeBuilder) WithCompensation(action Action) *NodeBuilder // wrap a bare func with workflow.ActionFunc, or use WithCompensationFunc
 ```
 
 Sets the compensating action for a node (accepts an `Action` or a
 `func(context.Context, *WorkflowData) error`, the same forms as `WithAction`; an
 unsupported type is reported by `Build()`). A node with no compensation is a rollback
-no-op. The compensation is exposed on `Node.Compensation`.
+no-op. The compensation is **not readable back off a built node**: `Node.Compensation`
+was unexported in v0.22.0 (M23 SEAL-01) and `*Node` exposes no accessor for it — a
+compensation is declared, not inspected.
 
 ### Rollback trigger and scope
 
@@ -1000,21 +1075,30 @@ and the [Sub-workflows & approvals guide](../guides/sub-workflows.md).
 // builds an unsatisfiable node (no host can target the empty decision signal). An empty
 // name now fails LOUD at Build with ErrValidation (previously built silently).
 func (b *WorkflowBuilder) AddApproval(name string) *NodeBuilder
-func ApproveSignal(node, approver, comment, sigID string) Signal // Approved=true
-func RejectSignal(node, approver, comment, sigID string)  Signal // Approved=false → fail-fast
-type ApprovalDecision struct{ Approved bool; Approver, Comment string }
+// nonce (AUD-025) is the correlation nonce for this park — a decision without the
+// matching nonce is inert (the node keeps waiting). Obtain it from the workflow:
+func (w *Workflow) ApprovalNonce(node string) string
+// or the pure form (e.g. for a queued sub-workflow child, from its id + child DAG digest):
+func ApprovalNonce(workflowID, node, definitionDigest string) string
+func ApproveSignal(node, approver, comment, sigID, nonce string) Signal // Approved=true
+func RejectSignal(node, approver, comment, sigID, nonce string)  Signal // Approved=false → fail-fast
+type ApprovalDecision struct{ Approved bool; Approver, Comment, Nonce string }
 type ApprovalRejectedError struct{ Node, Approver, Comment string } // NO Unwrap; classify via errors.As
 
 // Sub-workflow spawn/await — three explicit dispatch modes.
 func (b *WorkflowBuilder) AddSubWorkflow(name string, child *DAG) *NodeBuilder       // inline, blocks; non-suspendable child
-func (b *WorkflowBuilder) AddSubWorkflowParked(name string, child *DAG) *NodeBuilder // out-of-band, park→wake
-func (b *WorkflowBuilder) AddSubWorkflowQueued(name, childType string) *NodeBuilder  // queue (Pool), type-ref/suspendable
-func (n *NodeBuilder) WithResult(parentKey, childDataKey string) *NodeBuilder        // child must Set(childDataKey, result)
+func (b *WorkflowBuilder) AddSubWorkflowParked(name string, child *DAG) *NodeBuilder // out-of-band, park→wake; child = verdict CLASSIFIER, never executed; suspendable OK
+func (b *WorkflowBuilder) AddSubWorkflowQueued(name, childType string) *NodeBuilder  // queue (Pool), type-ref; suspendable OK (parked also accepts one — choose on the store)
+func (n *NodeBuilder) WithResult(parentKey, childDataKey string) *NodeBuilder        // child must Set(childDataKey, result); ONE pair, not additive
 func (n *NodeBuilder) WithInput(kv map[string]any) *NodeBuilder                      // queued node only — seeds child data
 func SubWorkflowCompletionSignal(nodeName, sigID string) Signal                      // bare trigger (no payload)
 
+// Deterministic child IDs — STABLE CONTRACT (see STABILITY.md); recompute, never re-derive by hand.
+func SubWorkflowChildID(parentID, nodeName string) string       // "sub:" + hex(SHA-256(uint64-LE(len(parentID))||parentID||nodeName))
+func FanOutChildID(parentID, nodeName string, index int) string // the fan-out branch counterpart
+
 // Queue path structurally needs an MP *SQLiteStore + Pool + a Registry (type→DAG), injected at Execute:
-type Workflow struct{ /* ... */ Registry *Registry; MaxSubWorkflowDepth int /* inline-path override; default 8 */ }
+type Workflow struct{ /* DAG is sealed — see FromBuilder */ Registry *Registry; MaxSubWorkflowDepth int /* inline-path override; default 8 */ }
 
 // Optional build-time cycle check — CALL ONCE at Registry assembly, BEFORE the first RunNext/Pool run.
 func (r *Registry) ValidateNoTypeCycles() error
@@ -1101,9 +1185,10 @@ Map a branch action over **N items discovered at run time** → N parallel branc
 [Fan-out guide](../guides/fanout.md).
 
 ```go
-// Declare the fan-out node. expander resolves N items ONCE (journaled); branchAction runs once per item.
-func (b *WorkflowBuilder) AddFanOut(name string, expander, branchAction) *NodeBuilder
-//   expander     func(ctx context.Context, parent *WorkflowData) ([]interface{}, error)
+// Declare the fan-out node. expander RESULT journaled exactly-once (execution at-least-once — re-runs on a
+// crash before the flush, so keep it idempotent/side-effect-free); branchAction runs once per item per attempt.
+func (b *WorkflowBuilder) AddFanOut(name string, expander FanOutExpander, branchAction Action) *NodeBuilder
+//   expander     FanOutExpander = func(ctx context.Context, parent *WorkflowData) ([]interface{}, error)
 //   branchAction Action — reads its item via data.Get(FanOutItemKey)
 
 // Node options (only valid on an AddFanOut node; else ErrValidation).
@@ -1125,7 +1210,7 @@ const DefaultFanOutMaxWidth = 1024      // default per-node width ceiling
   number arrives as **`json.Number`** (call `.Int64()`/`.Float64()`; full int64 range). A default decode
   into `interface{}` yields `float64` and **corrupts an int64 item above 2^53**.
 - **Result typing (`WithResults`):** each branch's `branchKey` scalar is written TYPED under `baseKey[i]` in
-  **discovery order** (an int64 reloads as int64 on all three stores), plus `baseKey.__count__` = N.
+  **discovery order** (an int64 reloads as int64 on all four stores), plus `baseKey.__count__` = N.
 - **Fan-in — FailFast (default):** first branch failure fails the node + cancels in-flight/un-started
   siblings.
 - **Fan-in — CollectPartial:** all N branches run; the node **Completes** even with k failures, exposing
@@ -1135,9 +1220,11 @@ const DefaultFanOutMaxWidth = 1024      // default per-node width ceiling
 - **Concurrency + footprint (M22):** the N branches run in a `min(N, MaxConcurrency)`-worker pool — **peak
   live goroutines == `min(N, cap)`, not N**. A 100k-item fan-out on a cap of 16 runs 16 branches at a time;
   the memory footprint is bounded by the cap, not N.
-- **Crash-resume:** the expander runs **exactly once** (journaled before branch 1); requires a
-  `Checkpointer` store (else `ErrFanOutRequiresCheckpointer`). **N=0** → empty aggregate; **N=1** → same path
-  as N>1. Single-level, single-process (cross-process fan-out deferred to M22).
+- **Crash-resume:** the expander's **result** is journaled **exactly once** (before branch 1) and never
+  recomputed once journaled; its **execution** is **at-least-once** — a crash in the expander→flush window
+  re-runs it, so keep the expander side-effect-free/idempotent (F-PG-13). Requires a `Checkpointer` store
+  (else `ErrFanOutRequiresCheckpointer`). **N=0** → empty aggregate; **N=1** → same path as N>1. Single-level,
+  single-process (cross-process fan-out deferred to M22).
 - **Execution contract — at-least-once EXECUTION + exactly-once PERSISTENCE:** the general durable-execution
   theorem (same as any checkpointed node, not fan-out-specific). A branch's *persisted result* is
   exactly-once, but a branch **in flight** at a crash re-executes on resume — so a non-idempotent branch
@@ -1246,7 +1333,7 @@ builder.AddNode("optional-enrichment").
 
 // Dependent runs even if optional-enrichment failed, and branches on its status.
 builder.AddNode("finalize").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         if status, _ := data.GetNodeStatus("optional-enrichment"); status == workflow.Failed {
             // proceed without the optional enrichment
         }
@@ -1392,8 +1479,12 @@ var ErrNoWork = errors.New("no claimable work in the queue")
 
 ```go
 // Build-time (surfaced from Build): an inline AddSubWorkflow child (or a transitive descendant)
-// contains a suspendable node — route it to AddSubWorkflowQueued instead.
-var ErrSubWorkflowSuspendableChild = errors.New("inline sub-workflow child contains a suspendable node: ...")
+// contains a suspendable node. INLINE is the only path that refuses one — route it to
+// AddSubWorkflowParked (host runs the child; SignalStore) or AddSubWorkflowQueued (engine
+// dispatches it; MP *SQLiteStore + Pool + Registry). Choose on the store, not on capability.
+var ErrSubWorkflowSuspendableChild = errors.New("inline sub-workflow child contains a suspendable node: " +
+    "inline cannot park, so use AddSubWorkflowParked (host runs the child; requires a SignalStore) " +
+    "or AddSubWorkflowQueued (engine dispatches it; requires a multi-process *SQLiteStore, Pool and Registry)")
 
 // Run-time configuration (loud, never a silent/in-memory-only spawn):
 var ErrSubWorkflowRequiresStore    = errors.New("workflow cannot spawn a sub-workflow: no parent store in scope")

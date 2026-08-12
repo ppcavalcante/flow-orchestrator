@@ -209,15 +209,15 @@ func traceFailAction(msg string) Action {
 // node config precisely. nodes is name->action; deps is child->parents.
 func buildDAG(t *testing.T, tp trace.TracerProvider, nodes map[string]Action, deps map[string][]string) *DAG {
 	t.Helper()
-	d := NewDAG("test-dag")
+	d := newDAGForTest("test-dag")
 	for name, act := range nodes {
-		if err := d.AddNode(NewNode(name, act)); err != nil {
+		if err := d.addNode(newNode(name, act)); err != nil {
 			t.Fatalf("AddNode(%s): %v", name, err)
 		}
 	}
 	for child, parents := range deps {
 		for _, p := range parents {
-			if err := d.AddDependency(p, child); err != nil {
+			if err := d.addDependency(p, child); err != nil {
 				t.Fatalf("AddDependency(%s->%s): %v", p, child, err)
 			}
 		}
@@ -272,13 +272,14 @@ func TestTracing_SpanPerExecutedNode(t *testing.T) {
 // only when RetryCount > 0.
 func TestTracing_StatusAndRetryAttributes(t *testing.T) {
 	tp := newRecordingProvider()
-	d := NewDAG("d")
-	plain := NewNode("plain", traceOKAction("plain"))
-	retried := NewNode("retried", traceOKAction("retried")).WithRetries(3)
-	if err := d.AddNode(plain); err != nil {
+	d := newDAGForTest("d")
+	plain := newNode("plain", traceOKAction("plain"))
+	retried := newNode("retried", traceOKAction("retried"))
+	retried.retryCount = 3
+	if err := d.addNode(plain); err != nil {
 		t.Fatalf("AddNode(plain): %v", err)
 	}
-	if err := d.AddNode(retried); err != nil {
+	if err := d.addNode(retried); err != nil {
 		t.Fatalf("AddNode(retried): %v", err)
 	}
 	d.WithTracerProvider(tp)
@@ -456,15 +457,15 @@ func TestTracing_BuilderWithTracerProvider(t *testing.T) {
 // benchDAG builds a small fan-out DAG used by the tracing-overhead benchmarks.
 func benchDAG(tb testing.TB, tp trace.TracerProvider) *DAG {
 	tb.Helper()
-	d := NewDAG("bench")
-	if err := d.AddNode(NewNode("root", traceOKAction("root"))); err != nil {
+	d := newDAGForTest("bench")
+	if err := d.addNode(newNode("root", traceOKAction("root"))); err != nil {
 		tb.Fatalf("AddNode(root): %v", err)
 	}
 	for _, n := range []string{"a", "b", "c", "d"} {
-		if err := d.AddNode(NewNode(n, traceOKAction(n))); err != nil {
+		if err := d.addNode(newNode(n, traceOKAction(n))); err != nil {
 			tb.Fatalf("AddNode(%s): %v", n, err)
 		}
-		if err := d.AddDependency("root", n); err != nil {
+		if err := d.addDependency("root", n); err != nil {
 			tb.Fatalf("AddDependency(root->%s): %v", n, err)
 		}
 	}

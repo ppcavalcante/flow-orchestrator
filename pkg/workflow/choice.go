@@ -35,6 +35,11 @@ type choiceAction struct {
 
 // Execute implements Action. It is a pure routing decision — it never blocks,
 // never parks, and (barring the no-match-no-default dead-end) always Completes.
+// engineTrusted marks choiceAction as engine machinery: it legitimately sets the
+// not-taken branch entries Bypassed, so the executor runs it against the unsealed
+// data rather than a sealed per-node view (M24 DEC-M24-MEDIATION).
+func (a *choiceAction) engineTrusted() {}
+
 func (a *choiceAction) Execute(_ context.Context, data *WorkflowData) error {
 	for _, br := range a.branches {
 		// A predicate is caller code returning a bool; a predicate that reads an
@@ -90,7 +95,7 @@ func (a *choiceAction) bypassExcept(data *WorkflowData, taken string) {
 // ErrNoBranchMatched). The caller is responsible for wiring each target to depend
 // on this node — AddChoice does that automatically.
 func newChoiceNode(name string, branches []choiceBranch, defaultTarget string, hasDefault bool) *Node {
-	return NewNode(name, &choiceAction{
+	return newNode(name, &choiceAction{
 		nodeName:      name,
 		branches:      branches,
 		defaultTarget: defaultTarget,
@@ -107,17 +112,17 @@ type choiceEdge struct {
 	target string
 }
 
-// choiceBuilder is the fluent builder for a ChoiceNode. It is deliberately
+// ChoiceBuilder is the fluent builder for a ChoiceNode. It is deliberately
 // distinct from NodeBuilder (D-05): a choice is configured by its routing arms
 // (When/Otherwise) and its own upstream (DependsOn), not by WithAction /
 // WithRetries / WithTimeout — its action IS the routing decision.
-type choiceBuilder struct {
+type ChoiceBuilder struct {
 	wb     *WorkflowBuilder
 	node   *NodeBuilder
 	action *choiceAction
 }
 
-// AddChoice declares a ChoiceNode named name and returns a choiceBuilder to chain
+// AddChoice declares a ChoiceNode named name and returns a ChoiceBuilder to chain
 // When(...) arms and an optional Otherwise(...) default. When reached, the node
 // first-match-routes over WorkflowData, activating exactly one branch's entry and
 // bypassing the rest:
@@ -127,18 +132,18 @@ type choiceBuilder struct {
 //	    When(func(d *WorkflowData) bool { return d.GetInt("amt") > 0 },    "small").
 //	    Otherwise("zero")
 //
-// Wire the ChoiceNode's own upstream with DependsOn on the returned choiceBuilder.
-func (b *WorkflowBuilder) AddChoice(name string) *choiceBuilder {
+// Wire the ChoiceNode's own upstream with DependsOn on the returned ChoiceBuilder.
+func (b *WorkflowBuilder) AddChoice(name string) *ChoiceBuilder {
 	action := &choiceAction{nodeName: name}
 	nb := b.AddNode(name)
 	nb.action = action
-	return &choiceBuilder{wb: b, node: nb, action: action}
+	return &ChoiceBuilder{wb: b, node: nb, action: action}
 }
 
 // When adds an ordered routing arm. When the ChoiceNode runs, the FIRST arm whose
 // pred(data) returns true activates target's branch; every other branch is
 // Bypassed (DEC-M11-FIRSTMATCH). target is wired to depend on the ChoiceNode.
-func (c *choiceBuilder) When(pred func(*WorkflowData) bool, target string) *choiceBuilder {
+func (c *ChoiceBuilder) When(pred func(*WorkflowData) bool, target string) *ChoiceBuilder {
 	c.action.branches = append(c.action.branches, choiceBranch{predicate: pred, target: target})
 	c.wb.choiceEdges = append(c.wb.choiceEdges, choiceEdge{choice: c.node.name, target: target})
 	return c
@@ -148,7 +153,7 @@ func (c *choiceBuilder) When(pred func(*WorkflowData) bool, target string) *choi
 // (CHOICE-04). Without an Otherwise, an unmatched choice returns
 // ErrNoBranchMatched. A repeated Otherwise keeps the last default. target is
 // wired to depend on the ChoiceNode.
-func (c *choiceBuilder) Otherwise(target string) *choiceBuilder {
+func (c *ChoiceBuilder) Otherwise(target string) *ChoiceBuilder {
 	c.action.defaultTarget = target
 	c.action.hasDefault = true
 	c.wb.choiceEdges = append(c.wb.choiceEdges, choiceEdge{choice: c.node.name, target: target})
@@ -156,9 +161,9 @@ func (c *choiceBuilder) Otherwise(target string) *choiceBuilder {
 }
 
 // DependsOn wires the ChoiceNode's OWN upstream dependencies (the nodes that must
-// complete before the routing decision is made). Returns the choiceBuilder for
+// complete before the routing decision is made). Returns the ChoiceBuilder for
 // chaining.
-func (c *choiceBuilder) DependsOn(deps ...string) *choiceBuilder {
+func (c *ChoiceBuilder) DependsOn(deps ...string) *ChoiceBuilder {
 	c.node.DependsOn(deps...)
 	return c
 }

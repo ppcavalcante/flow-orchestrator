@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"fmt"
 )
 
 // mergeAction is the action of a MergeNode — the OR-join below a ChoiceNode's
@@ -45,7 +44,7 @@ func (a *mergeAction) Execute(ctx context.Context, data *WorkflowData) error {
 // tails are the branch-tail dependency names; the caller wires the DependsOn
 // edges (AddMerge/From does that automatically).
 func newMergeNode(name string, tails []string) *Node {
-	return NewNode(name, &mergeAction{nodeName: name, tails: append([]string(nil), tails...)})
+	return newNode(name, &mergeAction{nodeName: name, tails: append([]string(nil), tails...)})
 }
 
 // mergeEdge records that a MergeNode (merge) must depend on a branch-tail (tail).
@@ -56,16 +55,16 @@ type mergeEdge struct {
 	tail  string
 }
 
-// mergeBuilder is the fluent builder for a MergeNode. Distinct from NodeBuilder
-// (mirrors choiceBuilder): a merge is configured by its branch tails (From) and
+// MergeBuilder is the fluent builder for a MergeNode. Distinct from NodeBuilder
+// (mirrors ChoiceBuilder): a merge is configured by its branch tails (From) and
 // its optional join action (WithAction), and OR-joins them.
-type mergeBuilder struct {
+type MergeBuilder struct {
 	wb     *WorkflowBuilder
 	node   *NodeBuilder
 	action *mergeAction
 }
 
-// AddMerge declares a MergeNode named name and returns a mergeBuilder to chain
+// AddMerge declares a MergeNode named name and returns a MergeBuilder to chain
 // From(...) branch tails and an optional WithAction. When reached, the merge
 // fires iff >=1 taken branch-tail Completed (a Bypassed tail is satisfied); if
 // every branch was bypassed the merge is itself Bypassed:
@@ -78,17 +77,17 @@ type mergeBuilder struct {
 // Every From tail must be a node inside a branch of the SAME ChoiceNode; a tail
 // that is a ChoiceNode itself (an empty/bodyless branch) is NOT supported and is
 // rejected at Build (it carries no per-branch taken signal).
-func (b *WorkflowBuilder) AddMerge(name string) *mergeBuilder {
+func (b *WorkflowBuilder) AddMerge(name string) *MergeBuilder {
 	action := &mergeAction{nodeName: name}
 	nb := b.AddNode(name)
 	nb.action = action
-	return &mergeBuilder{wb: b, node: nb, action: action}
+	return &MergeBuilder{wb: b, node: nb, action: action}
 }
 
 // From declares the branch-tail predecessors the merge OR-joins. Each named tail
 // is wired as a dependency of the merge; the merge fires on the taken tail(s).
 // May be called more than once (tails accumulate).
-func (m *mergeBuilder) From(tails ...string) *mergeBuilder {
+func (m *MergeBuilder) From(tails ...string) *MergeBuilder {
 	m.action.tails = append(m.action.tails, tails...)
 	for _, t := range tails {
 		m.wb.mergeEdges = append(m.wb.mergeEdges, mergeEdge{merge: m.node.name, tail: t})
@@ -99,24 +98,23 @@ func (m *mergeBuilder) From(tails ...string) *mergeBuilder {
 // WithAction sets an optional join action, replacing the default pass-through.
 // Accepts an Action or a func(context.Context, *WorkflowData) error. The MergeNode
 // marker (its *mergeAction) is preserved, so the OR-join role is unaffected.
-func (m *mergeBuilder) WithAction(action interface{}) *mergeBuilder {
-	switch a := action.(type) {
-	case Action:
-		m.action.userAction = a
-	case func(ctx context.Context, data *WorkflowData) error:
-		m.action.userAction = ActionFunc(a)
-	default:
-		// Defer the error to Build (mirrors NodeBuilder.WithAction): the merge
-		// keeps its *mergeAction marker, but Build reports the invalid user action.
-		m.node.actionErr = fmt.Errorf("unsupported merge action type: %T", action)
-	}
+func (m *MergeBuilder) WithAction(action Action) *MergeBuilder {
+	// AUD-041: typed (mirrors NodeBuilder.WithAction). Use WithActionFunc for a bare function.
+	m.action.userAction = action
+	return m
+}
+
+// WithActionFunc sets the merge's join action from a bare function with the Action
+// signature, equivalent to WithAction(ActionFunc(fn)) (AUD-041).
+func (m *MergeBuilder) WithActionFunc(fn func(ctx context.Context, data *WorkflowData) error) *MergeBuilder {
+	m.action.userAction = ActionFunc(fn)
 	return m
 }
 
 // DependsOn wires additional upstream dependencies of the MergeNode beyond its
 // branch tails. Rarely needed (the From tails carry the reconvergence), but kept
-// for symmetry with choiceBuilder.
-func (m *mergeBuilder) DependsOn(deps ...string) *mergeBuilder {
+// for symmetry with ChoiceBuilder.
+func (m *MergeBuilder) DependsOn(deps ...string) *MergeBuilder {
 	m.node.DependsOn(deps...)
 	return m
 }

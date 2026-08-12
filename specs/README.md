@@ -38,7 +38,18 @@ forwards the remaining constants from the config.
 
 ## Running TLC
 
-Requires Java (17+) and the official TLA+ tools jar:
+**Automated (AUD-046):** `scripts/formal/run_tlc.sh` model-checks the capstones
+below on every CI run against a **pinned, SHA-256-verified** `tla2tools.jar` (not
+a floating `latest`), so a spec that rots relative to the code reddens a merge
+rather than waiting for someone to run TLC by hand. Locally:
+`JAVA=/opt/homebrew/opt/openjdk@17/bin/java scripts/formal/run_tlc.sh`. (The
+`*Break` mutation configs — which expect a violation — are excluded from that
+gate and run by hand as documented in the mutation tables below.)
+
+Manually, TLC requires Java (17+) and the official TLA+ tools jar. When running
+several configs back-to-back, give each run a unique `-metadir` — otherwise
+successive runs against one module collide on the default states dir and throw
+`StringIndexOutOfBoundsException` (a single run needs no such flag):
 
 ```sh
 curl -fsSL -o /tmp/tla2tools.jar \

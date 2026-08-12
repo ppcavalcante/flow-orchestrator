@@ -76,3 +76,17 @@ type suspendableAction interface {
 	Action
 	suspendable()
 }
+
+// isSuspendableAction reports whether an action is one of the declared suspension
+// primitives. It is the SOLE derivation of Node.suspendable, called only from the two
+// in-package constructors (M23 SEAL-09).
+//
+// The set it recognises is defined by the suspendableAction marker interface, NOT by a
+// hand-written list of types — a hand list here would reproduce, inside the guard, the
+// exact defect the guard exists to prevent. TestSuspendable_EveryMarkedActionMintsSuspendable
+// enumerates the marker's implementors mechanically and fails if any one of them can be
+// minted without the flag.
+func isSuspendableAction(a Action) bool {
+	_, ok := a.(suspendableAction)
+	return ok
+}

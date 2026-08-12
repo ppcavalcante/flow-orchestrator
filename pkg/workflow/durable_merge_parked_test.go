@@ -32,7 +32,7 @@ func mergeBelowParkedWorkflow(t *testing.T, store *InMemoryStore, clk Clock) *Wo
 	wb.AddNode("after").DependsOn("done").WithAction(choiceNoop())
 	dag, err := wb.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store, Clock: clk}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store, Clock: clk}
 }
 
 // TestINV03_c_MergeBelowParkedTakenStaysPending is clause (c).

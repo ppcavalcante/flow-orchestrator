@@ -126,16 +126,16 @@ func TestDeliverSignalToDir_Guards(t *testing.T) {
 	dir := t.TempDir()
 
 	// Invalid workflowID (traversal) → reject before any write.
-	err := deliverSignalToDir(dir, "../escape", Signal{ID: "s1"}, encodeSignalJSON)
+	err := deliverSignalToDir(dir, "../escape", Signal{ID: "s1"}, encodeSignalJSON, defaultMaxFileSize)
 	require.ErrorIs(t, err, ErrValidation, "traversal workflowID must reject")
 
 	// Invalid signal ID (separator) → reject.
-	err = deliverSignalToDir(dir, "wf", Signal{ID: "a/b"}, encodeSignalJSON)
+	err = deliverSignalToDir(dir, "wf", Signal{ID: "a/b"}, encodeSignalJSON, defaultMaxFileSize)
 	require.ErrorIs(t, err, ErrValidation, "separator in signal ID must reject")
 
 	// An encode failure propagates (a codec that errors → the delivery errors, no partial write).
 	boom := errors.New("encode boom")
-	err = deliverSignalToDir(dir, "wf", Signal{ID: "s1"}, func(Signal) ([]byte, error) { return nil, boom })
+	err = deliverSignalToDir(dir, "wf", Signal{ID: "s1"}, func(Signal) ([]byte, error) { return nil, boom }, defaultMaxFileSize)
 	require.ErrorIs(t, err, boom, "an encode error must propagate, not swallow")
 	// No mailbox dir was created for the failed delivery.
 	_, statErr := os.Stat(filepath.Join(dir, "wf"+signalDirSuffix))
@@ -149,18 +149,18 @@ func TestTakeSignalsFromDir_MailboxCap_Bites(t *testing.T) {
 	wf := "cap-wf"
 	// Deliver 3 real signals.
 	for _, id := range []string{"s1", "s2", "s3"} {
-		require.NoError(t, deliverSignalToDir(dir, wf, Signal{ID: id, Name: "n"}, encodeSignalJSON))
+		require.NoError(t, deliverSignalToDir(dir, wf, Signal{ID: id, Name: "n"}, encodeSignalJSON, defaultMaxFileSize))
 	}
 	// Temporarily lower the cap below the entry count → the guard must fire.
 	orig := signalMailboxCap
 	signalMailboxCap = 2
 	defer func() { signalMailboxCap = orig }()
-	_, err := takeSignalsFromDir(dir, wf, decodeSignalJSON)
+	_, err := takeSignalsFromDir(dir, wf, decodeSignalJSON, defaultMaxFileSize)
 	require.ErrorIs(t, err, ErrCorruptData, "an over-cap mailbox must reject (DoS guard), not iterate")
 
 	// Restore the cap → the same mailbox reads clean (proves the bite was the cap, not the data).
 	signalMailboxCap = orig
-	sigs, err := takeSignalsFromDir(dir, wf, decodeSignalJSON)
+	sigs, err := takeSignalsFromDir(dir, wf, decodeSignalJSON, defaultMaxFileSize)
 	require.NoError(t, err)
 	require.Len(t, sigs, 3, "under the cap the mailbox reads all entries")
 }
@@ -170,11 +170,11 @@ func TestTakeSignalsFromDir_MailboxCap_Bites(t *testing.T) {
 func TestTakeSignalsFromDir_CorruptEntry_Surfaces(t *testing.T) {
 	dir := t.TempDir()
 	wf := "corrupt-wf"
-	require.NoError(t, deliverSignalToDir(dir, wf, Signal{ID: "good", Name: "n"}, encodeSignalJSON))
+	require.NoError(t, deliverSignalToDir(dir, wf, Signal{ID: "good", Name: "n"}, encodeSignalJSON, defaultMaxFileSize))
 	// Hand-write a corrupt entry into the mailbox dir.
 	mbox := filepath.Join(dir, wf+signalDirSuffix)
 	require.NoError(t, os.WriteFile(filepath.Join(mbox, "bad"+signalFileSuffix), []byte("{garbage"), 0600))
-	_, err := takeSignalsFromDir(dir, wf, decodeSignalJSON)
+	_, err := takeSignalsFromDir(dir, wf, decodeSignalJSON, defaultMaxFileSize)
 	require.ErrorIs(t, err, ErrCorruptData, "a corrupt mailbox entry must surface, never be silently dropped")
 }
 
@@ -250,7 +250,7 @@ func TestSQLiteSignals_MailboxCap_Bites(t *testing.T) {
 func TestDeliverSignal_NonSignalStore_LoudReject(t *testing.T) {
 	// A store that is NOT a SignalStore → the signal APIs must reject with ErrWaitRequiresSignalStore,
 	// never silently drop the signal (a dropped completion signal = a forever-parked parent).
-	w := NewWorkflow(&nonSignalStore{})
+	w := newWorkflowForTest(&nonSignalStore{})
 	w.WorkflowID = "wf"
 	require.ErrorIs(t, w.DeliverSignal(Signal{ID: "s1"}), ErrWaitRequiresSignalStore,
 		"DeliverSignal on a non-SignalStore must reject loud")
@@ -287,10 +287,10 @@ func TestQueueSubWorkflow_NonSQLiteStore_LoudReject(t *testing.T) {
 
 	// InMemoryStore IS a SignalStore (passes that guard) but is NOT a *SQLiteStore → the queue
 	// action must reject with ErrValidation, not park.
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "q-nonsqlite"
-	w.DAG = dag
-	w.Registry = reg
+	w.dag = dag
+	w.registry = reg
 	execErr := w.Execute(context.Background())
 	require.Error(t, execErr, "a queue sub-workflow on a non-SQLite store must fail, not park")
 	require.ErrorIs(t, execErr, ErrValidation, "the non-SQLite queue store is a typed ErrValidation")
@@ -307,9 +307,9 @@ func TestQueueSubWorkflow_NoRegistry_LoudReject(t *testing.T) {
 
 	// A SQLiteStore (passes the store guards) but NO Registry injected → the queue action must
 	// reject with ErrSubWorkflowRequiresRegistry, never park forever on an unresolvable type.
-	w := NewWorkflow(s)
+	w := newWorkflowForTest(s)
 	w.WorkflowID = "q-noreg"
-	w.DAG = dag
+	w.dag = dag
 	// w.Registry deliberately nil.
 	execErr := w.Execute(context.Background())
 	require.ErrorIs(t, execErr, ErrSubWorkflowRequiresRegistry, "no Registry → loud reject, not park")
@@ -334,9 +334,9 @@ func TestSubWorkflow_DeclaredResultKeyAbsent_Rejects(t *testing.T) {
 	dag, err := pb.Build()
 	require.NoError(t, err)
 
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "res-absent"
-	w.DAG = dag
+	w.dag = dag
 	execErr := w.Execute(context.Background())
 	require.ErrorIs(t, execErr, ErrValidation, "a declared-but-absent child result key must reject")
 }

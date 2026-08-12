@@ -14,7 +14,7 @@ package workflow
 //
 // RACE-SAFE: the accumulator lives on the per-Execute *WorkflowData (a call parameter, NOT
 // shared across concurrent Executes — that was the M14 ph61 hazard, which was a field on
-// the SHARED w.DAG). It is guarded by the SAME w.mu the mutators already take, so recording
+// the SHARED w.dag). It is guarded by the SAME w.mu the mutators already take, so recording
 // is free of any new lock. (DEC-M15-INCR-IFACE, constraint 2 corrected: on-WorkflowData-
 // per-Execute, not on-ctx — the mutators have no ctx.)
 

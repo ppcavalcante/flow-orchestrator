@@ -32,6 +32,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -302,6 +303,17 @@ func BenchmarkSQLiteDeepDurable_Delta(b *testing.B) {
 //
 // Skipped under -race (timing-sensitive) and -short (the min-of-K deep-8000 fit adds ~12s).
 func TestSQLiteDelta_WallClockIsON(t *testing.T) {
+	// AUD-005/AUD-045: this is a WALL-CLOCK shape assertion, not a structural one, so it
+	// is load-dependent — qa saw it false-red at 1.39 under concurrent machine load while
+	// isolation showed ~0.95, and min-of-K de-noise narrowed but did not eliminate that.
+	// A single false-red turns the whole package's green into a sample. It is therefore
+	// OPT-IN, out of the default correctness gate, and belongs to a release/nightly job
+	// (set FLOW_WALLCLOCK_TEST=1). The O(N) regression coverage is preserved for anyone who
+	// runs it deliberately; it just no longer nondeterministically reds the unit gate.
+	if os.Getenv("FLOW_WALLCLOCK_TEST") == "" {
+		t.Skip("wall-clock O(N) shape is load-dependent; opt-in via FLOW_WALLCLOCK_TEST=1 " +
+			"(AUD-005/AUD-045). Retained for release/nightly verification, out of the default gate.")
+	}
 	if raceEnabled {
 		t.Skip("wall-clock shape is timing-sensitive; -race instrumentation distorts it")
 	}

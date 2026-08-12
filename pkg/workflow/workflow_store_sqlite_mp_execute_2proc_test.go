@@ -62,8 +62,8 @@ func TestMPExecuteWorkerEntry(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }() //nolint:errcheck // worker cleanup
 
-	d := NewDAG("mp")
-	require.NoError(t, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+	d := newDAGForTest("mp")
+	require.NoError(t, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 		return nil
 	}))))
 	// n1's action runs ONLY after n0's LEVEL BARRIER committed n0 durably (the M9 per-level flush
@@ -71,7 +71,7 @@ func TestMPExecuteWorkerEntry(t *testing.T) {
 	// correct point to signal the parent (L0 committed) and pause past the lease TTL. A's NEXT
 	// checkpoint (n1's own barrier, after this action returns) is the one that gets FENCED once B
 	// has re-claimed. Role B's n0 is resumed-skipped (loaded Completed from A's commit); B's n1 runs.
-	require.NoError(t, d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
+	require.NoError(t, d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
 		if role == "A" {
 			if sig := os.Getenv(envExecSignal); sig != "" {
 				_ = os.WriteFile(sig, []byte("n0-committed"), 0o600) //nolint:errcheck,gosec // best-effort signal
@@ -80,9 +80,9 @@ func TestMPExecuteWorkerEntry(t *testing.T) {
 		}
 		return nil
 	}))))
-	require.NoError(t, d.AddDependency("n0", "n1"))
+	require.NoError(t, d.addDependency("n0", "n1"))
 
-	w := (&Workflow{DAG: d, WorkflowID: "wf", Store: store}).WithMultiProcessLocker(role)
+	w := (&Workflow{dag: d, WorkflowID: "wf", Store: store}).WithMultiProcessLocker(role)
 	execErr := w.Execute(context.Background())
 
 	switch role {
@@ -150,7 +150,7 @@ func TestMPExecute2Proc_SeedBreak(t *testing.T) {
 
 	// B's committed journal: n0+n1 Completed under token 1 (the re-claimer's state).
 	sB := openMP()
-	_, err := sB.Claim("wf", "B") // token 1
+	_, err := sB.Claim(context.Background(), "wf", "B") // token 1
 	require.NoError(t, err)
 	dB := NewWorkflowData("wf")
 	dB.SetNodeStatus("n0", Completed)
@@ -166,8 +166,8 @@ func TestMPExecute2Proc_SeedBreak(t *testing.T) {
 
 	// Bump the durable token past A: advance the shared clock past the TTL → B's lease lapses → a
 	// re-claim bumps the durable fencing_token to 2. A (held token 1) is now stale.
-	clk.Advance(2 * time.Second)          // > 1s TTL → B's lease lapses (shared clock, consistent)
-	_, err = openMP().Claim("wf", "Bump") // → durable token 2; A (token 1) is now stale
+	clk.Advance(2 * time.Second)                                // > 1s TTL → B's lease lapses (shared clock, consistent)
+	_, err = openMP().Claim(context.Background(), "wf", "Bump") // → durable token 2; A (token 1) is now stale
 	require.NoError(t, err)
 
 	// (a) MP store, fencing ACTIVE: A's stale token-1 write is REJECTED.

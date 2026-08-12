@@ -25,7 +25,7 @@ var epoch = time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 // recordingNode is a downstream node that records it ran (so "fired then the
 // downstream ran" / "did not re-run on resume" is observable).
 func timerDownstream(name string, c *execCounter) *Node {
-	return NewNode(name, ActionFunc(func(_ context.Context, data *WorkflowData) error {
+	return newNode(name, ActionFunc(func(_ context.Context, data *WorkflowData) error {
 		c.inc(name)
 		data.SetOutput(name, "ran-"+name)
 		return nil
@@ -42,11 +42,11 @@ func TestTimer_ParksThenFiresOnTick(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
 		mustAddNode(t, d, timerDownstream("after", counter))
 		mustAddDep(t, d, "sleep", "after")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 
 	// Reaching the timer parks the run (the process could now exit).
@@ -92,11 +92,11 @@ func TestTimer_OverdueFiresImmediatelyOnResume(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
 		mustAddNode(t, d, timerDownstream("after", counter))
 		mustAddDep(t, d, "sleep", "after")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 
 	// Arm (fireAt = epoch+1h) and park.
@@ -124,9 +124,9 @@ func TestTimer_DurableAcrossStoreReload(t *testing.T) {
 	build := func(clk Clock) *Workflow {
 		store, err := NewFlatBuffersStore(dir)
 		require.NoError(t, err)
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", 2*time.Hour))
-		w := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", 2*time.Hour))
+		w := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 		return w
 	}
 
@@ -154,9 +154,9 @@ func TestTimer_NotDueDoesNotFire(t *testing.T) {
 	clk := NewFakeClock(epoch)
 
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 
 	require.ErrorIs(t, build().Execute(context.Background()), ErrSuspended)
@@ -225,9 +225,9 @@ func TestTimer_FireAtOverflowClampsFarFuture(t *testing.T) {
 	armNow := epoch                       // 2026
 	hugeDur := 250 * 365 * 24 * time.Hour // ~250y: armNow+hugeDur overflows UnixNano
 
-	d := NewDAG(id)
-	mustAddNode(t, d, NewTimerNode("sleep", hugeDur))
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(armNow)}
+	d := newDAGForTest(id)
+	mustAddNode(t, d, newTimerNode("sleep", hugeDur))
+	w := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(armNow)}
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
 	persisted, err := store.Load(id)
@@ -239,7 +239,7 @@ func TestTimer_FireAtOverflowClampsFarFuture(t *testing.T) {
 
 	// At a normal resume time (1h later), the clamped far-future timer must still
 	// PARK, not fire — the opposite of the pre-fix immediate-fire bug.
-	w2 := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(armNow.Add(time.Hour))}
+	w2 := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(armNow.Add(time.Hour))}
 	require.ErrorIs(t, w2.Execute(context.Background()), ErrSuspended,
 		"a far-future (clamped) timer must not fire at a normal resume time")
 }
@@ -259,12 +259,12 @@ func TestTimer_FireAtOverflowClampsFarFuture(t *testing.T) {
 func TestTimer_DueTimersDoesNotResurrectFailedRun(t *testing.T) {
 	store := NewInMemoryStore()
 	const id = "timer-failed-run"
-	d := NewDAG(id)
-	mustAddNode(t, d, NewTimerNode("sleep", time.Hour)) // level 0: arms+parks (Waiting+fireAt)
-	mustAddNode(t, d, NewNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	d := newDAGForTest(id)
+	mustAddNode(t, d, newTimerNode("sleep", time.Hour)) // level 0: arms+parks (Waiting+fireAt)
+	mustAddNode(t, d, newNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return errors.New("boom") // level 0: hard fail -> fail-fast outranks the park
 	})))
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 	err := w.Execute(context.Background())
 
 	var execErr *ExecutionError
@@ -275,7 +275,7 @@ func TestTimer_DueTimersDoesNotResurrectFailedRun(t *testing.T) {
 	require.NoError(t, derr)
 	assert.Empty(t, due, "a failed run's preserved-fireAt timer must not be reported due")
 
-	w2 := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(later)}
+	w2 := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(later)}
 	fired, terr := w2.Tick(context.Background(), later)
 	require.NoError(t, terr)
 	assert.False(t, fired, "Tick must not fire a timer in a failed run")
@@ -296,13 +296,13 @@ func TestTimer_DueTimersRequiresWaitingStatus(t *testing.T) {
 	store := NewInMemoryStore()
 	const id = "timer-cancelled-run"
 	ctx, cancel := context.WithCancel(context.Background())
-	d := NewDAG(id)
-	mustAddNode(t, d, NewTimerNode("sleep", time.Hour)) // level 0: arms+parks
-	mustAddNode(t, d, NewNode("canceller", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	d := newDAGForTest(id)
+	mustAddNode(t, d, newTimerNode("sleep", time.Hour)) // level 0: arms+parks
+	mustAddNode(t, d, newNode("canceller", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		cancel() // level 0: cancel the run (no hard failure)
 		return nil
 	})))
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 	err := w.Execute(ctx)
 	require.True(t, errors.Is(err, context.Canceled), "the run was cancelled, not failed")
 
@@ -353,15 +353,15 @@ func TestTimer_NoClobberRoundTrip(t *testing.T) {
 // chunk-1 marker seam (not as a generic failure) and bypasses retry/timeout — the
 // declared-suspension contract carried forward from chunk-1.
 func TestTimer_IsDeclaredSuspensionNode(t *testing.T) {
-	node := NewTimerNode("sleep", time.Hour)
-	_, ok := node.Action.(suspendableAction)
+	node := newTimerNode("sleep", time.Hour)
+	_, ok := node.action.(suspendableAction)
 	require.True(t, ok, "a TimerNode action must satisfy the suspendableAction marker")
 
 	// Direct node.Execute (clock falls back to system clock): first run parks.
 	data := NewWorkflowData("wf")
-	node.RetryCount = 3
-	node.Timeout = time.Nanosecond // would trip instantly if the park were timed out
-	err := node.Execute(context.Background(), data)
+	node.retryCount = 3
+	node.timeout = time.Nanosecond // would trip instantly if the park were timed out
+	err := node.execute(context.Background(), data)
 	require.ErrorIs(t, err, ErrSuspended, "a timer parks (bypassing retry/timeout), not fails")
 	st, _ := data.GetNodeStatus("sleep")
 	assert.Equal(t, Waiting, st)
@@ -377,7 +377,7 @@ func TestTimer_BuilderAddTimer(t *testing.T) {
 	mk := func() *Workflow {
 		b := NewWorkflowBuilder().WithWorkflowID(id).WithStore(store).WithClock(clk)
 		b.AddTimer("sleep", time.Minute)
-		b.AddNode("after").WithAction(func(_ context.Context, _ *WorkflowData) error { return nil }).DependsOn("sleep")
+		b.AddNode("after").WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil }).DependsOn("sleep")
 		w, err := FromBuilder(b)
 		require.NoError(t, err)
 		return w

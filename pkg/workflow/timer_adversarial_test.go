@@ -80,14 +80,14 @@ func TestAdv_MultiTimer_PartialDueInOneLevel(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("a", 1*time.Hour))
-		mustAddNode(t, d, NewTimerNode("b", 3*time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("a", 1*time.Hour))
+		mustAddNode(t, d, newTimerNode("b", 3*time.Hour))
 		mustAddNode(t, d, timerDownstream("afterA", counter))
 		mustAddNode(t, d, timerDownstream("afterB", counter))
 		mustAddDep(t, d, "a", "afterA")
 		mustAddDep(t, d, "b", "afterB")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 
 	// Both arm+park on first reach.
@@ -143,11 +143,11 @@ func TestAdv_MultiTimer_AcrossLevels(t *testing.T) {
 	clk := NewFakeClock(epoch)
 
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("t1", time.Hour))
-		mustAddNode(t, d, NewTimerNode("t2", time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("t1", time.Hour))
+		mustAddNode(t, d, newTimerNode("t2", time.Hour))
 		mustAddDep(t, d, "t1", "t2")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 
 	// Run start: t1 arms, t2 never reached.
@@ -205,14 +205,14 @@ func TestAdv_MultiTimer_AllDueSingleTick(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func() *Workflow {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		for i, dur := range []time.Duration{time.Hour, 2 * time.Hour, 30 * time.Minute} {
 			name := fmt.Sprintf("t%d", i)
-			mustAddNode(t, d, NewTimerNode(name, dur))
+			mustAddNode(t, d, newTimerNode(name, dur))
 			mustAddNode(t, d, timerDownstream("after"+name, counter))
 			mustAddDep(t, d, name, "after"+name)
 		}
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 
 	require.ErrorIs(t, build().Execute(context.Background()), ErrSuspended)
@@ -249,17 +249,17 @@ func TestAdv_CoeFailedSiblingDoesNotBlockTimer(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour)) // parks (Waiting+fireAt)
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour)) // parks (Waiting+fireAt)
 		// A continue-on-error node that fails: tolerated, marked Failed, NOT hard.
-		coe := NewNode("flaky", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		coe := newNode("flaky", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			return errors.New("coe boom")
 		}))
-		coe.ContinueOnError = true
+		coe.continueOnError = true
 		mustAddNode(t, d, coe)
 		mustAddNode(t, d, timerDownstream("after", counter))
 		mustAddDep(t, d, "sleep", "after")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 	}
 
 	// Level 0 runs the timer (parks) + the coe node (fails, tolerated). The run is a
@@ -298,11 +298,11 @@ func TestAdv_CompletedRunNotResurrected(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func(now time.Time) *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
 		mustAddNode(t, d, timerDownstream("after", counter))
 		mustAddDep(t, d, "sleep", "after")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
 	}
 
 	require.ErrorIs(t, build(epoch).Execute(context.Background()), ErrSuspended)
@@ -331,13 +331,13 @@ func TestAdv_CompletedRunNotResurrected(t *testing.T) {
 func TestAdv_SkippedTimerNotDue(t *testing.T) {
 	store := NewInMemoryStore()
 	const id = "adv-skipped-timer"
-	d := NewDAG(id)
-	mustAddNode(t, d, NewNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	d := newDAGForTest(id)
+	mustAddNode(t, d, newNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return errors.New("hard boom")
 	})))
-	mustAddNode(t, d, NewTimerNode("sleep", time.Hour)) // depends on boom -> Skipped
+	mustAddNode(t, d, newTimerNode("sleep", time.Hour)) // depends on boom -> Skipped
 	mustAddDep(t, d, "boom", "sleep")
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 
 	var execErr *ExecutionError
 	require.True(t, errors.As(w.Execute(context.Background()), &execErr))
@@ -365,9 +365,9 @@ func TestAdv_ClockBackwardNeverFiresEarly(t *testing.T) {
 	const id = "adv-clock-back"
 	clk := NewFakeClock(epoch)
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 	require.ErrorIs(t, build().Execute(context.Background()), ErrSuspended) // fireAt=epoch+1h
 
@@ -409,9 +409,9 @@ func TestAdv_FireAtBoundaryExact(t *testing.T) {
 	{
 		store := NewInMemoryStore()
 		build := func(now time.Time) *Workflow {
-			d := NewDAG(id)
-			mustAddNode(t, d, NewTimerNode("sleep", dur))
-			return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
+			d := newDAGForTest(id)
+			mustAddNode(t, d, newTimerNode("sleep", dur))
+			return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
 		}
 		require.ErrorIs(t, build(epoch).Execute(context.Background()), ErrSuspended)
 		require.ErrorIs(t, build(time.Unix(0, fireAt-1)).Execute(context.Background()), ErrSuspended,
@@ -424,9 +424,9 @@ func TestAdv_FireAtBoundaryExact(t *testing.T) {
 	{
 		store := NewInMemoryStore()
 		build := func(now time.Time) *Workflow {
-			d := NewDAG(id)
-			mustAddNode(t, d, NewTimerNode("sleep", dur))
-			return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
+			d := newDAGForTest(id)
+			mustAddNode(t, d, newTimerNode("sleep", dur))
+			return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
 		}
 		require.ErrorIs(t, build(epoch).Execute(context.Background()), ErrSuspended)
 		require.NoError(t, build(time.Unix(0, fireAt)).Execute(context.Background()),
@@ -454,15 +454,15 @@ func TestAdv_TrueCrashBeforeFirePersisted_RefiresAndConverges(t *testing.T) {
 	counter := newExecCounter()
 
 	buildDAG := func() *DAG {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
 		mustAddNode(t, d, timerDownstream("after", counter))
 		mustAddDep(t, d, "sleep", "after")
 		return d
 	}
 
 	// Run 1: arm + park (persists sleep=Waiting + fireAt).
-	w1 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+	w1 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 	require.ErrorIs(t, w1.Execute(context.Background()), ErrSuspended)
 
 	// Run 2 (the "tick that crashes"): drive dag.Execute DIRECTLY with a pinned clock
@@ -490,7 +490,7 @@ func TestAdv_TrueCrashBeforeFirePersisted_RefiresAndConverges(t *testing.T) {
 
 	// Run 3: clean resume -> the timer RE-FIRES (at-least-once), downstream runs once,
 	// run converges to the clean-run final.
-	w3 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(fireTime)}
+	w3 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(fireTime)}
 	require.NoError(t, w3.Execute(context.Background()), "resume re-fires the timer and converges")
 	final, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, final, "sleep", Completed)
@@ -514,10 +514,10 @@ func TestAdv_TrueCrashAfterFireBeforeDownstreamPersist(t *testing.T) {
 	downRuns := newExecCounter()
 
 	buildDAG := func() *DAG {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		// A timer whose action also counts how many times it runs the FIRE branch.
-		mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
-		mustAddNode(t, d, NewNode("after", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+		mustAddNode(t, d, newTimerNode("sleep", time.Hour))
+		mustAddNode(t, d, newNode("after", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 			downRuns.inc("after")
 			data.SetOutput("after", "ran")
 			return nil
@@ -528,7 +528,7 @@ func TestAdv_TrueCrashAfterFireBeforeDownstreamPersist(t *testing.T) {
 	}
 
 	// Run 1: arm + park.
-	w1 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+	w1 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 	require.ErrorIs(t, w1.Execute(context.Background()), ErrSuspended)
 
 	// Run 2: crash at the SECOND checkpoint call. Call #1 = level-0 barrier (timer
@@ -556,7 +556,7 @@ func TestAdv_TrueCrashAfterFireBeforeDownstreamPersist(t *testing.T) {
 
 	// Run 3: clean resume. The timer is Completed -> NOT re-fired; downstream re-runs
 	// (at-least-once on the in-flight level) and the run converges.
-	w3 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(fireTime)}
+	w3 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(fireTime)}
 	require.NoError(t, w3.Execute(context.Background()))
 	final, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, final, "sleep", Completed)
@@ -574,9 +574,9 @@ func TestAdv_MultiTimer_TrueCrashRefiresBoth(t *testing.T) {
 	counter := newExecCounter()
 
 	buildDAG := func() *DAG {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("a", time.Hour))
-		mustAddNode(t, d, NewTimerNode("b", 2*time.Hour))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("a", time.Hour))
+		mustAddNode(t, d, newTimerNode("b", 2*time.Hour))
 		mustAddNode(t, d, timerDownstream("afterA", counter))
 		mustAddNode(t, d, timerDownstream("afterB", counter))
 		mustAddDep(t, d, "a", "afterA")
@@ -584,7 +584,7 @@ func TestAdv_MultiTimer_TrueCrashRefiresBoth(t *testing.T) {
 		return d
 	}
 	require.ErrorIs(t,
-		(&Workflow{DAG: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}).Execute(context.Background()),
+		(&Workflow{dag: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}).Execute(context.Background()),
 		ErrSuspended)
 
 	fireTime := epoch.Add(3 * time.Hour) // past both fireAts
@@ -597,7 +597,7 @@ func TestAdv_MultiTimer_TrueCrashRefiresBoth(t *testing.T) {
 	assertStatus(t, persisted, "a", Waiting)
 	assertStatus(t, persisted, "b", Waiting)
 
-	w3 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(fireTime)}
+	w3 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store, Clock: NewFakeClock(fireTime)}
 	require.NoError(t, w3.Execute(context.Background()))
 	final, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, final, "a", Completed)
@@ -621,9 +621,9 @@ func TestAdv_ZeroDuration_ParksOnceThenFires(t *testing.T) {
 	const id = "adv-zero"
 	clk := NewFakeClock(epoch) // clock never advances
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", 0))
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", 0))
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 	require.ErrorIs(t, build().Execute(context.Background()), ErrSuspended, "zero-duration parks once")
 	p, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
@@ -647,9 +647,9 @@ func TestAdv_NegativeDuration_ParksThenFiresImmediately(t *testing.T) {
 	const id = "adv-neg"
 	clk := NewFakeClock(epoch)
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", -time.Hour))
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", -time.Hour))
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 	require.ErrorIs(t, build().Execute(context.Background()), ErrSuspended, "negative-duration parks once")
 	p, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
@@ -682,9 +682,9 @@ func TestAdv_NegativeDuration_UnderflowClampFiresImmediately(t *testing.T) {
 	hugeNeg := -290 * 365 * 24 * time.Hour // ~-290y: 1700-290 underflows the UnixNano floor
 	clk := NewFakeClock(early)
 	build := func() *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", hugeNeg))
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", hugeNeg))
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 	}
 	// First encounter parks once (records the clamped fireAt).
 	require.ErrorIs(t, build().Execute(context.Background()), ErrSuspended)
@@ -880,18 +880,18 @@ func TestAdv_Determinism_MultiTimerByteIdentical(t *testing.T) {
 		store := NewInMemoryStore()
 		const id = "adv-det-multi"
 		build := func(now time.Time) *Workflow {
-			d := NewDAG(id)
-			mustAddNode(t, d, NewTimerNode("a", time.Hour))
-			mustAddNode(t, d, NewTimerNode("b", 2*time.Hour))
-			mustAddNode(t, d, NewTimerNode("c", time.Hour)) // depends on a -> level 1
-			mustAddNode(t, d, NewNode("sink", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+			d := newDAGForTest(id)
+			mustAddNode(t, d, newTimerNode("a", time.Hour))
+			mustAddNode(t, d, newTimerNode("b", 2*time.Hour))
+			mustAddNode(t, d, newTimerNode("c", time.Hour)) // depends on a -> level 1
+			mustAddNode(t, d, newNode("sink", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 				data.SetOutput("sink", "done")
 				return nil
 			})))
 			mustAddDep(t, d, "a", "c")
 			mustAddDep(t, d, "b", "sink")
 			mustAddDep(t, d, "c", "sink")
-			return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
+			return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
 		}
 		require.ErrorIs(t, build(epoch).Execute(context.Background()), ErrSuspended)
 		// Successive ticks at fixed instants drive the chain to convergence. An
@@ -936,14 +936,14 @@ func TestAdv_ConcurrentDifferentIDs_Safe(t *testing.T) {
 			id := fmt.Sprintf("adv-conc-%d", i)
 			store := NewInMemoryStore()
 			build := func(now time.Time) *Workflow {
-				d := NewDAG(id)
-				mustAddNode(t, d, NewTimerNode("sleep", time.Hour))
-				mustAddNode(t, d, NewNode("after", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+				d := newDAGForTest(id)
+				mustAddNode(t, d, newTimerNode("sleep", time.Hour))
+				mustAddNode(t, d, newNode("after", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 					data.SetOutput("after", "ran")
 					return nil
 				})))
 				mustAddDep(t, d, "sleep", "after")
-				return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
+				return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(epoch)}
 			}
 			if err := build(epoch).Execute(context.Background()); !errors.Is(err, ErrSuspended) {
 				errs[i] = fmt.Errorf("arm: %v", err)

@@ -48,8 +48,8 @@ func resolveTracer(tp trace.TracerProvider) trace.Tracer {
 func nodeSpanAttributes(n *Node, status NodeStatus) []attribute.KeyValue {
 	attrs := make([]attribute.KeyValue, 0, 2)
 	attrs = append(attrs, attribute.String(attrNodeStatus, string(status)))
-	if n.RetryCount > 0 {
-		attrs = append(attrs, attribute.Int(attrNodeRetryCount, n.RetryCount))
+	if n.retryCount > 0 {
+		attrs = append(attrs, attribute.Int(attrNodeRetryCount, n.retryCount))
 	}
 	return attrs
 }

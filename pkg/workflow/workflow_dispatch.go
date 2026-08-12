@@ -89,6 +89,15 @@ const defaultMaxAttempts = 3
 // in-memory tokenState) is the one Execute's checkpoint CAS reads — a superseded worker's write is
 // fenced. A different store instance would silently un-fence the drive.
 func RunNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID string) (ran bool, err error) {
+	// AUD-031 / C-19: nil store or registry must be a typed error, not a nil-deref panic
+	// inside runNext (reg.Types() / store.ClaimNext) that would crash the host. An empty
+	// ownerID is already rejected downstream by ClaimNext (AUD-003).
+	if store == nil {
+		return false, fmt.Errorf("%w: RunNext requires a non-nil store", ErrValidation)
+	}
+	if reg == nil {
+		return false, fmt.Errorf("%w: RunNext requires a non-nil registry", ErrValidation)
+	}
 	return runNext(ctx, store, reg, ownerID, defaultMaxAttempts)
 }
 
@@ -188,12 +197,12 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 	go cancelWatcher(runCtx, cancel, done, store, item.WorkflowID)
 
 	// M19 ph95 (F-P94-04): a queue child runs in THIS worker — a separate drive from its parent, so the
-	// parent's Registry + drive-stack ctx did NOT cross the dispatch. Thread both back: w.Registry=reg so a
+	// parent's Registry + drive-stack ctx did NOT cross the dispatch. Thread both back: w.registry=reg so a
 	// GRANDCHILD queue-spawn can resolve its type (else ErrSubWorkflowRequiresRegistry), and seed the drive
 	// ctx to item.Depth so the child's own spawns see the accumulated nesting depth — a type-ref chain is
 	// bounded by the ceiling across the dispatch, not reset to 0 at each worker. depth 0 (a plain M17
 	// dispatch) seeds nothing → byte-unchanged.
-	w := &Workflow{DAG: dag, WorkflowID: item.WorkflowID, Store: store, Registry: reg}
+	w := &Workflow{dag: dag, WorkflowID: item.WorkflowID, Store: store, registry: reg}
 	execErr := w.Execute(withDepthSeed(runCtx, item.Depth))
 	close(done) // Execute returned → tell the watcher to exit (leak-free).
 	cancel()    // release the child ctx (idempotent; harmless if the watcher already cancelled).

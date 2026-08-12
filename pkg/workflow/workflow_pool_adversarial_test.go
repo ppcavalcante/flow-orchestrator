@@ -33,13 +33,13 @@ import (
 // A multi-level chain forces a per-LEVEL checkpoint (the fencing CAS bites per level), so a stalled
 // worker superseded between levels gets its next checkpoint FENCED.
 func mkChainDAG(name string, levels int, body ActionFunc) (*DAG, error) {
-	d := NewDAG(name)
+	d := newDAGForTest(name)
 	for i := 0; i < levels; i++ {
-		if err := d.AddNode(NewNode(fmt.Sprintf("n%d", i), body)); err != nil {
+		if err := d.addNode(newNode(fmt.Sprintf("n%d", i), body)); err != nil {
 			return nil, err
 		}
 		if i > 0 {
-			if err := d.AddDependency(fmt.Sprintf("n%d", i-1), fmt.Sprintf("n%d", i)); err != nil {
+			if err := d.addDependency(fmt.Sprintf("n%d", i-1), fmt.Sprintf("n%d", i)); err != nil {
 				return nil, err
 			}
 		}
@@ -162,7 +162,7 @@ func TestAdversarial_KillStorm_SingleWorkflow_ExactlyOnce(t *testing.T) {
 					otherErr.Add(1)
 					return
 				}
-				wf := &Workflow{DAG: dag, WorkflowID: item.WorkflowID, Store: s}
+				wf := &Workflow{dag: dag, WorkflowID: item.WorkflowID, Store: s}
 				xerr := wf.Execute(context.Background())
 				switch {
 				case xerr == nil:
@@ -279,7 +279,7 @@ func TestAdversarial_ClockBoundary_ExpiryEqualsNow(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	wA := &Workflow{DAG: dag, WorkflowID: "wf", Store: sA}
+	wA := &Workflow{dag: dag, WorkflowID: "wf", Store: sA}
 	require.NoError(t, wA.Execute(context.Background()),
 		"A holds the current token at the boundary → its checkpoint is NOT fenced")
 
@@ -329,8 +329,8 @@ func TestAdversarial_PoisonUnderContention_BoundedDeadLetter(t *testing.T) {
 	var bodyRuns atomic.Int64
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("boom", func() (*DAG, error) {
-		d := NewDAG("boom")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		d := newDAGForTest("boom")
+		return d, d.addNode(newNode("n0", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			bodyRuns.Add(1)
 			return fmt.Errorf("%w: poison node", ErrExecutionFailed) // becomes an *ExecutionError in the node wrapper
 		})))
@@ -550,8 +550,8 @@ func TestAdversarial_FactoryError_TerminalizesNoLeak(t *testing.T) {
 		return nil, errors.New("factory blew up")
 	}))
 	require.NoError(t, reg.Register("okfac", func() (*DAG, error) {
-		d := NewDAG("okfac")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+		d := newDAGForTest("okfac")
+		return d, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 			okRan.Add(1)
 			return nil
 		})))
@@ -681,12 +681,12 @@ func TestAdversarial_GracefulDrainMidFlight_DeadLettersHealthyWork(t *testing.T)
 
 	// A well-behaved action that blocks until the (drain) cancel, then returns ctx.Err() — the correct
 	// cooperative-cancellation contract every action is expected to honor.
-	d := NewDAG("job")
-	require.NoError(t, d.AddNode(NewNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
+	d := newDAGForTest("job")
+	require.NoError(t, d.addNode(newNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}))))
-	w := &Workflow{DAG: d, WorkflowID: item.WorkflowID, Store: s}
+	w := &Workflow{dag: d, WorkflowID: item.WorkflowID, Store: s}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(20 * time.Millisecond); cancel() }() // the graceful drain fires
@@ -730,8 +730,8 @@ func TestAdversarial_DrainDuringReclaim_EndToEnd(t *testing.T) {
 	inFlight := make(chan struct{}, workers)
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("job", func() (*DAG, error) {
-		d := NewDAG("job")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
+		d := newDAGForTest("job")
+		return d, d.addNode(newNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
 			select {
 			case inFlight <- struct{}{}: // announce we're mid-drive (non-blocking; buffered)
 			default:

@@ -19,9 +19,9 @@ func parkedParent(t *testing.T, store WorkflowStore, wf string, childDAG *DAG, a
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(afterCounter))
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = wf
-	w.DAG = dag
+	w.dag = dag
 	return w
 }
 
@@ -29,8 +29,8 @@ func parkedParent(t *testing.T, store WorkflowStore, wf string, childDAG *DAG, a
 // child ID on the same store, so the parent's parked node can later observe it terminal.
 func runChildOutOfBand(t *testing.T, store WorkflowStore, parentWF, nodeName string, childDAG *DAG) {
 	t.Helper()
-	childID := subWorkflowChildID(parentWF, nodeName)
-	child := &Workflow{DAG: childDAG, WorkflowID: childID, Store: store}
+	childID := SubWorkflowChildID(parentWF, nodeName)
+	child := &Workflow{dag: childDAG, WorkflowID: childID, Store: store}
 	require.NoError(t, child.Execute(context.Background()))
 }
 
@@ -98,8 +98,8 @@ func TestParkedSubWorkflow_WakeSeedBreak_NoSignalNeverWakes(t *testing.T) {
 // loudly (ErrWaitRequiresSignalStore), never a silent forever-park.
 func TestParkedSubWorkflow_NoSignalStore_LoudFail(t *testing.T) {
 	// Drive the action directly with no SignalStore injected (bare DAG.Execute).
-	d := NewDAG("wf-nostore")
-	require.NoError(t, d.AddNode(NewNode("sub", &parkedSubWorkflowAction{nodeName: "sub", child: childProducing(t, "v", nil)})))
+	d := newDAGForTest("wf-nostore")
+	require.NoError(t, d.addNode(newNode("sub", &parkedSubWorkflowAction{nodeName: "sub", child: childProducing(t, "v", nil)})))
 	cp := func(*WorkflowData) error { return nil }
 	err := d.Execute(withCheckpoint(context.Background(), cp), NewWorkflowData("wf-nostore"))
 	require.ErrorIs(t, err, ErrWaitRequiresSignalStore, "no SignalStore → loud failure, never a forever-park")
@@ -128,7 +128,7 @@ func TestParkedSubWorkflow_ParkSeedBreak_NonTerminalChildParks(t *testing.T) {
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
 	// Seed a NON-TERMINAL child journal (produce Completed, tail Pending) under the child ID.
-	childID := subWorkflowChildID("wf-parkseed", "sub")
+	childID := SubWorkflowChildID("wf-parkseed", "sub")
 	cd := NewWorkflowData(childID)
 	cd.Set("result", "v")
 	cd.SetNodeStatus("produce", Completed)

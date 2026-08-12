@@ -102,9 +102,9 @@ func (s dagSpec) buildDAG(
 			nb = b.AddNode(invNodeName(i))
 		}
 		if actionFor != nil {
-			nb.WithAction(actionFor(i))
+			nb.WithActionFunc(actionFor(i))
 		} else {
-			nb.WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+			nb.WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 		}
 		if len(s.deps[i]) > 0 {
 			depNames := make([]string, 0, len(s.deps[i]))
@@ -207,7 +207,7 @@ func TestEngineInvariants(t *testing.T) {
 			total := 0
 			for li, lvl := range levels {
 				for _, node := range lvl {
-					levelOf[node.Name] = li
+					levelOf[node.name] = li
 					total++
 				}
 			}
@@ -449,13 +449,13 @@ func TestEngineInvariants(t *testing.T) {
 	properties.Property("normal Failed dep blocks its dependent (direct executor)", prop.ForAll(
 		func(depFailed bool) bool {
 			data := NewWorkflowData("inv5b")
-			dep := NewNode("dep", ActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil }))
+			dep := newNode("dep", ActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil }))
 			var ran int32
-			child := NewNode("child", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			child := newNode("child", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 				atomic.AddInt32(&ran, 1)
 				return nil
 			}))
-			child.AddDependency(dep)
+			child.dependsOn = append(child.dependsOn, dep)
 			// Pre-set the dep's status as if a prior level had run it. depFailed toggles
 			// Failed vs Completed; dep is a NORMAL node (ContinueOnError stays false).
 			if depFailed {
@@ -618,13 +618,13 @@ func TestEngineInvariants(t *testing.T) {
 			if !built {
 				return false // a clean acyclic spec must Build
 			}
-			n0 := dag.Nodes[invNodeName(0)]
-			nLast := dag.Nodes[invNodeName(s.n-1)]
+			n0 := dag.nodes[invNodeName(0)]
+			nLast := dag.nodes[invNodeName(s.n-1)]
 			if n0 == nil || nLast == nil {
 				return false
 			}
-			n0.DependsOn = append(n0.DependsOn, nLast)
-			nLast.DependsOn = append(nLast.DependsOn, n0)
+			n0.dependsOn = append(n0.dependsOn, nLast)
+			nLast.dependsOn = append(nLast.dependsOn, n0)
 
 			err := dag.Execute(context.Background(), NewWorkflowData("inv"))
 			if err == nil {

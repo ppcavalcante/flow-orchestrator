@@ -18,7 +18,19 @@ import (
 // no type→DAG Registry is in scope (the workflow was driven without a Registry). The queue path needs
 // the Registry to resolve the child TYPE → DAG (for the coe-verdict on wake) — the honesty analog of
 // ErrWaitRequiresSignalStore / ErrSubWorkflowRequiresStore.
-var ErrSubWorkflowRequiresRegistry = fmt.Errorf("%w: a queue-dispatched sub-workflow requires a Registry (inject it on the Workflow.Registry / at Execute)", ErrValidation)
+//
+// THE REMEDY NAMES THE DRIVES THAT TAKE A REGISTRY, and it used to name two things a consumer
+// cannot do. It said "inject it on the Workflow.Registry / at Execute": the field is sealed by
+// M23 SEAL-06, so `&Workflow{Registry: reg}` does not compile, and withRegistry/registryFrom are
+// unexported, so there is no ctx route either. A runtime message telling an out-of-package
+// consumer — the one audience that cannot see the field at all — to perform an impossible action
+// is worse than a vague one. RunNext and NewPool take a *Registry as a parameter, and
+// executeLocked threads it onto the drive ctx from there; those are the routes that exist.
+//
+// Whether a consumer SHOULD be able to drive a queue sub-workflow through (*Workflow).Execute
+// directly is a separate, open question (F117-REV-06a) — this message deliberately does not
+// answer it, promise it, or imply that path is expected to work.
+var ErrSubWorkflowRequiresRegistry = fmt.Errorf("%w: a queue-dispatched sub-workflow requires a Registry (drive the workflow through RunNext or a Pool, which take one)", ErrValidation)
 
 // --- Registry ctx injection (M19 ph94; mirrors withParentStore/withClock/withSignalStore) ---
 //
@@ -94,8 +106,17 @@ func (a *queueSubWorkflowAction) Execute(ctx context.Context, parentData *Workfl
 	if ferr != nil {
 		return fmt.Errorf("%w: queue sub-workflow %q: child factory for type %q failed: %w", ErrValidation, a.nodeName, a.childType, ferr)
 	}
+	// A factory returning (nil, nil) is the SECOND route to F-PARK-03: childDAG flows
+	// straight into the parkedSubWorkflowAction below, and childRunFailed then derefs it
+	// on a worker goroutine the moment the child run has a Failed node — the same
+	// uncontainable host-process kill the builder guard closes for the direct path.
+	// A consumer factory that forgets to return an error is an easy mistake; make it a
+	// loud, typed refusal here rather than a panic much later.
+	if childDAG == nil {
+		return fmt.Errorf("%w: queue sub-workflow %q: child factory for type %q returned a nil DAG", ErrValidation, a.nodeName, a.childType)
+	}
 
-	childID := subWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
+	childID := SubWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
 
 	// Enqueue the child (idempotent by childID — a re-drive of the parked parent does not re-enqueue).
 	// The parent address (this workflow ID + the completion-signal name) rides the trusted control
@@ -137,12 +158,21 @@ var ErrSubWorkflowTypeCycle = fmt.Errorf("%w: registered sub-workflow types form
 //	if err := reg.ValidateNoTypeCycles(); err != nil { return err } // before the first RunNext/Pool run
 //
 // HONESTLY SCOPED (the load-bearing caveat, F-P95-04): this extracts only the queueSubWorkflowAction
-// edges from each factory's TOP-LEVEL dag.Nodes. It does NOT recurse into a nested inline
+// edges from each factory's TOP-LEVEL node set (dag.nodes; the field was DAG.Nodes until M23
+// SEAL-02 sealed it). It does NOT recurse into a nested inline
 // subWorkflowAction's child DAG, and a type-ref child is an opaque DAGFactory whose runtime-computed
 // child type is invisible — so a cycle reachable only through an inline wrapper or a runtime-computed
 // type is NOT caught here. This is a fail-fast on the COMMON directly-declared type-ref cycle, NOT the
 // DoS boundary: the runtime depth ceiling (ErrSubWorkflowMaxDepth) is the load-bearing backstop that
 // bounds EVERY chain, declarable or not. A factory that errors is skipped (edges unknowable); nil DAG likewise.
+//
+// IT DOES NOT CHECK THE BUILDER TOKEN, AND THAT IS DELIBERATE (M23 SEAL-06). This calls every
+// registered factory and READS the graph it returns; it never drives one. Refusing an unstamped DAG
+// here would move a drive-time refusal into an opt-in build-time helper — so a consumer who skips
+// this call (which the contract above explicitly permits) would get a WEAKER guarantee than one who
+// makes it, and provenance would stop being enforced at the boundary that actually matters. The
+// refusal stays at the drive: (*DAG).Execute and (*Workflow).executeLocked (and childRunFailed
+// for the ph92 parked verdict path).
 func (r *Registry) ValidateNoTypeCycles() error {
 	// edges[t] = the set of types t statically spawns (via a queue sub-workflow node in t's DAG).
 	edges := make(map[string][]string)
@@ -155,8 +185,8 @@ func (r *Registry) ValidateNoTypeCycles() error {
 		if err != nil || dag == nil {
 			continue // opaque/failing factory → its edges are unknowable; the depth ceiling backstops it.
 		}
-		for _, node := range dag.Nodes {
-			if q, ok := node.Action.(*queueSubWorkflowAction); ok && q.childType != "" {
+		for _, node := range dag.nodes {
+			if q, ok := node.action.(*queueSubWorkflowAction); ok && q.childType != "" {
 				edges[typ] = append(edges[typ], q.childType)
 			}
 		}

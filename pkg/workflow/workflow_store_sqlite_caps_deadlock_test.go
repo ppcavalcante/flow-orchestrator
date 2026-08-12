@@ -112,7 +112,7 @@ func TestCap_ParkedChild_NoDeadlock(t *testing.T) {
 
 	// Sanity: every child also reached done.
 	for i := 0; i < K; i++ {
-		childID := subWorkflowChildID("parent-"+string(rune('a'+i)), "sub")
+		childID := SubWorkflowChildID("parent-"+string(rune('a'+i)), "sub")
 		require.Equal(t, wqDone, wqState(t, s, childID), "the capped-type child completed")
 	}
 }

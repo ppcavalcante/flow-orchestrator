@@ -40,21 +40,27 @@ The `Workflow` struct is the top-level container:
 
 ```go
 type Workflow struct {
-    DAG        *DAG          // Workflow structure
     WorkflowID string        // Unique identifier
     Store      WorkflowStore // Persistence layer
+    // ... plus Clock, Locker, MetricsConfig, RollbackTimeout, MaxSubWorkflowDepth.
+    // The graph itself is UNEXPORTED (M23 SEAL-06) — read it with the DAG() accessor.
 }
+
+func (w *Workflow) DAG() *DAG
 ```
 
-It is built either directly or via `FromBuilder(builder)`, and run with
+**`FromBuilder(builder)` is the only exported path to a runnable `*Workflow`** — a
+directly-constructed one carries no validated graph. Run it with
 `(*Workflow).Execute(ctx)`.
 
 #### Execution path
 
 There is no separate `WorkflowEngine` type — execution lives on the `DAG`:
 
-- `(*DAG).Validate()` checks structure and detects cycles, and computes the
-  start/end nodes and execution levels.
+- `(*DAG).Validate()` checks structure and detects cycles. It does **not** compute
+  start/end nodes or execution levels: `DAG.StartNodes`/`EndNodes` were deleted in
+  v0.22.0 (M23 ph117), and levels are derived on demand by `GetLevels()`, which
+  recomputes the dependency-free set (`len(node.dependsOn) == 0`) on every call.
 - `(*DAG).Execute(ctx, data)` runs the workflow level by level. Within each
   level, nodes are run in parallel bounded by `ExecutionConfig.MaxConcurrency`
   (the internal `executeNodesInLevel` helper, default 16).
@@ -87,8 +93,9 @@ type Checkpointer interface {
 
 When the configured store implements `Checkpointer`, `Workflow.Execute` flushes
 the run's state at each completed level barrier, so a crash mid-run resumes from
-the last checkpoint instead of restarting. All three built-in stores implement it
-(the file stores via atomic temp+fsync+rename). See the
+the last checkpoint instead of restarting. All **four** built-in stores implement it
+— `InMemoryStore`, `JSONFileStore`, `FlatBuffersStore` and `SQLiteStore` (the file
+stores via atomic temp+fsync+rename). See the
 [Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume).
 
 ## Execution Flow
@@ -127,9 +134,12 @@ The Workflow Engine integrates with the persistence layer to:
 
 - Load previous workflow state when resuming
 - Save workflow state at critical points:
-  - Before node execution (for potential recovery)
-  - After node execution (to capture results)
-  - When workflow completes or fails
+  - **At each completed level barrier** — checkpointing is level-granular, **not
+    per-node**: nodes within a level run in parallel and the flush happens once the
+    whole level drains. A crash mid-level re-runs that level's nodes on resume, which
+    is why actions must be idempotent (see
+    [DAG execution → checkpointing](dag-execution.md#checkpointing)).
+  - When the workflow completes, fails, or parks
 
 ## Error Handling
 
@@ -182,8 +192,10 @@ The Workflow Engine provides observability through:
      see the [Observability guide](../guides/observability.md)
 
 2. **Node status**:
-   - Per-node status (Pending/Running/Completed/Failed/Skipped/Waiting) tracked
-     on the `WorkflowData` (`Waiting` added v0.10.0 — a node parked on an external
+   - Per-node status — **nine** states tracked on the `WorkflowData`:
+     Pending/Running/Completed/Failed/Skipped, plus `Waiting` (v0.10.0),
+     `Bypassed` (v0.11.0), and `Compensated`/`CompensationFailed` (v0.12.0)
+     (`Waiting` — a node parked on an external
      event; non-terminal and non-failing)
 
 3. **Logging**:
@@ -220,7 +232,8 @@ struct:
 ```go
 // Per-level execution concurrency (pkg/workflow/parallel_execution.go).
 type ExecutionConfig struct {
-    MaxConcurrency int // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency, 16)
+    MaxConcurrency int                    // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency, 16)
+    TracerProvider trace.TracerProvider   // OTel span-per-node provider; nil disables tracing (API-only, host owns the SDK)
 }
 
 // WorkflowData capacity hints + metrics (pkg/workflow/workflow_data_config.go).
@@ -287,11 +300,13 @@ The engine is optimized for:
 ### Basic Execution
 
 ```go
-// Create a workflow
-wf := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "order-processing",
-    Store:      store,
+// Create a workflow. The store goes on the builder; FromBuilder is the only exported
+// path to a runnable *Workflow (M23 SEAL-06 sealed the DAG field).
+builder.WithWorkflowID("order-processing").WithStore(store)
+
+wf, err := workflow.FromBuilder(builder)
+if err != nil {
+    log.Fatalf("failed to build workflow: %v", err)
 }
 
 // Execute the workflow

@@ -65,12 +65,12 @@ func (p *overlapProbe) Execute(_ context.Context, _ *WorkflowData) error {
 func driveTwiceConcurrently(t *testing.T, locker Locker) int32 {
 	t.Helper()
 	probe := &overlapProbe{}
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-lease"
 	if locker != nil {
 		w.WithLocker(locker)
 	}
-	require.NoError(t, w.AddNode(NewNode("n", probe)))
+	require.NoError(t, w.addNode(newNode("n", probe)))
 
 	var wg sync.WaitGroup
 	wg.Add(2)

@@ -28,8 +28,20 @@ var ErrSubWorkflowRequiresStore = errors.New("workflow cannot spawn a sub-workfl
 // ErrSubWorkflowSuspendableChild is returned at build time when an inline sub-workflow's
 // definition-value child (or any transitive descendant) contains a suspendable node. An
 // inline child BLOCKS the parent goroutine, so it can never park-and-resume; a suspendable
-// child would hang. Such a child must be dispatched via the queue path (ph94) instead.
-var ErrSubWorkflowSuspendableChild = errors.New("inline sub-workflow child contains a suspendable node: route it to the queue-dispatch path instead")
+// child would hang.
+//
+// TWO paths accept a suspendable child, and the message names both because they are not
+// ordered by weight in one direction (F-PARK-04):
+//   - AddSubWorkflowParked — the host runs the child itself; needs a SignalStore.
+//   - AddSubWorkflowQueued — the engine dispatches it; needs a multi-process *SQLiteStore
+//     plus a worker Pool and a Registry.
+//
+// Naming only the queue path over-steered callers onto the heaviest option. Naming only
+// parked would over-steer the other way: parked is lighter than queue, but HEAVIER than
+// inline (inline runs on a bare WorkflowStore), so a caller who could have restructured to
+// stay inline should not be pushed off it either. State the requirement of each and let
+// the caller choose.
+var ErrSubWorkflowSuspendableChild = errors.New("inline sub-workflow child contains a suspendable node: inline cannot park, so use AddSubWorkflowParked (host runs the child; requires a SignalStore) or AddSubWorkflowQueued (engine dispatches it; requires a multi-process *SQLiteStore, Pool and Registry)")
 
 // ErrSubWorkflowCycle is returned when a sub-workflow would spawn a child whose
 // deterministic ID equals an ID already on the drive stack (an ancestor). The per-WorkflowID
@@ -182,13 +194,27 @@ func withDriveID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, driveStackCtxKey{}, next)
 }
 
-// subWorkflowChildID derives the deterministic child WorkflowID from the parent ID and the
-// sub-workflow node name. Reuses the IdempotencyKey framing discipline (an 8-byte LE length
-// prefix on parentID so the (parentID, nodeName) split is unambiguous — ("ab","c") and
-// ("a","bc") never collide). Resume-stable: the same (parent, node) always yields the same
-// child ID, so a re-drive finds the same child. Prefixed "sub:" so a child ID is visibly
-// distinct from a top-level workflow ID.
-func subWorkflowChildID(parentID, nodeName string) string {
+// SubWorkflowChildID derives the deterministic child WorkflowID from the parent ID and the
+// sub-workflow node name.
+//
+//	digest = SHA-256( uint64-LE(len(parentID)) || parentID || nodeName )
+//	id     = "sub:" + hex(digest)
+//
+// The 8-byte little-endian length prefix on parentID frames the boundary between the two
+// fields so the split point is unambiguous: ("ab","c") and ("a","bc") yield distinct IDs
+// (a naive concatenation would collide). This construction is a STABLE CONTRACT —
+// downstream systems may recompute it, so it must not change across versions without a
+// deliberate, documented break. The same guarantee IdempotencyKey carries.
+//
+// Resume-stable: the same (parent, node) always yields the same child ID, so a re-drive
+// finds the same child. Prefixed "sub:" so a child ID is visibly distinct from a
+// top-level workflow ID.
+//
+// Exported because the PARKED sub-workflow pattern is not otherwise reachable: the host
+// runs the child itself and must know the WorkflowID to run it under. Recompute it here
+// rather than reimplementing the framing — the length prefix is a collision guard, not
+// incidental.
+func SubWorkflowChildID(parentID, nodeName string) string {
 	h := sha256.New()
 	var lenPrefix [8]byte
 	binary.LittleEndian.PutUint64(lenPrefix[:], uint64(len(parentID)))
@@ -225,12 +251,14 @@ func scanChildInlineSafeVisited(child *DAG, visited map[*DAG]struct{}) error {
 		return nil // already scanned this DAG (a diamond) or we are inside a cycle → stop, don't recurse
 	}
 	visited[child] = struct{}{}
-	for _, node := range child.Nodes {
-		if _, ok := node.Action.(suspendableAction); ok {
-			return fmt.Errorf("%w: node %q in child %q", ErrSubWorkflowSuspendableChild, node.Name, child.Name)
+	for _, node := range child.nodes {
+		// M23 SEAL-09: gate on the node-indexed capability, not the action's dynamic
+		// type. Same set, derived once at mint (node.go) — see Node.suspendable.
+		if node.suspendable {
+			return fmt.Errorf("%w: node %q in child %q", ErrSubWorkflowSuspendableChild, node.name, child.name)
 		}
 		// Recurse into a nested definition-value sub-workflow child (the TRANSITIVE case).
-		if sub, ok := node.Action.(*subWorkflowAction); ok {
+		if sub, ok := node.action.(*subWorkflowAction); ok {
 			if err := scanChildInlineSafeVisited(sub.child, visited); err != nil {
 				return err
 			}
@@ -263,7 +291,7 @@ func (a *subWorkflowAction) Execute(ctx context.Context, parentData *WorkflowDat
 	if store == nil {
 		return ErrSubWorkflowRequiresStore
 	}
-	childID := subWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
+	childID := SubWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
 
 	// Ancestor-cycle guard (Task 2): refuse BEFORE child.Execute acquires the non-reentrant
 	// per-ID lease. A child ID already on the drive stack is an ancestor → self-deadlock.
@@ -297,7 +325,7 @@ func (a *subWorkflowAction) Execute(ctx context.Context, parentData *WorkflowDat
 	// Drive the child in-process under its own ID + journal + the parent's store. The child
 	// ID is pushed on the drive stack so a grandchild that would re-use an ancestor ID is
 	// caught by the guard above. Parent ctx cancellation flows into child.Execute for free.
-	child := &Workflow{DAG: a.child, WorkflowID: childID, Store: store}
+	child := &Workflow{dag: a.child, WorkflowID: childID, Store: store}
 	if err := child.Execute(withDriveID(ctx, childID)); err != nil {
 		return err // child failure → non-ErrSuspended → parent node Failed (INV-01 terminal-no-op)
 	}
@@ -338,10 +366,125 @@ func (a *subWorkflowAction) applyResult(parentData *WorkflowData, childData *Wor
 	// Collision check: refuse to overwrite a pre-existing parent key. A prior spawn of THIS
 	// node writes the SAME key with the SAME value, which is the idempotent re-apply — allow
 	// that (equal value), refuse a foreign pre-existing value (last-writer-wins hazard).
+	//
 	// reflect.DeepEqual (not !=) so a non-comparable child result (a slice/map) does not PANIC
-	// the comparison — DeepEqual is total over any value type.
-	if existing, present := parentData.Get(a.resultKey); present && !reflect.DeepEqual(existing, result) {
-		return fmt.Errorf("%w: key %q (node %q)", ErrSubWorkflowResultKeyCollision, a.resultKey, a.nodeName)
+	// the comparison. DeepEqual is total over any value TYPE — which is why it beat `!=` —
+	// and that is NOT the same as total over any value, which is what this comment used to
+	// imply. It is NOT total over DEPTH: DeepEqual recurses, and it dies on a deep value at
+	// ~922 bytes of goroutine stack per level. See checkValueDepth.
+	//
+	// 116-AF2, and this site is the REPRODUCED one: the defect was driven end-to-end from an
+	// external module through the public builder API alone, at depth 650,000, and the child
+	// exited with `fatal error: stack overflow` under reflect.deepValueEqual.
+	//
+	// THE CRASH IS ON THE SUCCESS PATH, which is the whole severity. Reaching DeepEqual at
+	// all means a value is already present; if the two are EQUAL this function returns nil
+	// and the run proceeds. So an ordinary idempotent re-apply of a sub-workflow result — a
+	// crash-resume replaying a completed child, the engine's most normal operation — kills
+	// the host process. No error path, no adversarial shape.
+	//
+	// AND NO MARSHAL GUARD REACHES IT ON THE BACKEND THAT REPRODUCES IT. That qualifier is
+	// the correction: the three measurements below are all about InMemoryStore, and the
+	// sentence that used to end this paragraph — "the value never meets an encoder before it
+	// meets DeepEqual" — is store-specific written as general. On this backend Save clones
+	// and never marshals; 650,000 is BELOW json.Marshal's own death at ~721,914; and cloneMap
+	// is iterative, so the clone costs heap, not stack.
+	//
+	// On JSONFile / FlatBuffers / SQLite the child result HAS met an encoder — see the
+	// 116-AF6-R2 note below, which is exactly why the residual there is InMemoryStore-only.
+	//
+	// Guarded on the SAME bound as the encoders because DeepEqual is the tighter class —
+	// it dies FIRST (~922 B/level vs the encoder's ~743), so a bound sound for it is sound
+	// for both.
+	//
+	// 🔴 116-AF9: "ONE SIDE IS ENOUGH" STOOD HERE AND IS FALSE — and it was stated in the
+	// imperative, telling a future reader not to "complete" it with a second check on
+	// `existing`. It therefore instructed them to reintroduce the defect this phase fixed.
+	// The proof (deepValueEqual descends only where BOTH values have the corresponding
+	// element, so its depth is bounded by the SHALLOWER of the two) is about STRUCTURAL
+	// depth and holds only for ACYCLIC values. For a cyclic pair both structural depths are
+	// infinite and min() says nothing; what terminates deepValueEqual is its memo, and that
+	// memo matches on a repeated PAIR. checkDeepEqualPairDepth takes BOTH values, its doc
+	// comment carries the correction in full, and the call below passes both.
+	if existing, present := parentData.Get(a.resultKey); present {
+		// The guard sits INSIDE the present branch because that is exactly when
+		// reflect.DeepEqual runs. Running it unconditionally refused values that were
+		// never going to be compared.
+		// 🔴 116-AF6-R2, ACCEPTED RESIDUAL (medium). RE-WORDED, not re-dispositioned:
+		// an independent seat was commissioned to attack the original text and refuted
+		// it in three directions. Corrected here because this comment is the only copy
+		// of the finding that ships.
+		//
+		// The error-substitution class 116-AF1 named is NARROWED, not closed. Any pair
+		// checkDeepEqualPairDepth refuses returns ErrValidation from here, because the
+		// depth guard runs BEFORE this function's own comparison and a refusal
+		// pre-empts it.
+		//
+		// WIDER than first recorded — it substitutes for SUCCESS, not just for a
+		// sentinel. For a deeply EQUAL pair the contract here is nil, the idempotent
+		// re-apply. MEASURED: two distinct-but-equal 5-node rings — reflect.DeepEqual
+		// answers true in 79.9 us without difficulty — are refused. It fails a run that
+		// would have succeeded, which for THIS site is the crash-resume replay of a
+		// completed child: the engine's most normal operation.
+		//
+		// NO CYCLE IS NEEDED; "notably two same-type cyclic values" understated the
+		// class. An ACYCLIC struct{Val int; Next *N} chain reaches it. MEASURED
+		// boundary, monotone, with the guard NAMED at each step:
+		//
+		//	links   walk frames (2n+1)   outcome
+		//	16,383  32,767              ACCEPT -> falls through to the DeepEqual below
+		//	                            -> ErrSubWorkflowResultKeyCollision (correct)
+		//	16,384  32,769              REFUSE -> ErrValidation, checkDeepEqualPairDepth
+		//
+		// A link costs a POINTER frame and a STRUCT frame, so n links cost 2n+1 walk
+		// frames and the accept edge is 16,383 — NOT "16,384 x 2 = 32,768", which is the
+		// depth-vs-frames slip 116-AF5 was filed for.
+		//
+		// NARROWER than first recorded — exposure is InMemoryStore-ONLY, and the reason
+		// runs through `result`, NOT through `existing`. 116-GC-F5: this comment had the
+		// operands the wrong way round, and the fan-out site had the same inversion.
+		//
+		// `result` is the STORE-DERIVED operand: applyResult's childData arrives from
+		// store.Load(childID) on both call paths, so on JSONFile / FlatBuffers / SQLite
+		// `result` lands FLATTENED — map[string]interface{} or string. `existing` comes
+		// from parentData.Get, and WorkflowData.Get/Set are in-memory map operations with
+		// no store involvement: on a fresh single-process run it is the raw Go value a
+		// prior node Set, on EVERY backend. So the pair TYPE-MISMATCHES,
+		// deepEqualSettlesWithoutRecursing accepts it, and the correct collision sentinel
+		// comes back. On a RESUME both operands are store-derived, both flattened and
+		// therefore shallow, and the acyclic-side accept fires instead. Either way a
+		// marshalling backend cannot reach this bound.
+		//
+		// Nor can an encoder-VISIBLE value get there through one: checkJSONDepth caps a
+		// document at 10,000 NESTING LEVELS, about 20,000 walk frames, and this guard
+		// does not refuse until past 32,768. Both quoted in FRAMES on purpose —
+		// comparing "10,000 levels" against "16,384 links" would be the AF5 unit slip,
+		// two paragraphs after the one warning about it.
+		//
+		// InMemoryStore is a supported public backend, so the residual is REAL — its
+		// blast radius is one backend.
+		//
+		// EXPOSURE IS AT Execute, NOT AT Save — confirmed independently. The comparison
+		// runs during the run, so "a cyclic value could never persist" is TRUE and about
+		// the WRONG AXIS. It is also false in its own right; see 116-AF9 in
+		// value_depth_deepequal.go. And "on in-memory branch results", the phrase the
+		// original finding used, is wrong at BOTH sites, not just this one: the child
+		// result arrives via store.Load(childID) here, and fan-out's driveBranch reads
+		// its branch result from store.Load(childID) on both of ITS return paths. The
+		// re-worded finding called that phrase accurate for fan-out; it is not
+		// (116-GC-F1). The operand that is genuinely in-memory is `existing`, on a
+		// non-resume run.
+		//
+		// The remedy — a bounded lockstep probe to decide cheap-disqualification
+		// during recursion — was DECLINED by the architect: ~60 lines of equality
+		// re-implementation inside a bound, on the guard already carrying the most
+		// mirroring complexity, to convert a safe refusal into a less safe accept.
+		if derr := checkDeepEqualPairDepth(existing, result, fmt.Sprintf("sub-workflow %q result key %q", a.nodeName, a.resultKey)); derr != nil {
+			return derr
+		}
+		if !reflect.DeepEqual(existing, result) {
+			return fmt.Errorf("%w: key %q (node %q)", ErrSubWorkflowResultKeyCollision, a.resultKey, a.nodeName)
+		}
 	}
 	parentData.Set(a.resultKey, result)
 	return nil
@@ -410,7 +553,50 @@ func childTerminal(childData *WorkflowData) bool {
 // statuses alone — the inline path surfaces the ctx error, the parked path cannot see it. In
 // ph92 the child is run out-of-band by the (manual/ph94) producer; a cancelled child that
 // terminalized cleanly is out of scope here and is the ph94 producer's responsibility to signal.
-func childRunFailed(dag *DAG, childData *WorkflowData) (failed bool, firstFailed string) {
+func childRunFailed(dag *DAG, childData *WorkflowData) (failed bool, firstFailed string, err error) {
+	// M23 SEAL-06 — VERDICT MEDIATION. This is the second of the phase's two checks, and it
+	// is NOT redundant with the one in (*DAG).Execute: the ph92 parked path renders a run's
+	// verdict by READING a child DAG WITHOUT EVER EXECUTING IT, so no execution-path check
+	// can see it. (F-117-ARCH-01.)
+	//
+	// SCOPED TO THE PARKED PATH, matching the doc comment above. An earlier version of THIS
+	// comment contradicted that doc comment three lines up: it claimed one check here also
+	// closed the ph94 queue path "because the queue action delegates to the parked action".
+	// The delegation is real — queueSubWorkflowAction.Execute hands its factory DAG to a
+	// parkedSubWorkflowAction — but it does NOT arrive here. That action ENQUEUES the child
+	// before it parks, and the parked action consults the work_queue row FIRST; every arm of
+	// that queue-authority switch returns ABOVE the childRunFailed call site. On the queue
+	// path the verdict therefore comes from the ROW, and this function is UNREACHABLE.
+	// Verified at this head: childRunFailed has exactly ONE non-test call site
+	// (subworkflow_parked.go), sited below that switch, and no production statement deletes a
+	// work_queue row (every production verb on the table is INSERT/SELECT/UPDATE), so the row
+	// is still there on every later wake.
+	//
+	// THE CHECK STAYS ANYWAY — IT IS A DELIBERATE BACKSTOP, NOT DEAD CODE. Its unreachability
+	// rests entirely on that "no production DELETE" fact, which is a property of today's code
+	// and not a design invariant. Add a work_queue GC — an entirely reasonable future change —
+	// and queueTerminalState starts returning exists=false, the queue path falls through to
+	// the journal gate below it, and this function becomes reachable holding a child DAG that
+	// came straight from a consumer factory. Do NOT delete this check on the grounds that the
+	// queue path cannot reach it: that reasoning expires the day the row stops being permanent.
+	//
+	// The exposure is not academic. The verdict is rendered by reading continueOnError off
+	// this DAG, so an unvalidated graph flips a FAILED CHILD INTO A REPORTED SUCCESS — the
+	// phase's own defect shape, on the verdict path instead of the execution path.
+	//
+	// This also SUBSUMES A LATENT CRASH. dag==nil used to reach `dag.nodes[name]` and
+	// panic on a level worker goroutine, where a consumer cannot recover — previously held
+	// off only by a guard at Build. It is now a typed error on the same branch.
+	//
+	// SCOPE, stated so the seal is not overclaimed: this proves the verdict DAG passed
+	// build(). It does NOT prove the verdict DAG is the same graph that ran — for a queue
+	// child those are two objects from two separate consumer factory() calls in two
+	// processes. That gap is F-117-ARCH-05, it is pre-existing, and T6 neither causes nor
+	// closes it.
+	if dag == nil || !dag.built {
+		return false, "", fmt.Errorf("%w: cannot render a sub-workflow verdict", ErrDAGNotBuilt)
+	}
+
 	consider := func(name string) {
 		if firstFailed == "" || name < firstFailed {
 			failed = true
@@ -420,7 +606,7 @@ func childRunFailed(dag *DAG, childData *WorkflowData) (failed bool, firstFailed
 	for name, st := range childData.GetAllNodeStatuses() {
 		switch st {
 		case Failed:
-			if node, ok := dag.Nodes[name]; ok && node.ContinueOnError {
+			if node, ok := dag.nodes[name]; ok && node.continueOnError {
 				continue // a coe Failed node is tolerated — not a run failure
 			}
 			consider(name)
@@ -428,5 +614,5 @@ func childRunFailed(dag *DAG, childData *WorkflowData) (failed bool, firstFailed
 			consider(name) // a rollback node → the run failed (rollback implies failure)
 		}
 	}
-	return failed, firstFailed
+	return failed, firstFailed, nil
 }

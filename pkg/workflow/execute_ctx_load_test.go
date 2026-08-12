@@ -24,15 +24,15 @@ func TestExecute_CancelBetweenLevels(t *testing.T) {
 
 	var secondRan atomic.Bool
 
-	dag := NewDAG("cancel-between-levels")
+	dag := newDAGForTest("cancel-between-levels")
 
-	first := NewNode("first", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	first := newNode("first", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		// Cancel the workflow as the level-0 work completes. The next loop
 		// iteration's ctx.Err() check must short-circuit before launching level 1.
 		cancel()
 		return nil
 	}))
-	second := NewNode("second", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	second := newNode("second", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		secondRan.Store(true)
 		return nil
 	}))
@@ -81,14 +81,14 @@ func TestExecute_LoadErrorPropagates(t *testing.T) {
 	store := &errLoadStore{loadErr: ErrCorruptData}
 
 	var bodyRan atomic.Bool
-	dag := NewDAG("resume")
-	node := NewNode("work", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	dag := newDAGForTest("resume")
+	node := newNode("work", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		bodyRan.Store(true)
 		return nil
 	}))
 	mustAddNode(t, dag, node)
 
-	wf := &Workflow{DAG: dag, WorkflowID: "wf-corrupt", Store: store}
+	wf := &Workflow{dag: dag, WorkflowID: "wf-corrupt", Store: store}
 	err := wf.Execute(context.Background())
 
 	require.Error(t, err, "a corrupt-resume load error must surface")
@@ -109,14 +109,14 @@ func TestExecute_NotFoundStartsFresh(t *testing.T) {
 	store := &errLoadStore{loadErr: fmt.Errorf("%w: %s", ErrNotFound, "wf-fresh")}
 
 	var bodyRan atomic.Bool
-	dag := NewDAG("fresh")
-	node := NewNode("work", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	dag := newDAGForTest("fresh")
+	node := newNode("work", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		bodyRan.Store(true)
 		return nil
 	}))
 	mustAddNode(t, dag, node)
 
-	wf := &Workflow{DAG: dag, WorkflowID: "wf-fresh", Store: store}
+	wf := &Workflow{dag: dag, WorkflowID: "wf-fresh", Store: store}
 	err := wf.Execute(context.Background())
 
 	require.NoError(t, err, "ErrNotFound must be treated as 'start fresh', not an error")

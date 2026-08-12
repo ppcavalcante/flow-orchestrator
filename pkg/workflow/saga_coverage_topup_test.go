@@ -55,16 +55,16 @@ func buildTriggerSaga(t *testing.T, store WorkflowStore, id string,
 	ca, cb, cc func(context.Context, *WorkflowData) error) *Workflow {
 	t.Helper()
 	b := NewWorkflowBuilder()
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(ca)
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(cb).DependsOn("a")
-	b.AddNode("c").WithAction(benchNoopAction()).WithCompensation(cc).DependsOn("a")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(ca)
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(cb).DependsOn("a")
+	b.AddNode("c").WithAction(benchNoopAction()).WithCompensationFunc(cc).DependsOn("a")
 	b.AddNode("d").WithAction(benchNoopAction()).DependsOn("b", "c")
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("d")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store}
 }
 
 // TestWithClock_SetsAndRestores — WithClock sets the clock, returns the workflow for
@@ -193,7 +193,7 @@ func TestRunCompensation_DeadlineDuringBackoff(t *testing.T) {
 	b := NewWorkflowBuilder()
 	b.AddNode("a").WithAction(benchNoopAction()).
 		WithRetries(3). // would retry with a 1s backoff between attempts…
-		WithCompensation(func(context.Context, *WorkflowData) error {
+		WithCompensationFunc(func(context.Context, *WorkflowData) error {
 			return errors.New("always fails") // …so it enters the backoff after attempt 0
 		})
 	b.AddNode("fail").
@@ -201,7 +201,7 @@ func TestRunCompensation_DeadlineDuringBackoff(t *testing.T) {
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "deadline-in-backoff", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "deadline-in-backoff", Store: store}
 	w.WithRollbackTimeout(50 * time.Millisecond) // fires DURING the 1s backoff
 
 	start := time.Now()
@@ -224,7 +224,7 @@ func TestRunCompensation_DeadlineDuringBackoff(t *testing.T) {
 func TestDriveRollback_MaxConcurrencyCoerced(t *testing.T) {
 	store := NewInMemoryStore()
 	w := buildTriggerSaga(t, store, "maxconc-coerce", okCompFn, okCompFn, okCompFn)
-	w.DAG.config.MaxConcurrency = 0 // non-positive → the coerce must save it from a deadlock
+	w.dag.config.MaxConcurrency = 0 // non-positive → the coerce must save it from a deadlock
 
 	done := make(chan error, 1)
 	go func() { done <- w.Execute(context.Background()) }()
@@ -243,7 +243,7 @@ func TestDriveRollback_MaxConcurrencyCoerced(t *testing.T) {
 // unbuffered semaphore and deadlock the first send (review ph46-F1).
 func TestCompensateLevel_MaxConcurrencyCoerced(t *testing.T) {
 	b := NewWorkflowBuilder()
-	b.AddNode("x").WithAction(benchNoopAction()).WithCompensation(okCompFn)
+	b.AddNode("x").WithAction(benchNoopAction()).WithCompensationFunc(okCompFn)
 	dag, err := b.Build()
 	require.NoError(t, err)
 	data := NewWorkflowData("cl")
@@ -271,10 +271,10 @@ func TestCompensateLevel_MaxConcurrencyCoerced(t *testing.T) {
 // silently dropped from the honest partition.
 func TestReconstructOutcome_ResidualCompletedCompensableIsFailed(t *testing.T) {
 	b := NewWorkflowBuilder()
-	b.AddNode("x").WithAction(benchNoopAction()).WithCompensation(okCompFn)
+	b.AddNode("x").WithAction(benchNoopAction()).WithCompensationFunc(okCompFn)
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "ro"}
+	w := &Workflow{dag: dag, WorkflowID: "ro"}
 	data := NewWorkflowData("ro")
 	data.SetNodeStatus("x", Completed) // Completed + has a compensation, but un-compensated
 

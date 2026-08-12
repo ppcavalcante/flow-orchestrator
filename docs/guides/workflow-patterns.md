@@ -105,7 +105,7 @@ builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("fan-out-fan-in")
 
 builder.AddStartNode("split-data").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Split input into chunks
         items := []string{"item1", "item2", "item3", "item4"}
         data.Set("items", items)
@@ -139,7 +139,7 @@ for i := 0; i < 4; i++ {
 
 // Aggregate results
 builder.AddNode("aggregate-results").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         count, _ := data.GetInt("item_count")
         results := make([]string, count)
         
@@ -205,7 +205,7 @@ builder := workflow.NewWorkflowBuilder().
 
 // Initial node
 builder.AddStartNode("validate-input").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Validate and set a condition flag
         valid := true // Determine this based on input
         data.Set("is_valid_input", valid)
@@ -214,7 +214,7 @@ builder.AddStartNode("validate-input").
 
 // Decision node
 builder.AddNode("check-condition").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         isValid, _ := data.GetBool("is_valid_input")
         
         if isValid {
@@ -228,7 +228,7 @@ builder.AddNode("check-condition").
 
 // Success path - node will always execute but may do nothing
 builder.AddNode("success-action").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         path, _ := data.GetString("execution_path")
         if path != "success" {
             // Skip the actual logic but node still executes
@@ -241,7 +241,7 @@ builder.AddNode("success-action").
 
 // Failure path - node will always execute but may do nothing
 builder.AddNode("failure-action").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         path, _ := data.GetString("execution_path")
         if path != "failure" {
             // Skip the actual logic but node still executes
@@ -287,7 +287,7 @@ machine-checked in TLA+.
 builder := workflow.NewWorkflowBuilder().WithWorkflowID("order-routing")
 
 builder.AddStartNode("classify").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         data.Set("amount", 2500) // determined from input
         return nil
     })
@@ -360,7 +360,7 @@ builder.AddNode("risky-operation").
 
 // Error handling node
 builder.AddNode("handle-error").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Check if previous node failed
         status, _ := data.GetNodeStatus("risky-operation")
         
@@ -414,7 +414,7 @@ builder := workflow.NewWorkflowBuilder().
 
 builder.AddStartNode("reserve-inventory").
     WithAction(reserveInventoryAction).
-    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithCompensationFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         id, _ := data.GetString("reservation_id")
         // Undo the reservation. MUST be idempotent — see below.
         return releaseReservation(ctx, id)
@@ -422,7 +422,7 @@ builder.AddStartNode("reserve-inventory").
 
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
-    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithCompensationFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         pid, _ := data.GetString("payment_id")
         return refundPayment(ctx, pid)
     }).
@@ -475,7 +475,7 @@ The engine gives you a stable dedup handle to drive downstream idempotency. Insi
 compensation, read it with `CompensationIdempotencyKey(ctx)`:
 
 ```go
-WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+WithCompensationFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
     key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
     pid, _ := data.GetString("payment_id")
     return refundPaymentIdempotent(ctx, pid, key)      // downstream dedupes on key

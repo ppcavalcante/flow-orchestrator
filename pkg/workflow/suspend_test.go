@@ -106,9 +106,9 @@ func TestWaitingIsLiveNotTerminal_Predicates(t *testing.T) {
 
 	// A dependency that is Waiting does not resolve (dependents must wait, not
 	// proceed) — for both an ordinary and a continue-on-error dependency.
-	plain := NewNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
-	coe := NewNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
-	coe.ContinueOnError = true
+	plain := newNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	coe := newNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	coe.continueOnError = true
 	assert.False(t, depResolved(plain, Waiting, andDependent), "a Waiting dep does not resolve its dependents")
 	assert.False(t, depResolved(coe, Waiting, andDependent), "a Waiting continue-on-error dep does not resolve either")
 }
@@ -123,11 +123,11 @@ func TestNodeExecute_DeclaredSuspensionNodeParks(t *testing.T) {
 	node := newSuspendingNode("parker", gate)
 	// Set retry + timeout to prove a park bypasses BOTH wrappers: a parked node
 	// must run exactly once and surface the sentinel, not be retried or timed out.
-	node.RetryCount = 5
-	node.Timeout = time.Hour
+	node.retryCount = 5
+	node.timeout = time.Hour
 	data := NewWorkflowData("wf")
 
-	err := node.Execute(context.Background(), data)
+	err := node.execute(context.Background(), data)
 
 	require.ErrorIs(t, err, ErrSuspended, "a declared suspension node returns the park sentinel")
 	status, ok := data.GetNodeStatus("parker")
@@ -147,13 +147,13 @@ func TestNodeExecute_SuspensionNodeWakesAndCompletes(t *testing.T) {
 	data := NewWorkflowData("wf")
 
 	// First run parks.
-	require.ErrorIs(t, node.Execute(context.Background(), data), ErrSuspended)
+	require.ErrorIs(t, node.execute(context.Background(), data), ErrSuspended)
 	st, _ := data.GetNodeStatus("parker")
 	require.Equal(t, Waiting, st)
 
 	// The external event arrives; re-entering Execute now completes.
 	gate.wake()
-	require.NoError(t, node.Execute(context.Background(), data))
+	require.NoError(t, node.execute(context.Background(), data))
 	st, _ = data.GetNodeStatus("parker")
 	assert.Equal(t, Completed, st, "a woken node completes on re-entry")
 }
@@ -164,12 +164,12 @@ func TestNodeExecute_SuspensionNodeWakesAndCompletes(t *testing.T) {
 // executor would falsely park the run on a node the model never treats as
 // waiting-capable. (errors.Is(returned, ErrSuspended) must be false.)
 func TestNodeExecute_OrdinaryActionCannotPark(t *testing.T) {
-	node := NewNode("rogue", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	node := newNode("rogue", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return ErrSuspended
 	}))
 	data := NewWorkflowData("wf")
 
-	err := node.Execute(context.Background(), data)
+	err := node.execute(context.Background(), data)
 
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrSuspended),

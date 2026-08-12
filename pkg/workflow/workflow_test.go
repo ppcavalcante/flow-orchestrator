@@ -13,7 +13,7 @@ import (
 
 func TestNewWorkflow(t *testing.T) {
 	store := NewInMemoryStore()
-	workflow := NewWorkflow(store)
+	workflow := newWorkflowForTest(store)
 
 	// t.Fatal (not t.Error) on the nil check: t.Error continues execution, so the
 	// subsequent field derefs would nil-panic if workflow were nil (SA5011). Fatal
@@ -24,7 +24,13 @@ func TestNewWorkflow(t *testing.T) {
 	if workflow.Store == nil {
 		t.Error("Workflow should have a store")
 	}
-	if workflow.DAG == nil {
+	// .dag, the FIELD, not .DAG() the accessor — and go vet is what forced the
+	// distinction. M23 SEAL-06 added a DAG() method beside the sealed field, so
+	// `workflow.DAG == nil` stopped being a field comparison and silently became a
+	// comparison against a METHOD VALUE, which is never nil. It compiled. vet caught it
+	// with "comparison of function DAG == nil is always false"; without vet this
+	// assertion would have passed forever on any Workflow, graph or no graph.
+	if workflow.dag == nil {
 		t.Error("Workflow should have a DAG")
 	}
 	if workflow.WorkflowID == "" {
@@ -33,18 +39,18 @@ func TestNewWorkflow(t *testing.T) {
 }
 
 func TestWorkflowAddNode(t *testing.T) {
-	workflow := NewWorkflow(NewInMemoryStore())
-	node := NewNode("test", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+	workflow := newWorkflowForTest(NewInMemoryStore())
+	node := newNode("test", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 		return nil
 	}))
 
-	err := workflow.AddNode(node)
+	err := workflow.addNode(node)
 	if err != nil {
 		t.Errorf("AddNode returned error: %v", err)
 	}
 
 	// Verify node was added by checking the DAG
-	if len(workflow.DAG.Nodes) != 1 {
+	if len(workflow.dag.nodes) != 1 {
 		t.Error("Workflow DAG should have one node")
 	}
 }
@@ -52,12 +58,12 @@ func TestWorkflowAddNode(t *testing.T) {
 func TestWorkflowExecution(t *testing.T) {
 	t.Run("Successful execution", func(t *testing.T) {
 		store := NewInMemoryStore()
-		workflow := NewWorkflow(store).WithWorkflowID("test-workflow")
+		workflow := newWorkflowForTest(store).WithWorkflowID("test-workflow")
 
 		executionOrder := make([]string, 0)
 
 		// Add two nodes
-		err := workflow.AddNode(NewNode("node1", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		err := workflow.addNode(newNode("node1", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			executionOrder = append(executionOrder, "node1")
 			data.Set("node1-executed", true)
 			return nil
@@ -66,7 +72,7 @@ func TestWorkflowExecution(t *testing.T) {
 			t.Fatalf("Failed to add node1: %v", err)
 		}
 
-		err = workflow.AddNode(NewNode("node2", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		err = workflow.addNode(newNode("node2", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			executionOrder = append(executionOrder, "node2")
 			node1Executed, _ := data.GetBool("node1-executed")
 			if !node1Executed {
@@ -79,7 +85,7 @@ func TestWorkflowExecution(t *testing.T) {
 		}
 
 		// Add dependency: node1 -> node2
-		err = workflow.AddDependency("node1", "node2")
+		err = workflow.addDependency("node1", "node2")
 		if err != nil {
 			t.Fatalf("Failed to add dependency: %v", err)
 		}
@@ -104,10 +110,10 @@ func TestWorkflowExecution(t *testing.T) {
 
 	t.Run("Context cancellation", func(t *testing.T) {
 		store := NewInMemoryStore()
-		workflow := NewWorkflow(store)
+		workflow := newWorkflowForTest(store)
 
 		// Add a node with sleep
-		err := workflow.AddNode(NewNode("sleep-node", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		err := workflow.addNode(newNode("sleep-node", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			select {
 			case <-time.After(500 * time.Millisecond):
 				return nil
@@ -141,12 +147,12 @@ func TestWorkflowExecution(t *testing.T) {
 
 	t.Run("Node execution failure", func(t *testing.T) {
 		store := NewInMemoryStore()
-		workflow := NewWorkflow(store)
+		workflow := newWorkflowForTest(store)
 
 		expectedErr := errors.New("node execution failed")
 
 		// Add a failing node
-		err := workflow.AddNode(NewNode("failing-node", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		err := workflow.addNode(newNode("failing-node", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			return expectedErr
 		})))
 		if err != nil {
@@ -173,11 +179,11 @@ func TestWorkflowExecution(t *testing.T) {
 
 		var ran bool
 		wf := &Workflow{
-			DAG:        NewDAG("corrupt-resume"),
+			dag:        newDAGForTest("corrupt-resume"),
 			WorkflowID: "corrupt-resume",
 			Store:      store,
 		}
-		require.NoError(t, wf.AddNode(NewNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		require.NoError(t, wf.addNode(newNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			ran = true
 			return nil
 		}))))
@@ -195,12 +201,12 @@ func TestWorkflowExecution(t *testing.T) {
 		// starts fresh and runs to completion.
 		store := newMockWorkflowStore() // empty -> Load returns ErrNotFound
 		wf := &Workflow{
-			DAG:        NewDAG("fresh-start"),
+			dag:        newDAGForTest("fresh-start"),
 			WorkflowID: "fresh-start",
 			Store:      store,
 		}
 		var ran bool
-		require.NoError(t, wf.AddNode(NewNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		require.NoError(t, wf.addNode(newNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			ran = true
 			return nil
 		}))))
@@ -240,14 +246,14 @@ func TestWorkflowBuilderOperations(t *testing.T) {
 		require.Equal(t, "test-workflow", workflow.WorkflowID)
 
 		// Verify nodes and dependencies
-		nodeA, exists := workflow.DAG.GetNode("A")
+		nodeA, exists := workflow.dag.GetNode("A")
 		require.True(t, exists)
-		require.Empty(t, nodeA.DependsOn)
+		require.Empty(t, nodeA.dependsOn)
 
-		nodeB, exists := workflow.DAG.GetNode("B")
+		nodeB, exists := workflow.dag.GetNode("B")
 		require.True(t, exists)
-		require.Len(t, nodeB.DependsOn, 1)
-		require.Equal(t, "A", nodeB.DependsOn[0].Name)
+		require.Len(t, nodeB.dependsOn, 1)
+		require.Equal(t, "A", nodeB.dependsOn[0].name)
 	})
 
 	t.Run("Builder validation error", func(t *testing.T) {

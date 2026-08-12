@@ -60,9 +60,11 @@ func newMultiProcessLocker(store ClaimStore, ownerID string) Locker {
 // Releases the claim (best-effort clean handoff). On ErrClaimLost (a LIVE foreign lease) it
 // returns the error — unlike the in-process mutex it does NOT block waiting for a live foreign
 // lease (that is a different worker legitimately running; blocking would defeat competing
-// consumers). ctx is accepted for interface symmetry; Claim is a fast single-txn call.
-func (l *claimLocker) Acquire(_ context.Context, workflowID string) (func(), error) {
-	token, err := l.store.Claim(workflowID, l.ownerID)
+// consumers). ctx bounds the claim (AUD-034 / P-10): Claim serializes every worker on the one
+// BEGIN IMMEDIATE write lock, so a loser can wait out busy_timeout inside the call — a cancelled
+// drive context abandons that wait instead of the claim outliving the request.
+func (l *claimLocker) Acquire(ctx context.Context, workflowID string) (func(), error) {
+	token, err := l.store.Claim(ctx, workflowID, l.ownerID)
 	if err != nil {
 		return nil, err // ErrClaimLost (owned by another) or a store error — the drive does not run.
 	}
@@ -90,12 +92,59 @@ func (w *Workflow) WithMultiProcessLocker(ownerID string) *Workflow {
 	if !ok {
 		panic("WithMultiProcessLocker: Workflow.Store must be a ClaimStore (a multi-process SQLiteStore via WithMultiProcess)")
 	}
-	w.Locker = &claimLocker{store: cs, ownerID: ownerID}
+	// AUD-003 / P-08: an empty ownerID collapses distinct processes onto one lease
+	// (claimLocked reads equal owner strings as re-entrant). Fail loud at config
+	// time — the same programmer-error class as a non-ClaimStore store above —
+	// rather than at first drive; Claim rejects it too, so no path can slip through.
+	if ownerID == "" {
+		panic("WithMultiProcessLocker: ownerID must be non-empty (an empty owner collapses distinct processes onto a single lease)")
+	}
+	// AUD-023 / P-09: compose the durable claim OVER the process-wide in-process locker so
+	// same-(WorkflowID) drives WITHIN this process serialize (the durable claim is re-entrant
+	// for the same owner and would otherwise let a fan-out of one owner across goroutines race
+	// the same state). defaultLocker is the same shared registry the non-MP path uses, so the
+	// serialization spans every *Workflow instance in the process, not just this one.
+	w.Locker = &compositeLocker{
+		local: defaultLocker,
+		outer: &claimLocker{store: cs, ownerID: ownerID},
+	}
 	return w
 }
 
-// Ensure claimLocker satisfies Locker.
-var _ Locker = (*claimLocker)(nil)
+// compositeLocker serializes same-WorkflowID drives WITHIN a process (the `local` in-process
+// Locker) and THEN arbitrates them across processes (the `outer` durable claim). AUD-023 / P-09:
+// the durable claim alone is re-entrant for the same owner, so two goroutines in one process
+// driving the same (WorkflowID, ownerID) both Claim without blocking and race the same state.
+// Composing the process-local lock UNDER the claim closes that — the design already documented
+// this as the F4 pattern; WithMultiProcessLocker now applies it by default so a caller cannot
+// forget it. Acquire takes local first, then the claim; on a claim failure the local lock is
+// released so a lost race never strands it. Release unwinds in reverse (claim, then local).
+type compositeLocker struct {
+	local Locker // process-local serialization (per-WorkflowID), ctx-cancellable (AUD-033)
+	outer Locker // the durable cross-process claim (competing consumers)
+}
+
+func (c *compositeLocker) Acquire(ctx context.Context, workflowID string) (func(), error) {
+	releaseLocal, err := c.local.Acquire(ctx, workflowID)
+	if err != nil {
+		return nil, err // ctx cancelled while waiting for a same-process peer, or a local error.
+	}
+	releaseOuter, err := c.outer.Acquire(ctx, workflowID)
+	if err != nil {
+		releaseLocal() // the durable claim was lost/failed — do not strand the local lock.
+		return nil, err
+	}
+	return func() {
+		releaseOuter()
+		releaseLocal()
+	}, nil
+}
+
+// Ensure claimLocker + compositeLocker satisfy Locker.
+var (
+	_ Locker = (*claimLocker)(nil)
+	_ Locker = (*compositeLocker)(nil)
+)
 
 // isSupersededError reports whether err means "this worker was superseded" (ErrFencedOut) — the
 // abort-vs-retry discriminator for a competing consumer at the Execute return. A superseded

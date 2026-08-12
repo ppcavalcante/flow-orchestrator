@@ -14,7 +14,7 @@ Flow Orchestrator was created with several core design goals:
    background service and no determinism tax (added v0.10.0)
 5. **Conditional Branching**: True workflow-level branching — a `ChoiceNode` routes to
    one branch (the rest `Bypassed`) and a `MergeNode` OR-joins them; structured and
-   formally verified (added v0.11.0)
+   model-checked in TLA+ (added v0.11.0)
 6. **Saga / Compensation**: Durable rollback — declare a compensating action with
    `WithCompensation`, and on failure the engine undoes `Completed` nodes in
    reverse-topological order, crash-safe and best-effort (added v0.12.0)
@@ -177,7 +177,9 @@ Flow Orchestrator uses a middleware system for cross-cutting concerns:
 Middleware uses a functional composition pattern, making it easy to chain multiple behaviors:
 
 ```go
-action := LoggingMiddleware(RetryMiddleware(3, time.Second)(myAction))
+// LoggingMiddleware takes NO arguments: it returns a Middleware, which is then
+// applied to an action.
+action := LoggingMiddleware()(RetryMiddleware(3, time.Second)(myAction))
 ```
 
 ## Persistence Layer
@@ -186,12 +188,14 @@ The persistence layer allows workflows to be saved and resumed:
 
 - `InMemoryStore` for ephemeral workflows (e.g. testing)
 - File-based stores: `JSONFileStore` and `FlatBuffersStore`
+- `SQLiteStore` (M15) — row-based rather than blob-per-file, and the store the
+  multi-process dispatch and queued sub-workflow paths require
 - Custom store implementations via the `WorkflowStore` interface
 
 A store may additionally implement the optional `Checkpointer` interface to enable
 **durable crash-resume**: the run is checkpointed at each completed level barrier,
 and re-running `Execute` with the same `WorkflowID`/store/DAG resumes from the last
-checkpoint (skipping `Completed` nodes). All three built-in stores implement it; a
+checkpoint (skipping `Completed` nodes). All **four** built-in stores implement it; a
 store that does not keeps the prior save-at-boundaries behavior with zero overhead.
 Non-completed nodes re-run on resume — an **at-least-once** contract that requires
 side-effecting actions to be idempotent (see the

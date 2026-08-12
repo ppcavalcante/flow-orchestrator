@@ -138,7 +138,7 @@ func TestApprovals_OnSQLite_GapClosed(t *testing.T) {
 		assertNodeStatus(t, parked, "gate", Waiting)
 
 		// Approve → resume to terminal success, durably on SQLite.
-		require.NoError(t, w.DeliverAndResume(context.Background(), ApproveSignal("gate", "alice", "ship", "d1")))
+		require.NoError(t, w.DeliverAndResume(context.Background(), ApproveSignal("gate", "alice", "ship", "d1", w.ApprovalNonce("gate"))))
 		final, lerr := store.Load("wf-sql-appr")
 		require.NoError(t, lerr)
 		assertNodeStatus(t, final, "gate", Completed)
@@ -152,7 +152,7 @@ func TestApprovals_OnSQLite_GapClosed(t *testing.T) {
 		w := buildApprovalWorkflow(t, store, "wf-sql-rej", &afterN)
 		require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
-		err := w.DeliverAndResume(context.Background(), RejectSignal("gate", "bob", "no", "d1"))
+		err := w.DeliverAndResume(context.Background(), RejectSignal("gate", "bob", "no", "d1", w.ApprovalNonce("gate")))
 		require.Error(t, err)
 		var rej *ApprovalRejectedError
 		require.True(t, errors.As(err, &rej), "reject → *ApprovalRejectedError on SQLite too")

@@ -47,7 +47,7 @@ func benchmarkECommerceCheckout(b *testing.B) {
 
 	// Add nodes representing a typical e-commerce checkout flow
 	builder.AddStartNode("validate-cart").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate cart validation
 			data.Set("is_valid", true)
 			data.Set("cart_total", 129.99)
@@ -55,7 +55,7 @@ func benchmarkECommerceCheckout(b *testing.B) {
 		})
 
 	builder.AddNode("calculate-tax").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate tax calculation
 			total, _ := data.GetFloat64("cart_total")
 			data.Set("tax", total*0.08)
@@ -64,7 +64,7 @@ func benchmarkECommerceCheckout(b *testing.B) {
 		DependsOn("validate-cart")
 
 	builder.AddNode("calculate-shipping").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate shipping calculation
 			data.Set("shipping", 10.50)
 			return nil
@@ -72,7 +72,7 @@ func benchmarkECommerceCheckout(b *testing.B) {
 		DependsOn("validate-cart")
 
 	builder.AddNode("process-payment").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate payment processing
 			cartTotal, _ := data.GetFloat64("cart_total")
 			tax, _ := data.GetFloat64("tax")
@@ -84,7 +84,7 @@ func benchmarkECommerceCheckout(b *testing.B) {
 		DependsOn("calculate-tax", "calculate-shipping")
 
 	builder.AddNode("create-order").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate order creation
 			data.Set("order_id", "ord_987654321")
 			return nil
@@ -92,7 +92,7 @@ func benchmarkECommerceCheckout(b *testing.B) {
 		DependsOn("process-payment")
 
 	builder.AddNode("send-confirmation").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate sending confirmation email
 			return nil
 		}).
@@ -126,7 +126,7 @@ func benchmarkETLProcessing(b *testing.B) {
 
 	// Add nodes representing a typical ETL process
 	builder.AddStartNode("extract-data").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate data extraction
 			records := make([]map[string]interface{}, 100)
 			for i := 0; i < 100; i++ {
@@ -141,7 +141,7 @@ func benchmarkETLProcessing(b *testing.B) {
 		})
 
 	builder.AddNode("validate-schema").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate schema validation
 			data.Set("schema_valid", true)
 			return nil
@@ -149,7 +149,7 @@ func benchmarkETLProcessing(b *testing.B) {
 		DependsOn("extract-data")
 
 	builder.AddNode("transform-data").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate data transformation
 			records, _ := data.Get("records")
 			transformedData := records // In a real scenario, this would be transformed
@@ -159,7 +159,7 @@ func benchmarkETLProcessing(b *testing.B) {
 		DependsOn("validate-schema")
 
 	builder.AddNode("enrich-data").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate data enrichment - adding fields
 			data.Set("enrichment_complete", true)
 			return nil
@@ -167,7 +167,7 @@ func benchmarkETLProcessing(b *testing.B) {
 		DependsOn("transform-data")
 
 	builder.AddNode("load-data").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate loading data to destination
 			data.Set("load_success", true)
 			data.Set("records_loaded", 100)
@@ -203,7 +203,7 @@ func benchmarkAPIOrchestration(b *testing.B) {
 
 	// Simulating API calls with mock actions
 	builder.AddStartNode("fetch-user").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate user API call
 			data.Set("user", map[string]interface{}{
 				"id":    12345,
@@ -214,7 +214,7 @@ func benchmarkAPIOrchestration(b *testing.B) {
 		})
 
 	builder.AddNode("fetch-product").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate product API call
 			data.Set("product", map[string]interface{}{
 				"id":    67890,
@@ -225,7 +225,7 @@ func benchmarkAPIOrchestration(b *testing.B) {
 		})
 
 	builder.AddNode("check-inventory").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate inventory API call
 			data.Set("in_stock", true)
 			data.Set("quantity", 42)
@@ -234,7 +234,7 @@ func benchmarkAPIOrchestration(b *testing.B) {
 		DependsOn("fetch-product")
 
 	builder.AddNode("check-user-credit").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate credit check API call
 			data.Set("credit_approved", true)
 			return nil
@@ -242,7 +242,7 @@ func benchmarkAPIOrchestration(b *testing.B) {
 		DependsOn("fetch-user")
 
 	builder.AddNode("create-order").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate order creation API call
 			creditApproved, _ := data.GetBool("credit_approved")
 			inStock, _ := data.GetBool("in_stock")
@@ -283,7 +283,7 @@ func benchmarkApprovalProcess(b *testing.B) {
 
 	// Add nodes representing a business approval process
 	builder.AddStartNode("submit-request").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate request submission
 			data.Set("request", map[string]interface{}{
 				"id":          "req-12345",
@@ -296,7 +296,7 @@ func benchmarkApprovalProcess(b *testing.B) {
 		})
 
 	builder.AddNode("validate-request").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate request validation
 			data.Set("is_valid", true)
 			return nil
@@ -304,7 +304,7 @@ func benchmarkApprovalProcess(b *testing.B) {
 		DependsOn("submit-request")
 
 	builder.AddNode("manager-approval").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate manager approval
 			request, _ := data.Get("request")
 			if req, ok := request.(map[string]interface{}); ok {
@@ -320,7 +320,7 @@ func benchmarkApprovalProcess(b *testing.B) {
 		DependsOn("validate-request")
 
 	builder.AddNode("director-approval").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate director approval (only if needed)
 			needsDirector, _ := data.GetBool("needs_director")
 			if needsDirector {
@@ -331,7 +331,7 @@ func benchmarkApprovalProcess(b *testing.B) {
 		DependsOn("manager-approval")
 
 	builder.AddNode("finance-processing").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate finance processing
 			managerApproved, _ := data.GetBool("manager_approved")
 			directorApproved, directorFound := data.GetBool("director_approved")
@@ -347,7 +347,7 @@ func benchmarkApprovalProcess(b *testing.B) {
 		DependsOn("manager-approval", "director-approval")
 
 	builder.AddNode("notify-requester").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			// Simulate notification
 			return nil
 		}).

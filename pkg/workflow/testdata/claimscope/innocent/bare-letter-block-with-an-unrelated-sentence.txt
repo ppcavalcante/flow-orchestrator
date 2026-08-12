@@ -1,0 +1,5 @@
+# author: in-tree-source
+# Copied VERBATIM from boundary_action_kind.go, written by another author for its own purpose, not for this corpus.
+# The HOLE-B counter-witness -- see the header. Its independence is why it is load-bearing.
+Routed up as F118-ENG-01 rather than handled here -- refusing it as a boundary
+V/S does not close it. Verified mechanically -- `var _ Action = (*DAG)(nil)`.

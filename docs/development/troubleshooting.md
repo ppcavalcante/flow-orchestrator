@@ -41,10 +41,13 @@ This guide covers common issues you might encounter when developing with Flow Or
 1. **Node Execution Error**: Check the error message and node status.
    ```go
    if err != nil {
-       // Check which node failed (dag.Nodes is keyed by node name)
-       for nodeName := range dag.Nodes {
-           status, _ := data.GetNodeStatus(nodeName)
-           log.Printf("Node %s: %s", nodeName, status)
+       // Check which node failed. M23 SEAL-02 sealed the node map, so walk the
+       // built levels — GetLevels/GetNode are the public accessors.
+       for _, level := range dag.GetLevels() {
+           for _, n := range level {
+               status, _ := data.GetNodeStatus(n.Name())
+               log.Printf("Node %s: %s", n.Name(), status)
+           }
        }
    }
    ```
@@ -129,16 +132,17 @@ action = stack.Apply(action)
 
 ### Inspect the DAG structure
 
-The DAG does not ship a built-in printer; its structure is exposed via public
-fields and `GetLevels()`, which you can walk to inspect or render:
+The DAG does not ship a built-in printer. Its structure is exposed through the
+accessors `GetLevels()` and `GetNode(name)` — the node map itself is sealed (M23
+SEAL-02), so walk the levels to inspect or render:
 
 ```go
 // Inspect nodes and their dependency levels
-for name := range dag.Nodes {
-    fmt.Println("node:", name)
-}
 for i, level := range dag.GetLevels() {
     fmt.Printf("level %d: %d node(s)\n", i, len(level))
+    for _, n := range level {
+        fmt.Println("  node:", n.Name())
+    }
 }
 ```
 

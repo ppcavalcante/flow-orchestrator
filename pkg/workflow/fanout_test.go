@@ -66,7 +66,7 @@ func fanBranch(body func(ctx context.Context, idx int, item interface{}) (interf
 }
 
 // intExpander yields items 0..n-1, counting invocations.
-func intExpander(n int, counter *atomic.Int32) fanOutExpander {
+func intExpander(n int, counter *atomic.Int32) FanOutExpander {
 	return func(_ context.Context, _ *WorkflowData) ([]interface{}, error) {
 		if counter != nil {
 			counter.Add(1)
@@ -86,9 +86,9 @@ func runFan(t *testing.T, store WorkflowStore, parentID string, a *fanOutAction)
 	pb.AddStartNode(a.nodeName).WithAction(a)
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = parentID
-	w.DAG = dag
+	w.dag = dag
 	return w.Execute(context.Background())
 }
 
@@ -123,9 +123,9 @@ func TestFanOut_BoundedParallel_ViaCtxSeam(t *testing.T) {
 			pb.AddStartNode("fan").WithAction(a)
 			dag, err := pb.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-bound"
-			w.DAG = dag
+			w.dag = dag
 			require.NoError(t, w.Execute(context.Background()))
 
 			require.LessOrEqual(t, peak, int32(3), "in-flight branches never exceed the injected MaxConcurrency")
@@ -172,9 +172,9 @@ func TestFanOut_FailFast_SiblingObservesCancel(t *testing.T) {
 			pb.AddStartNode("fan").WithAction(a)
 			dag, err := pb.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-ff"
-			w.DAG = dag
+			w.dag = dag
 
 			start := time.Now()
 			err = w.Execute(context.Background())
@@ -209,9 +209,9 @@ func TestFanOut_FailFast_SurfacesRootCauseNotCancellation(t *testing.T) {
 	pb.AddStartNode("fan").WithAction(a)
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-rootcause"
-	w.DAG = dag
+	w.dag = dag
 
 	err = w.Execute(context.Background())
 	require.Error(t, err)
@@ -304,8 +304,8 @@ func TestFanOut_CrashResume_RealWindow(t *testing.T) {
 			// body so the seeding does not inflate resumeSideEffects.
 			seedBranch := fanBranch(func(_ context.Context, idx int, _ interface{}) (interface{}, error) { return idx, nil })
 			for i := 0; i < k; i++ {
-				childID := subFanOutChildID(parentID, "fan", i)
-				sw := &Workflow{DAG: seedBranch(i, i), WorkflowID: childID, Store: store}
+				childID := FanOutChildID(parentID, "fan", i)
+				sw := &Workflow{dag: seedBranch(i, i), WorkflowID: childID, Store: store}
 				require.NoError(t, sw.Execute(context.Background()))
 			}
 			require.EqualValues(t, 0, resumeSideEffects.Load(), "seeding used the non-counting body")
@@ -379,9 +379,9 @@ func TestFanOut_FailFast_DurablyFailedNodeSkippedOnResume(t *testing.T) {
 	pb.AddStartNode("fan").WithAction(a)
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = parentID
-	w.DAG = dag
+	w.dag = dag
 
 	// Drive 1: the fan node fails and — because the store is a Checkpointer — the level barrier DURABLY flushes the
 	// Failed fan-node status. (The run error is the fail-fast; the Failed status is persisted.)

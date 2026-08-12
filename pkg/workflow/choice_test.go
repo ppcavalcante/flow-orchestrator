@@ -191,11 +191,11 @@ func TestChoice_Representation(t *testing.T) {
 		[]choiceBranch{{predicate: func(*WorkflowData) bool { return true }, target: "x"}},
 		"", false,
 	)
-	_, ok := choice.Action.(*choiceAction)
+	_, ok := choice.action.(*choiceAction)
 	require.True(t, ok, "a ChoiceNode's action is a *choiceAction")
 
 	data := NewWorkflowData("wf")
-	require.NoError(t, choice.Action.Execute(context.Background(), data))
+	require.NoError(t, choice.action.Execute(context.Background(), data))
 	_, ok = data.GetNodeStatus("x")
 	assert.False(t, ok, "the taken target is left for the gate, not marked by the choice")
 }

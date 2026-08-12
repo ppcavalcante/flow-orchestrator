@@ -33,9 +33,9 @@ import (
 // Oracle (totality): a predicate over absent data is a defined park, not a crash.
 func TestAdvCond_AbsentKeys_ParksCleanly(t *testing.T) {
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-cond-absent"
-	require.NoError(t, w.AddNode(NewWaitForConditionNode("await", func(d *WorkflowData) bool {
+	require.NoError(t, w.addNode(newWaitForConditionNode("await", func(d *WorkflowData) bool {
 		// Reads several keys that were never written; must not panic.
 		a, aok := d.Get("missing-a")
 		b, bok := d.Get("missing-b")
@@ -61,18 +61,18 @@ func TestAdvCond_AbsentKeys_ParksCleanly(t *testing.T) {
 // upstream node in the same run.
 func TestAdvCond_UpstreamSetsKey_SameRunConverges(t *testing.T) {
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-cond-upstream"
 
-	require.NoError(t, w.AddNode(NewNode("setter", ActionFunc(func(_ context.Context, d *WorkflowData) error {
+	require.NoError(t, w.addNode(newNode("setter", ActionFunc(func(_ context.Context, d *WorkflowData) error {
 		d.Set("ready", true)
 		return nil
 	}))))
-	require.NoError(t, w.AddNode(NewWaitForConditionNode("await", func(d *WorkflowData) bool {
+	require.NoError(t, w.addNode(newWaitForConditionNode("await", func(d *WorkflowData) bool {
 		v, ok := d.Get("ready")
 		return ok && v == true
 	})))
-	require.NoError(t, w.AddDependency("setter", "await"))
+	require.NoError(t, w.addDependency("setter", "await"))
 
 	require.NoError(t, w.Execute(context.Background()),
 		"the condition sees the upstream-set key and converges in one run (no park)")
@@ -96,11 +96,11 @@ func TestAdvCond_UpstreamSetsKey_SameRunConverges(t *testing.T) {
 // not a stuck/spinning one).
 func TestAdvCond_NeverTrue_CleanRestNoBusyLoop(t *testing.T) {
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-cond-never"
 
 	var evals int
-	require.NoError(t, w.AddNode(NewWaitForConditionNode("await", func(_ *WorkflowData) bool {
+	require.NoError(t, w.addNode(newWaitForConditionNode("await", func(_ *WorkflowData) bool {
 		evals++
 		return false // never satisfiable
 	})))
@@ -149,13 +149,13 @@ func TestAdvCond_NeverTrue_CleanRestNoBusyLoop(t *testing.T) {
 // predicate panic to its caller; it adds no internal recover. If a future change
 // DID add recovery (panic→typed error), this test flags the contract change.
 func TestAdvCond_PredicatePanics_NotRecoveredAtActionBoundary(t *testing.T) {
-	node := NewWaitForConditionNode("await", func(_ *WorkflowData) bool {
+	node := newWaitForConditionNode("await", func(_ *WorkflowData) bool {
 		panic("predicate blew up")
 	})
 
 	// Pull the action out of the node and call it directly under a recover so the
 	// panic cannot escape this goroutine and abort the binary.
-	act, ok := node.Action.(*waitForConditionAction)
+	act, ok := node.action.(*waitForConditionAction)
 	require.True(t, ok, "NewWaitForConditionNode wires a *waitForConditionAction directly")
 
 	recovered := func() (didPanic bool) {
@@ -183,9 +183,9 @@ func TestAdvCond_PredicatePanics_NotRecoveredAtActionBoundary(t *testing.T) {
 // Oracle (totality): heterogeneous stored values never crash the wait machinery.
 func TestAdvCond_PredicateValueTypeChange_NoPanic(t *testing.T) {
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-cond-types"
-	require.NoError(t, w.AddNode(NewWaitForConditionNode("await", func(d *WorkflowData) bool {
+	require.NoError(t, w.addNode(newWaitForConditionNode("await", func(d *WorkflowData) bool {
 		v, ok := d.Get("flag")
 		if !ok {
 			return false

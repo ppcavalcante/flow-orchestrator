@@ -80,9 +80,9 @@ func TestSubWorkflow_ResultKeyCollision_Loud(t *testing.T) {
 	pb.AddSubWorkflow("sub", childProducing(t, "child-value", nil)).DependsOn("before").WithResult("result", "result")
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-collide"
-	w.DAG = dag
+	w.dag = dag
 
 	err = w.Execute(context.Background())
 	require.Error(t, err, "a result-key collision must fail the run, not overwrite")
@@ -98,8 +98,10 @@ func TestSubWorkflow_ResultKeyCollision_Loud(t *testing.T) {
 
 // TestSubWorkflow_ResultCollision_NonComparable — the collision check must use a total
 // equality (reflect.DeepEqual), not !=, so a non-comparable child result (a slice) does not
-// PANIC the comparison. Here the pre-existing key holds an EQUAL slice → idempotent re-apply
-// (no collision error, no panic).
+// PANIC the comparison. AUD-026: the child result arrives via store.Load and so reloads as its
+// canonical JSON string, which does not DeepEqual the live pre-existing parent slice — the check
+// resolves SAFELY to a collision (no panic), uniformly on every store. (Before AUD-026 InMemory
+// alone preserved the slice, giving an idempotent re-apply that FB/SQLite never did.)
 func TestSubWorkflow_ResultCollision_NonComparable(t *testing.T) {
 	store := NewInMemoryStore()
 	pb := NewWorkflowBuilder().WithWorkflowID("wf-slice")
@@ -110,9 +112,11 @@ func TestSubWorkflow_ResultCollision_NonComparable(t *testing.T) {
 	pb.AddSubWorkflow("sub", childProducing(t, []int{1, 2, 3}, nil)).DependsOn("before").WithResult("result", "result")
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-slice"
-	w.DAG = dag
-	// An EQUAL slice → idempotent re-apply, NOT a collision, and NOT a panic.
-	require.NoError(t, w.Execute(context.Background()), "an equal non-comparable result is idempotent, not a panic")
+	w.dag = dag
+	// The reloaded string result != the live parent slice → a SAFE collision, never a panic.
+	err = w.Execute(context.Background())
+	require.ErrorIs(t, err, ErrSubWorkflowResultKeyCollision,
+		"a non-comparable result canonicalizes to a string and resolves to a safe collision, not a panic")
 }

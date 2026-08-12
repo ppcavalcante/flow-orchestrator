@@ -36,7 +36,7 @@ func BenchmarkScalability(b *testing.B) {
 // benchmarkNodeScaling tests how the system scales with increasing node counts
 func benchmarkNodeScaling(b *testing.B, nodeCount int) {
 	// Create a DAG with the specified number of nodes
-	dag := workflow.NewDAG(fmt.Sprintf("scaling-test-%d", nodeCount))
+	spec := newDAGSpec(fmt.Sprintf("scaling-test-%d", nodeCount))
 
 	// Create nodes
 	for i := 0; i < nodeCount; i++ {
@@ -46,14 +46,15 @@ func benchmarkNodeScaling(b *testing.B, nodeCount int) {
 			time.Sleep(10 * time.Microsecond)
 			return nil
 		})
-		node := workflow.NewNode(nodeName, action)
-		mustAddNode(dag, node)
+		spec.node(nodeName, action)
 	}
 
 	// Create dependencies (simple linear chain)
 	for i := 1; i < nodeCount; i++ {
-		mustAddDep(dag, fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
+		spec.dep(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
 	}
+
+	dag := spec.build()
 
 	// Apply a custom execution config and run the real wired execution path.
 	dag.WithExecutionConfig(workflow.ExecutionConfig{
@@ -83,7 +84,7 @@ func benchmarkNodeScaling(b *testing.B, nodeCount int) {
 func benchmarkConcurrencyScaling(b *testing.B, workerCount int) {
 	// Create a DAG with a fixed number of nodes
 	nodeCount := 100
-	dag := workflow.NewDAG(fmt.Sprintf("concurrency-test-%d", workerCount))
+	spec := newDAGSpec(fmt.Sprintf("concurrency-test-%d", workerCount))
 
 	// Create nodes
 	for i := 0; i < nodeCount; i++ {
@@ -93,14 +94,15 @@ func benchmarkConcurrencyScaling(b *testing.B, workerCount int) {
 			time.Sleep(10 * time.Microsecond)
 			return nil
 		})
-		node := workflow.NewNode(nodeName, action)
-		mustAddNode(dag, node)
+		spec.node(nodeName, action)
 	}
 
 	// Create a star topology (all nodes depend on node0)
 	for i := 1; i < nodeCount; i++ {
-		mustAddDep(dag, fmt.Sprintf("node%d", i), "node0")
+		spec.dep(fmt.Sprintf("node%d", i), "node0")
 	}
+
+	dag := spec.build()
 
 	// Apply the worker-count concurrency limit and run the real wired path.
 	dag.WithExecutionConfig(workflow.ExecutionConfig{

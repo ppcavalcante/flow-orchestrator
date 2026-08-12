@@ -147,10 +147,10 @@ func buildFailInjectedSaga(seed int64, layers, maxWidth int) *injectedSaga {
 			}
 			switch beh {
 			case 0:
-				nb.WithCompensation(mkComp(name, false))
+				nb.WithCompensationFunc(mkComp(name, false))
 				is.expComp[name] = true
 			case 1:
-				nb.WithCompensation(mkComp(name, true))
+				nb.WithCompensationFunc(mkComp(name, true))
 				is.expFail[name] = true
 			default:
 				is.expSkip[name] = true
@@ -181,7 +181,7 @@ func buildFailInjectedSaga(seed int64, layers, maxWidth int) *injectedSaga {
 	}
 	// vary concurrency by seed to exercise the mutex-guarded collection alongside it.
 	dag.WithExecutionConfig(ExecutionConfig{MaxConcurrency: 1 + int(seed%8)})
-	is.w = &Workflow{DAG: dag, WorkflowID: "inject", Store: NewInMemoryStore()}
+	is.w = &Workflow{dag: dag, WorkflowID: "inject", Store: NewInMemoryStore()}
 	return is
 }
 
@@ -218,9 +218,9 @@ func TestSagaHonest_PartitionExact_FailureInjection_Property(t *testing.T) {
 			// (2) totality: union == the Completed set (all non-"fail" nodes),
 			//     pairwise disjoint — no node missing, phantom, or double-counted.
 			completed := map[string]bool{}
-			for _, n := range is.w.DAG.Nodes {
-				if n.Name != "fail" {
-					completed[n.Name] = true
+			for _, n := range is.w.dag.nodes {
+				if n.name != "fail" {
+					completed[n.name] = true
 				}
 			}
 			union := map[string]int{}
@@ -317,15 +317,15 @@ func TestSagaHonest_WideMixed_ConcurrentPartition_RaceClean(t *testing.T) {
 				expSkip := map[string]bool{}
 				for i := 0; i < nodes; i++ {
 					name := fmt.Sprintf("w%d", i)
-					nd := NewNode(name, benchNoopAction())
+					nd := newNode(name, benchNoopAction())
 					switch i % 3 {
 					case 0: // failing comp
-						nd.Compensation = ActionFunc(func(context.Context, *WorkflowData) error {
+						nd.compensation = ActionFunc(func(context.Context, *WorkflowData) error {
 							return errors.New("boom")
 						})
 						expFail[name] = true
 					case 1: // succeeding comp
-						nd.Compensation = ActionFunc(func(context.Context, *WorkflowData) error { return nil })
+						nd.compensation = ActionFunc(func(context.Context, *WorkflowData) error { return nil })
 						expComp[name] = true
 					default: // no comp -> skipped
 						expSkip[name] = true
@@ -387,7 +387,7 @@ func TestSagaHonest_BestEffort_DeepFailureRunsAllShallow(t *testing.T) {
 					}
 					return nil
 				}
-				nb := b.AddNode(name).WithAction(benchNoopAction()).WithCompensation(comp)
+				nb := b.AddNode(name).WithAction(benchNoopAction()).WithCompensationFunc(comp)
 				if prev != "" {
 					nb.DependsOn(prev)
 				}
@@ -398,7 +398,7 @@ func TestSagaHonest_BestEffort_DeepFailureRunsAllShallow(t *testing.T) {
 				DependsOn(prev)
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := &Workflow{DAG: dag, WorkflowID: "besteffort", Store: store}
+			w := &Workflow{dag: dag, WorkflowID: "besteffort", Store: store}
 
 			err = w.Execute(context.Background())
 			var se *SagaError
@@ -434,14 +434,14 @@ func TestSagaHonest_Boundary_AllFail(t *testing.T) {
 	rec := &compRecorder{}
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder().WithWorkflowID("all-fail")
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(failComp(rec, "a"))
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(failComp(rec, "b")).DependsOn("a")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(failComp(rec, "a"))
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(failComp(rec, "b")).DependsOn("a")
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("b")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "all-fail", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "all-fail", Store: store}
 
 	err = w.Execute(context.Background())
 	var se *SagaError
@@ -473,10 +473,10 @@ func TestSagaHonest_Boundary_ZeroCompleted(t *testing.T) {
 	// but 'a' is Failed, never Completed -> not in the partition.
 	b.AddNode("a").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "zero-completed", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "zero-completed", Store: store}
 
 	err = w.Execute(context.Background())
 	require.Error(t, err)
@@ -504,20 +504,20 @@ func TestSagaHonest_Deadline_MixedFinishAndBlock(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("deadline-mix")
 	// shallow 'root' blocks until the deadline (compensates LAST in the reverse pass).
 	b.AddNode("root").WithAction(benchNoopAction()).
-		WithCompensation(func(ctx context.Context, _ *WorkflowData) error {
+		WithCompensationFunc(func(ctx context.Context, _ *WorkflowData) error {
 			<-ctx.Done()
 			return ctx.Err()
 		})
 	// deep 'child' compensates FIRST and returns immediately (well before the deadline).
 	b.AddNode("child").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { return nil }).
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { return nil }).
 		DependsOn("root")
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("child")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "deadline-mix", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "deadline-mix", Store: store}
 	w.WithRollbackTimeout(200 * time.Millisecond)
 
 	done := make(chan error, 1)
@@ -552,7 +552,7 @@ func TestSagaHonest_RetryCount_ExhaustExactAttempts(t *testing.T) {
 			b := NewWorkflowBuilder().WithWorkflowID("retry-exhaust")
 			b.AddNode("a").WithAction(benchNoopAction()).
 				WithRetries(rc).
-				WithCompensation(func(context.Context, *WorkflowData) error {
+				WithCompensationFunc(func(context.Context, *WorkflowData) error {
 					atomic.AddInt64(&attempts, 1)
 					return errors.New("always fails")
 				})
@@ -561,7 +561,7 @@ func TestSagaHonest_RetryCount_ExhaustExactAttempts(t *testing.T) {
 				DependsOn("a")
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := &Workflow{DAG: dag, WorkflowID: "retry-exhaust", Store: store}
+			w := &Workflow{dag: dag, WorkflowID: "retry-exhaust", Store: store}
 
 			err = w.Execute(context.Background())
 			var se *SagaError
@@ -593,8 +593,8 @@ func TestSagaHonest_NonCompletedStatuses_ExcludedFromPartition(t *testing.T) {
 		st := st
 		t.Run(string(st), func(t *testing.T) {
 			var ran int64
-			nd := NewNode("x", benchNoopAction())
-			nd.Compensation = ActionFunc(func(context.Context, *WorkflowData) error {
+			nd := newNode("x", benchNoopAction())
+			nd.compensation = ActionFunc(func(context.Context, *WorkflowData) error {
 				atomic.AddInt64(&ran, 1)
 				return nil
 			})

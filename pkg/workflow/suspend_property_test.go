@@ -178,7 +178,7 @@ func TestSuspend_Property_NoCheckpointerRefuses(t *testing.T) {
 // not suspension-capable).
 func buildSuspendDAG(t *testing.T, spec dagSpec, parkIdx int, id string, gate *parkGate, c *execCounter) *DAG {
 	t.Helper()
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	for i := 0; i < spec.n; i++ {
 		name := invNodeName(i)
 		if i == parkIdx {

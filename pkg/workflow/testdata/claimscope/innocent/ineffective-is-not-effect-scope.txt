@@ -1,0 +1,10 @@
+# author: engineer-118b
+# REAL FALSE POSITIVE, hit while writing a required 118-D10 doc line, NOT while probing the guard.
+# RECONSTRUCTED, not recovered: 118b reworded before committing, so the original never reached git and
+# cannot be shown by git show. This is the committed block with the one word restored -- the committed
+# text reads "SILENTLY DISCARDED" where the sentence that red the ban read "silently ineffective".
+Build takes a snapshot of the verifier's and the sink's actions, so for those two
+nodes the graph stops tracking later edits to the action value you passed in:
+after Build, a mutation through a retained handle is silently ineffective on them.
+It is deliberate: the boundary was validated against the actions those two nodes
+held at Build, and a set that can be edited afterwards was never validated at all.

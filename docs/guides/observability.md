@@ -206,10 +206,11 @@ mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 defer mp.Shutdown(context.Background())
 
 // 2. Enable metrics collection on the workflow data.
-//    metrics.NewConfig() is enabled with sampling rate 1.0; use
-//    metrics.ProductionConfig() for production-tuned sampling/thresholds.
+//    metrics.NewConfig() defaults to DISABLED (sampling rate 1.0, but Enabled=false),
+//    so you MUST call .WithEnabled(true) to actually collect/export; or use
+//    metrics.ProductionConfig() for a production-tuned, already-enabled config.
 cfg := workflow.DefaultWorkflowDataConfig().
-    WithMetricsConfig(metrics.NewConfig())
+    WithMetricsConfig(metrics.NewConfig().WithEnabled(true))
 data := workflow.NewWorkflowDataWithConfig("my-workflow", cfg)
 
 // 3. Bridge the workflow's collector to the host MeterProvider.
@@ -246,7 +247,8 @@ the same collector the engine records into. Metrics are **per-instance**: each
 `WorkflowData` owns its own `MetricsCollector` and there is no process-global
 metrics state (`DEC-CHUNK4`). The collector's `Enable`/`Disable`/`Reset`/
 `TrackOperation` are methods on that instance, not package-level functions. Metrics collection must be enabled
-(via `WithMetricsConfig`); when the collector is disabled, the callback reports
+by an **enabled** config (`metrics.NewConfig().WithEnabled(true)` or `metrics.ProductionConfig()` — a bare
+`metrics.NewConfig()` is disabled); when the collector is disabled, the callback reports
 nothing.
 
 ### Choosing an exporter
@@ -267,13 +269,13 @@ stay on a single, consistent OTel release.
 ### Runnable example
 
 A complete, runnable host-wiring example lives at
-[`examples/observability/`](../../examples/observability/). It is a **separate Go
+[`examples/12-observability/`](../../examples/12-observability/). It is a **separate Go
 module** (its own `go.mod` with a `replace` directive back to the library) so that
 the SDK imports it needs never enter the library's own dependency graph — keeping
 the API-only boundary (OBS-04) intact. Build and run it with:
 
 ```sh
-cd examples/observability
+cd examples/12-observability
 go run .
 ```
 

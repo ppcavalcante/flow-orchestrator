@@ -31,9 +31,12 @@ func TestDeadlockDetection(t *testing.T) {
 		{"SetOutput", func() { data.SetOutput("node1", "output") }},
 		{"GetOutput", func() { data.GetOutput("node1") }},
 		{"IsNodeRunnable", func() {
-			// Create a test node
-			node := workflow.NewNode("node2", nil)
-			data.IsNodeRunnable(node.Name)
+			// M23 SEAL-06: this minted a *Node purely to read its name back. The
+			// name is the only thing IsNodeRunnable ever saw, so the mint is gone
+			// rather than routed through the builder — building a whole graph to
+			// recover a string constant would be the migration doing more work than
+			// the code it replaces.
+			data.IsNodeRunnable("node2")
 		}},
 		{"Snapshot", func() {
 			snapshot, err := data.Snapshot()

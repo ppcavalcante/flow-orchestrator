@@ -56,6 +56,11 @@ func timedOutKey(nodeName string) string { return nodeName + ".__timedOut__" }
 // All time is read through clockFrom(ctx); it NEVER calls time.Now() — the retry
 // OUTCOME (which arm won) is journaled via the checkpoint, never the clock instant, so
 // there is no determinism tax (the D36-07 discipline the determinism spec enforces).
+// engineTrusted marks waitForSignalOrTimeoutAction as engine machinery: it arms and
+// disarms the durable timeout wait (SetWait/ClearWait), so it runs against unsealed
+// data rather than a sealed per-node view (M24 DEC-M24-MEDIATION).
+func (a *waitForSignalOrTimeoutAction) engineTrusted() {}
+
 func (a *waitForSignalOrTimeoutAction) Execute(ctx context.Context, data *WorkflowData) error {
 	ss := signalStoreFrom(ctx)
 	if ss == nil {
@@ -124,13 +129,13 @@ func (a *waitForSignalOrTimeoutAction) Execute(ctx context.Context, data *Workfl
 	return ErrSuspended
 }
 
-// NewWaitForSignalOrTimeoutNode builds a declared first-of(signal, timer) node: when
+// newWaitForSignalOrTimeoutNode builds a declared first-of(signal, timer) node: when
 // reached it parks the run (Waiting) until the named signal arrives OR the timeout
 // deadline (absolute, durable-remaining across restart) passes — exactly one wins,
 // signal-first on a same-encounter tie. The timeout arm sets timedOutKey(name)=true so
 // a downstream M11 ChoiceNode can branch signal-vs-timeout. Requires a Store
 // implementing SignalStore (else ErrWaitRequiresSignalStore at run time). The action is
 // set DIRECTLY (not via middleware) so the suspend marker stays visible to node.Execute.
-func NewWaitForSignalOrTimeoutNode(name, signalName string, timeout time.Duration) *Node {
-	return NewNode(name, &waitForSignalOrTimeoutAction{nodeName: name, signalName: signalName, duration: timeout})
+func newWaitForSignalOrTimeoutNode(name, signalName string, timeout time.Duration) *Node {
+	return newNode(name, &waitForSignalOrTimeoutAction{nodeName: name, signalName: signalName, duration: timeout})
 }

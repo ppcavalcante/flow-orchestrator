@@ -221,8 +221,11 @@ writer — use `Snapshot()` when you need every part to agree (it wraps all its 
 one consistent read-transaction). Requires an mp store.
 
 ```go
-// A WithMultiProcess SQLiteStore implements Observability (type-assert like Checkpointer/ClaimStore).
-obs := store.(workflow.Observability)
+// A WithMultiProcess SQLiteStore implements Observability. NOTE: do NOT type-assert here —
+// `store` is a *SQLiteStore, a CONCRETE type, and Go only permits a type assertion on an
+// interface value. Assign or convert instead (the interface is satisfied statically; the
+// package carries `var _ Observability = (*SQLiteStore)(nil)`).
+var obs workflow.Observability = store
 
 counts, _ := obs.QueueCounts("")            // per-state row counts: {"pending":3,"claimed":2,"done":10,…}
 inflight, _ := obs.InFlight()               // claimed items + lease owner + freshness (LeaseLive)
@@ -306,7 +309,9 @@ gauges read from the read-model (`QueueCounts`/`InFlight`), all through the OTel
 the SDK/exporter):
 
 ```go
-bridge, _ := workflow.NewOTelDispatchBridge(store.(workflow.Observability), dm, meterProvider)
+// NewOTelDispatchBridge takes an Observability, and *SQLiteStore satisfies it — pass the
+// store directly (no assertion: it is a concrete type).
+bridge, _ := workflow.NewOTelDispatchBridge(store, dm, meterProvider)
 defer bridge.Shutdown(ctx)
 ```
 

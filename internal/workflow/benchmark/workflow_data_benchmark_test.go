@@ -143,13 +143,13 @@ func BenchmarkWorkflowDataDependencyResolution(b *testing.B) {
 			switch topology {
 			case "Linear":
 				// Linear chain: A → B → C → ...
-				nodes = createLinearNodes(size)
+				nodes = createLinearNodes(b, size)
 			case "Diamond":
 				// Diamond pattern with multiple paths
-				nodes = createDiamondNodes(size)
+				nodes = createDiamondNodes(b, size)
 			case "Complex":
 				// Complex graph with random dependencies
-				nodes = createComplexNodes(size)
+				nodes = createComplexNodes(b, size)
 			}
 
 			b.Run(fmt.Sprintf("%s_Size_%d", topology, size), func(b *testing.B) {
@@ -157,7 +157,7 @@ func BenchmarkWorkflowDataDependencyResolution(b *testing.B) {
 
 				// Setup with initial statuses
 				for _, node := range nodes {
-					data.SetNodeStatus(node.Name, workflow.Pending)
+					data.SetNodeStatus(node.Name(), workflow.Pending)
 				}
 
 				b.ResetTimer()
@@ -166,15 +166,15 @@ func BenchmarkWorkflowDataDependencyResolution(b *testing.B) {
 					for j, node := range nodes {
 						if j < len(nodes)/3 {
 							// Mark first third as completed
-							data.SetNodeStatus(node.Name, workflow.Completed)
+							data.SetNodeStatus(node.Name(), workflow.Completed)
 						} else {
-							data.SetNodeStatus(node.Name, workflow.Pending)
+							data.SetNodeStatus(node.Name(), workflow.Pending)
 						}
 					}
 
 					// Test dependency resolution for each node
 					for _, node := range nodes {
-						_ = data.IsNodeRunnable(node.Name)
+						_ = data.IsNodeRunnable(node.Name())
 					}
 				}
 			})
@@ -373,7 +373,7 @@ func BenchmarkWorkflowRecoveryPattern(b *testing.B) {
 
 	for _, size := range sizes {
 		// Create a workflow with a complex pattern
-		nodes := createComplexNodes(size)
+		nodes := createComplexNodes(b, size)
 
 		b.Run(fmt.Sprintf("DetermineRunnableAfterFailure/Nodes_%d", size), func(b *testing.B) {
 			data := workflow.NewWorkflowData("test")
@@ -381,11 +381,11 @@ func BenchmarkWorkflowRecoveryPattern(b *testing.B) {
 			// Setup: Mark half the nodes as completed, one as failed
 			for i, node := range nodes {
 				if i < size/2 {
-					data.SetNodeStatus(node.Name, workflow.Completed)
+					data.SetNodeStatus(node.Name(), workflow.Completed)
 				} else if i == size/2 {
-					data.SetNodeStatus(node.Name, workflow.Failed)
+					data.SetNodeStatus(node.Name(), workflow.Failed)
 				} else {
-					data.SetNodeStatus(node.Name, workflow.Pending)
+					data.SetNodeStatus(node.Name(), workflow.Pending)
 				}
 			}
 
@@ -396,7 +396,7 @@ func BenchmarkWorkflowRecoveryPattern(b *testing.B) {
 				// Find all nodes that are runnable
 				runnableNodes := make([]*workflow.Node, 0, size/4)
 				for _, node := range nodes {
-					if data.IsNodeRunnable(node.Name) {
+					if data.IsNodeRunnable(node.Name()) {
 						runnableNodes = append(runnableNodes, node)
 					}
 				}
@@ -505,84 +505,97 @@ func BenchmarkWorkflowDataArenaComparison(b *testing.B) {
 
 // Helper functions to create different DAG topologies for testing
 
-func createLinearNodes(size int) []*workflow.Node {
-	nodes := make([]*workflow.Node, size)
+func benchNodeName(i int) string { return fmt.Sprintf("node%d", i) }
 
-	// Create nodes
+// buildTopology constructs a DAG through the builder — the only sanctioned
+// construction path — and returns its nodes in index order. depsOf(i) names the
+// indices node i depends on.
+//
+// M23 SEAL-01: the three helpers below used to mint nodes with workflow.NewNode and
+// then wire the graph by assigning node.DependsOn directly, which is a post-mint write
+// to state that is now unexported. Routing through the builder removes that write, and
+// has a side effect worth having on its own: the topology is now VALIDATED by build()
+// instead of merely assembled, so a malformed benchmark fixture fails loudly here
+// rather than quietly measuring a graph the engine would have rejected.
+func buildTopology(b *testing.B, size int, depsOf func(i int) []int) []*workflow.Node {
+	b.Helper()
+
+	builder := workflow.NewWorkflowBuilder().WithWorkflowID("bench")
 	for i := 0; i < size; i++ {
-		nodes[i] = workflow.NewNode(fmt.Sprintf("node%d", i), createNoopAction())
+		nb := builder.AddNode(benchNodeName(i)).WithAction(createNoopAction())
+		for _, d := range depsOf(i) {
+			nb.DependsOn(benchNodeName(d))
+		}
 	}
 
-	// Add dependencies (linear chain)
-	for i := 1; i < size; i++ {
-		nodes[i].DependsOn = []*workflow.Node{nodes[i-1]}
+	dag, err := builder.Build()
+	if err != nil {
+		b.Fatalf("building the %d-node benchmark topology: %v", size, err)
 	}
 
+	nodes := make([]*workflow.Node, size)
+	for i := range nodes {
+		n, ok := dag.GetNode(benchNodeName(i))
+		if !ok {
+			b.Fatalf("node %s missing from the built DAG", benchNodeName(i))
+		}
+		nodes[i] = n
+	}
 	return nodes
 }
 
-func createDiamondNodes(size int) []*workflow.Node {
-	nodes := make([]*workflow.Node, size)
-
-	// Create nodes
-	for i := 0; i < size; i++ {
-		nodes[i] = workflow.NewNode(fmt.Sprintf("node%d", i), createNoopAction())
-	}
-
-	// Create a diamond pattern: first node splits to multiple paths,
-	// which all converge to the last node
-	pathCount := 3 // Use 3 parallel paths
-
-	// First node has no dependencies
-
-	// Middle nodes depend on first node
-	for i := 1; i <= pathCount; i++ {
-		nodes[i].DependsOn = []*workflow.Node{nodes[0]}
-	}
-
-	// Create parallel paths
-	for i := pathCount + 1; i < size-1; i++ {
-		dep := nodes[(i-pathCount-1)%pathCount+1]
-		nodes[i].DependsOn = []*workflow.Node{dep}
-	}
-
-	// Last node depends on the end of all paths
-	lastDeps := make([]*workflow.Node, pathCount)
-	for i := 0; i < pathCount; i++ {
-		lastDeps[i] = nodes[size-2-i]
-	}
-	nodes[size-1].DependsOn = lastDeps
-
-	return nodes
+func createLinearNodes(b *testing.B, size int) []*workflow.Node {
+	// Linear chain: each node depends on its predecessor.
+	return buildTopology(b, size, func(i int) []int {
+		if i == 0 {
+			return nil
+		}
+		return []int{i - 1}
+	})
 }
 
-func createComplexNodes(size int) []*workflow.Node {
-	nodes := make([]*workflow.Node, size)
+func createDiamondNodes(b *testing.B, size int) []*workflow.Node {
+	// Diamond: the first node splits into pathCount parallel paths that all
+	// reconverge on the last node.
+	const pathCount = 3
 
-	// Create nodes
-	for i := 0; i < size; i++ {
-		nodes[i] = workflow.NewNode(fmt.Sprintf("node%d", i), createNoopAction())
-	}
+	return buildTopology(b, size, func(i int) []int {
+		switch {
+		case i == 0:
+			return nil
+		case i <= pathCount:
+			return []int{0}
+		case i == size-1:
+			// The last node depends on the tail of every path.
+			deps := make([]int, pathCount)
+			for d := 0; d < pathCount; d++ {
+				deps[d] = size - 2 - d
+			}
+			return deps
+		default:
+			return []int{(i-pathCount-1)%pathCount + 1}
+		}
+	})
+}
 
-	// Add complex dependencies - a mix of patterns
-	for i := 5; i < size; i++ {
-		// Each node depends on 2-3 random previous nodes
-		depCount := (i % 2) + 2 // Either 2 or 3 dependencies
-		deps := make([]*workflow.Node, 0, depCount)
-
+func createComplexNodes(b *testing.B, size int) []*workflow.Node {
+	// A mix of patterns: nodes 0-4 are roots, each later node depends on 2-3
+	// earlier ones.
+	return buildTopology(b, size, func(i int) []int {
+		if i < 5 {
+			return nil
+		}
+		depCount := (i % 2) + 2
+		deps := make([]int, 0, depCount)
 		for d := 0; d < depCount; d++ {
-			// Pick a random previous node as dependency
 			depIdx := (i - 1 - d - (i % 5)) % i
 			if depIdx < 0 {
 				depIdx = 0
 			}
-			deps = append(deps, nodes[depIdx])
+			deps = append(deps, depIdx)
 		}
-
-		nodes[i].DependsOn = deps
-	}
-
-	return nodes
+		return deps
+	})
 }
 
 func createNoopAction() workflow.Action {

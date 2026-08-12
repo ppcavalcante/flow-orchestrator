@@ -29,7 +29,9 @@ workflow, err := builder.Build()
 Functional composition for cross-cutting concerns:
 
 ```go
-LoggingMiddleware(RetryMiddleware(3, time.Second)(myAction))
+// LoggingMiddleware takes NO arguments: it returns a Middleware, which is then
+// applied to an action.
+LoggingMiddleware()(RetryMiddleware(3, time.Second)(myAction))
 ```
 
 ### Interface-Based Design

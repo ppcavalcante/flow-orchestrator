@@ -1,0 +1,4 @@
+# author: independent-reviewer
+# planted in dag.go against 118-D6, after the 118-D2 widening had shipped.
+On every route through the built graph, D's effect reaches S only after V has run,
+so no effect of D ever reaches S unverified.

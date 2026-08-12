@@ -23,7 +23,7 @@ func benchGroupCommit(b *testing.B, mode DurabilityOption) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		wf := &Workflow{DAG: dag, WorkflowID: "gcbench", Store: store}
+		wf := &Workflow{dag: dag, WorkflowID: "gcbench", Store: store}
 		perfSink = wf.Execute(context.Background())
 	}
 }

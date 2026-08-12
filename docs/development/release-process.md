@@ -38,6 +38,27 @@ git checkout -b release-prep-v1.2.0
 
 ### 3. Final Checks
 
+#### Preflight (CUR-007)
+
+Before tagging, run the release preflight against the candidate tag. It binds the
+tag, `pkg/workflow.Version`, the CHANGELOG release section, and prior-release
+ancestry to the current HEAD, and prints the authoritative blocking-gate manifest
+that must pass on this SHA:
+
+```bash
+scripts/release/preflight.sh v1.2.0
+```
+
+It fails, non-zero and loud, if the tag disagrees with `pkg/workflow.Version`, if
+CHANGELOG.md lacks a released `## [X.Y.Z] — YYYY-MM-DD` section for the version, or
+if HEAD does not descend from the previous published tag. An intentional
+replacement lineage requires both `RELEASE_ALLOW_REPLACEMENT_LINEAGE=1` and a
+tracked ADR under `docs/architecture/adr/`. Set `RUN_GATES=1` to additionally run
+the cheap gates locally (build, vet, `gofmt -l`, FlatBuffers freshness). The script
+is read-only (only a self-cleaning temp dir under `RUN_GATES=1`). The always-run
+`pkg/workflow` test `TestVersionInfoComposesToVersion` guards the same `Version` ⇄
+`VersionInfo` identity in every CI test job (AUD-009).
+
 - [ ] Run the full test suite (`go test ./... -race`)
 - [ ] Verify that all documentation is up-to-date
 - [ ] Ensure all examples build and run

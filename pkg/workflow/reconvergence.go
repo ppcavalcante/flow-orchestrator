@@ -27,12 +27,12 @@ var (
 
 // isChoiceNode identifies a ChoiceNode by its action marker (a merge is matched
 // inline with the comma-ok form where its *mergeAction is also needed).
-func isChoiceNode(n *Node) bool { _, ok := n.Action.(*choiceAction); return ok }
+func isChoiceNode(n *Node) bool { _, ok := n.action.(*choiceAction); return ok }
 
 // dependsOn reports whether n already lists a dependency named depName.
 func dependsOn(n *Node, depName string) bool {
-	for _, d := range n.DependsOn {
-		if d.Name == depName {
+	for _, d := range n.dependsOn {
+		if d.name == depName {
 			return true
 		}
 	}
@@ -52,18 +52,18 @@ func nearestBranch(start *Node) (choice *Node, entry *Node, ok bool) {
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		if visited[n.Name] {
+		if visited[n.name] {
 			continue
 		}
-		visited[n.Name] = true
+		visited[n.name] = true
 		// Is n a branch entry? (depends directly on a ChoiceNode.)
-		for _, d := range n.DependsOn {
+		for _, d := range n.dependsOn {
 			if isChoiceNode(d) {
 				return d, n, true
 			}
 		}
 		// Not an entry — climb.
-		queue = append(queue, n.DependsOn...)
+		queue = append(queue, n.dependsOn...)
 	}
 	return nil, nil, false
 }
@@ -73,15 +73,15 @@ func nearestBranch(start *Node) (choice *Node, entry *Node, ok bool) {
 // nil for a well-formed structured choice-merge DAG.
 func validateReconvergence(dag *DAG) error {
 	// (c) Shared branch entry: a node owned by >1 ChoiceNode (41-F2).
-	for _, n := range dag.Nodes {
+	for _, n := range dag.nodes {
 		choices := make(map[string]bool)
-		for _, d := range n.DependsOn {
+		for _, d := range n.dependsOn {
 			if isChoiceNode(d) {
-				choices[d.Name] = true
+				choices[d.name] = true
 			}
 		}
 		if len(choices) > 1 {
-			return fmt.Errorf("%w: node %q is a branch of %d ChoiceNodes", ErrSharedBranch, n.Name, len(choices))
+			return fmt.Errorf("%w: node %q is a branch of %d ChoiceNodes", ErrSharedBranch, n.name, len(choices))
 		}
 	}
 
@@ -92,32 +92,32 @@ func validateReconvergence(dag *DAG) error {
 	type depmodelEdge struct{ merge, choice *Node }
 	var pending []depmodelEdge
 
-	for _, n := range dag.Nodes {
+	for _, n := range dag.nodes {
 		if isChoiceNode(n) {
 			continue // a Choice's own upstream is not a reconvergence
 		}
 		// Compute the owning (choice, entry) of each dependency.
 		type owner struct{ choice, entry string }
-		owners := make([]owner, 0, len(n.DependsOn))
+		owners := make([]owner, 0, len(n.dependsOn))
 		byChoice := make(map[string]map[string]bool) // choice -> set of distinct entries
 		choiceNodes := make(map[string]*Node)        // choice name -> its *Node
-		for _, d := range n.DependsOn {
+		for _, d := range n.dependsOn {
 			c, e, ok := nearestBranch(d)
 			if !ok {
 				owners = append(owners, owner{"", ""})
 				continue
 			}
-			owners = append(owners, owner{c.Name, e.Name})
-			choiceNodes[c.Name] = c
-			if byChoice[c.Name] == nil {
-				byChoice[c.Name] = make(map[string]bool)
+			owners = append(owners, owner{c.name, e.name})
+			choiceNodes[c.name] = c
+			if byChoice[c.name] == nil {
+				byChoice[c.name] = make(map[string]bool)
 			}
-			byChoice[c.Name][e.Name] = true
+			byChoice[c.name][e.name] = true
 		}
 
-		if ma, isMerge := n.Action.(*mergeAction); isMerge {
+		if ma, isMerge := n.action.(*mergeAction); isMerge {
 			// The tail-shape checks apply ONLY to the recorded From tails — an
-			// explicit mergeBuilder.DependsOn is an ordering constraint, not an
+			// explicit MergeBuilder.DependsOn is an ordering constraint, not an
 			// OR-join tail, so it does not participate in reconvergence validation
 			// (and the fire gate likewise counts only over the tails).
 			tailSet := make(map[string]bool, len(ma.tails))
@@ -125,8 +125,8 @@ func validateReconvergence(dag *DAG) error {
 				tailSet[t] = true
 			}
 			tailChoices := make(map[string]*Node)
-			for i, d := range n.DependsOn {
-				if !tailSet[d.Name] {
+			for i, d := range n.dependsOn {
+				if !tailSet[d.name] {
 					continue // an explicit DependsOn, not a From join tail
 				}
 				// Empty-branch tails (From(<ChoiceNode>)) are NOT supported: a Choice
@@ -136,22 +136,22 @@ func validateReconvergence(dag *DAG) error {
 				// explicitly rather than silently mis-fire.
 				if isChoiceNode(d) {
 					return fmt.Errorf("%w: merge %q joins a ChoiceNode tail %q (empty-branch merge tails are not supported)",
-						ErrUnstructuredMerge, n.Name, d.Name)
+						ErrUnstructuredMerge, n.name, d.name)
 				}
 				// (b) A merge's tails must all trace to a ChoiceNode, none dangling.
 				if owners[i].choice == "" {
-					return fmt.Errorf("%w: merge %q joins tail %q", ErrDanglingMerge, n.Name, d.Name)
+					return fmt.Errorf("%w: merge %q joins tail %q", ErrDanglingMerge, n.name, d.name)
 				}
 				tailChoices[owners[i].choice] = choiceNodes[owners[i].choice]
 			}
 			// (b) ... and to EXACTLY ONE ChoiceNode (no cross-Choice merge).
 			if len(tailChoices) > 1 {
-				return fmt.Errorf("%w: merge %q joins tails from %d different ChoiceNodes", ErrUnstructuredMerge, n.Name, len(tailChoices))
+				return fmt.Errorf("%w: merge %q joins tails from %d different ChoiceNodes", ErrUnstructuredMerge, n.name, len(tailChoices))
 			}
 			// DEC-M11-DEPMODEL: the merge depends on the reconvergence-source Choice
 			// (not just its tails) — queued, applied after the read pass.
 			for _, choiceNode := range tailChoices { // exactly one
-				if !dependsOn(n, choiceNode.Name) {
+				if !dependsOn(n, choiceNode.name) {
 					pending = append(pending, depmodelEdge{merge: n, choice: choiceNode})
 				}
 			}
@@ -174,14 +174,14 @@ func validateReconvergence(dag *DAG) error {
 				}
 				sort.Strings(offending)
 				return fmt.Errorf("%w: node %q reconverges %d branches of ChoiceNode %q via branch entries %v (use AddMerge to OR-join them)",
-					ErrUnstructuredMerge, n.Name, len(entries), choiceName, offending)
+					ErrUnstructuredMerge, n.name, len(entries), choiceName, offending)
 			}
 		}
 	}
 
 	// Apply the DEC-M11-DEPMODEL edges now that all reads are done — deterministic.
 	for _, e := range pending {
-		e.merge.DependsOn = append(e.merge.DependsOn, e.choice)
+		e.merge.dependsOn = append(e.merge.dependsOn, e.choice)
 	}
 	return nil
 }

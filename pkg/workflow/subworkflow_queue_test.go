@@ -19,6 +19,22 @@ func mkQueueStore(t *testing.T) *SQLiteStore {
 	return s
 }
 
+// childApprovalNonce computes the AUD-025 correlation nonce for a QUEUED sub-workflow
+// child's approval node. The digest input is the child DAG's DefinitionDigest, rebuilt
+// from the registry factory — the SAME source the engine re-stamps from when it resumes
+// the child (a raw store.Load of the child does not carry the stamped digest). This is
+// how a host that dispatches queued sub-workflows computes the nonce: it holds the
+// registry, so it can build the child type and derive the digest for the deterministic
+// child ID.
+func childApprovalNonce(t *testing.T, reg *Registry, childID, childType, node string) string {
+	t.Helper()
+	factory, ok := reg.lookup(childType)
+	require.True(t, ok, "child type %q must be registered to compute its approval nonce", childType)
+	dag, err := factory()
+	require.NoError(t, err)
+	return ApprovalNonce(childID, node, dag.DefinitionDigest())
+}
+
 // TestQueueSubWorkflow_ParentAddressRoundTrip — the control-plane plumbing (DEC-P94-PARENT-ADDRESS-
 // COLUMN): EnqueueSubWorkflow writes parent_id/parent_signal; ClaimNext projects them into WorkItem.
 // A plain Enqueue (no parent) → NULL columns → WorkItem.ParentID == "" (the detectable marker).
@@ -79,10 +95,10 @@ func TestQueueSubWorkflow_CompletionHook_WakesParent(t *testing.T) {
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(&afterN))
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent-wf"
-	pw.DAG = pdag
-	pw.Registry = reg // the ctx-injected Registry (Q2 ruling)
+	pw.dag = pdag
+	pw.registry = reg // the ctx-injected Registry (Q2 ruling)
 
 	// First drive: the parent enqueues the child + parks.
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "parent enqueues + parks")
@@ -164,7 +180,7 @@ func TestQueueSubWorkflow_CancelPropagation(t *testing.T) {
 	})
 
 	// The parent's deterministic child ID (as the queue producer would compute it).
-	childID := subWorkflowChildID("parent-wf", "sub")
+	childID := SubWorkflowChildID("parent-wf", "sub")
 	_, err := s.EnqueueSubWorkflow(childID, "blockType", nil, "parent-wf", completionSignalName("sub"), 1)
 	require.NoError(t, err)
 
@@ -230,9 +246,9 @@ func TestQueueSubWorkflow_NoRegistry_LoudFail(t *testing.T) {
 	pb.AddSubWorkflowQueued("sub", "someType")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "wf-noreg"
-	pw.DAG = pdag
+	pw.dag = pdag
 	// NO pw.Registry set → the queue node fails loudly.
 	err = pw.Execute(context.Background())
 	require.ErrorIs(t, err, ErrSubWorkflowRequiresRegistry, "no Registry → loud failure, never a silent no-op")
@@ -278,17 +294,17 @@ func TestQueueSubWorkflow_EndToEnd_ApprovalChild_CrashResume(t *testing.T) {
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(&afterN))
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw1 := NewWorkflow(store1)
+	pw1 := newWorkflowForTest(store1)
 	pw1.WorkflowID = "e2e-parent"
-	pw1.DAG = pdag
-	pw1.Registry = reg
+	pw1.dag = pdag
+	pw1.registry = reg
 	require.ErrorIs(t, pw1.Execute(context.Background()), ErrSuspended, "parent enqueues the child + parks")
 
 	// The worker runs the child → the child parks on its own approval (not terminal → no completion yet).
 	ran, err := RunNext(context.Background(), store1, reg, "worker")
 	require.NoError(t, err)
 	require.True(t, ran, "worker claimed + ran the child; the child parks on its approval")
-	childID := subWorkflowChildID("e2e-parent", "sub")
+	childID := SubWorkflowChildID("e2e-parent", "sub")
 	childState, _ := store1.Load(childID) //nolint:errcheck // asserted below
 	assertNodeStatus(t, childState, "gate", Waiting)
 	// No completion signal yet — the child is not terminal.
@@ -302,7 +318,7 @@ func TestQueueSubWorkflow_EndToEnd_ApprovalChild_CrashResume(t *testing.T) {
 	// Deliver the child's approval to the CHILD's mailbox. Wait for the parked child's lease to lapse
 	// (store1 was closed without releasing it — TTL-lapse is the reclaim trigger), then a worker
 	// reclaims + resumes the child → its approval completes it → terminal → the completion hook fires.
-	require.NoError(t, store2.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "d1")))
+	require.NoError(t, store2.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "d1", childApprovalNonce(t, reg, childID, "approvalChild", "gate"))))
 	require.Eventually(t, func() bool {
 		ran, rerr := RunNext(context.Background(), store2, reg, "worker")
 		require.NoError(t, rerr)
@@ -313,10 +329,10 @@ func TestQueueSubWorkflow_EndToEnd_ApprovalChild_CrashResume(t *testing.T) {
 	require.Len(t, mustTake(t, store2, "e2e-parent"), 1, "the completion hook woke the parent across the crash")
 
 	// The parent (resumed on the reopened store) wakes + reads the child's result.
-	pw2 := NewWorkflow(store2)
+	pw2 := newWorkflowForTest(store2)
 	pw2.WorkflowID = "e2e-parent"
-	pw2.DAG = pdag
-	pw2.Registry = reg
+	pw2.dag = pdag
+	pw2.registry = reg
 	require.NoError(t, pw2.Execute(context.Background()))
 	final, err := store2.Load("e2e-parent")
 	require.NoError(t, err)

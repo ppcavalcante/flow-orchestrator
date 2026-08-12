@@ -127,7 +127,7 @@ builder.AddNode("optional-enrichment").
 
 // Dependent runs even when optional-enrichment failed, and branches on its status.
 builder.AddNode("finalize").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         if status, _ := data.GetNodeStatus("optional-enrichment"); status == workflow.Failed {
             // proceed without the optional enrichment
         }
@@ -218,7 +218,7 @@ builder.AddNode("process-payment").
 
 // Error handling node
 builder.AddNode("handle-payment-failure").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Check if payment processing failed
         status, _ := data.GetNodeStatus("process-payment")
         if status != workflow.Failed {
@@ -244,7 +244,7 @@ builder.AddNode("handle-payment-failure").
 
 // Continue workflow
 builder.AddNode("fulfill-order").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Only proceed if payment succeeded
         paymentStatus, _ := data.GetNodeStatus("process-payment")
         alternativeStatus, _ := data.GetNodeStatus("handle-payment-failure")
@@ -275,7 +275,7 @@ timeoutAction := workflow.TimeoutMiddleware(5 * time.Second)(longRunningAction)
 
 // Or with context timeouts
 builder.AddNode("long-operation").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         // Create a timeout for this specific operation
         timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
         defer cancel()
@@ -543,7 +543,7 @@ builder.AddNode("reserve-inventory").
 
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
-    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithCompensationFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
         pid, _ := data.GetString("payment_id")
         return refundPayment(ctx, pid, key)                // MUST be idempotent

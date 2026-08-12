@@ -47,9 +47,12 @@ table TimerWaitEntry {
 // so an int64 payload round-trips via the json UseNumber() path. Not reachable
 // from root_type WorkflowState; serialized and read as its own buffer root.
 table Signal {
-  id:string;      // host-supplied stable unique-per-logical-event id (idempotency)
-  name:string;    // the signal name a WaitForSignalNode waits on
-  payload:string; // JSON-encoded payload (mirrors NodeOutputEntry.output)
+  id:string;           // host-supplied stable unique-per-logical-event id (idempotency)
+  name:string;         // the signal name a WaitForSignalNode waits on
+  payload:string;      // JSON-encoded payload (mirrors NodeOutputEntry.output)
+  enqueued_at:long;    // CUR-001/AUD-025: delivery time (unix-nanos) the store stamps; the
+                       // backend-independent freshness contract. Appended last so pre-field
+                       // buffers decode it as 0 (unknown) rather than mis-reading a field.
 }
 
 table WorkflowState {

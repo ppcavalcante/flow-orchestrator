@@ -14,15 +14,15 @@ import (
 // both the launch gate and markSkippedFrom consult (single source of truth).
 func blockedFixture(deps map[string]NodeStatus, coe map[string]bool) (*Node, *WorkflowData) {
 	noop := ActionFunc(func(context.Context, *WorkflowData) error { return nil })
-	node := NewNode("dependent", noop)
+	node := newNode("dependent", noop)
 	data := NewWorkflowData("wf")
 	// Deterministic dep order is irrelevant to classifyBlockedStatus (it is a
 	// full scan with no early break) — that order-independence is the whole point
 	// of the redesign, so we do not sort here.
 	for name, st := range deps {
-		dep := NewNode(name, noop)
-		dep.ContinueOnError = coe[name]
-		node.AddDependency(dep)
+		dep := newNode(name, noop)
+		dep.continueOnError = coe[name]
+		node.dependsOn = append(node.dependsOn, dep)
 		data.SetNodeStatus(name, st)
 	}
 	return node, data
@@ -109,14 +109,14 @@ func TestCauseAware_WaitingSibling(t *testing.T) {
 // mergeDependent (its *mergeAction marker), every other node is andDependent. The
 // merge arm of depResolved treats a Bypassed predecessor as satisfied (OR-join).
 func TestCauseAware_DependentRole(t *testing.T) {
-	plain := NewNode("any", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	plain := newNode("any", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
 	assert.Equal(t, andDependent, dependentRole(plain), "a plain node is an AND-dependent")
 
 	merge := newMergeNode("m", []string{"a"})
 	assert.Equal(t, mergeDependent, dependentRole(merge), "a MergeNode is a mergeDependent (OR-join)")
 
 	// The merge arm treats Bypassed as resolving; the AND arm does not.
-	dep := NewNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	dep := newNode("dep", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
 	assert.True(t, depResolved(dep, Bypassed, mergeDependent), "merge arm: Bypassed resolves an OR-join")
 	assert.False(t, depResolved(dep, Bypassed, andDependent), "AND arm: Bypassed does NOT resolve")
 }

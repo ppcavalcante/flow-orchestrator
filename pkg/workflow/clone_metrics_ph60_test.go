@@ -105,7 +105,7 @@ func TestPh60_Bite5_ResumeCarriesEnabledMetrics(t *testing.T) {
 
 	store := NewInMemoryStore()
 	wf := &Workflow{
-		DAG:           dag,
+		dag:           dag,
 		WorkflowID:    "resume-metrics",
 		Store:         store,
 		MetricsConfig: metrics.NewConfig().WithEnabled(true),
@@ -142,7 +142,7 @@ func TestPh60_Bite6_PublicAPIEnableExample(t *testing.T) {
 
 	// PUBLIC enable-hook: set MetricsConfig on the Workflow.
 	wf := &Workflow{
-		DAG:           dag,
+		dag:           dag,
 		WorkflowID:    "public-metrics",
 		MetricsConfig: metrics.ProductionConfig().WithEnabled(true).WithSamplingRate(1.0),
 	}

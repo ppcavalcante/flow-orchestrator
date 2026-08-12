@@ -79,9 +79,9 @@ func TestFanOutKillEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker build: %v", err)
 	}
-	w := NewWorkflow(s)
+	w := newWorkflowForTest(s)
 	w.WorkflowID = fanoutKillWID
-	w.DAG = dag
+	w.dag = dag
 
 	deadline := time.Now().Add(20 * time.Second) // safety bound; the parent kills/ends us well before
 	for time.Now().Before(deadline) {

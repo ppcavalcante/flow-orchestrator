@@ -1,0 +1,4 @@
+# author: t8-seat
+# DERIVED from the phrasing DEC-M23-NAMING rules out, to exercise the (D, V, S) path. Not an independently-found instance.
+The (D, V, S) triple means V verifies what D produced, so nothing D did ever
+reaches S unmediated.

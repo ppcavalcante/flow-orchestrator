@@ -21,8 +21,9 @@ func buildLinearDAG(t *testing.T, id string, n int) *DAG {
 	t.Helper()
 	b := NewWorkflowBuilder().WithWorkflowID(id)
 	prev := "n0"
+	start := prev // capture the start node's OWN name; prev is reassigned in the loop below
 	b.AddStartNode(prev).WithAction(ActionFunc(func(_ context.Context, d *WorkflowData) error {
-		d.SetOutput(prev, "done")
+		d.SetOutput(start, "done")
 		return nil
 	}))
 	for i := 1; i < n; i++ {
@@ -48,7 +49,7 @@ func Test_ph61_Batched_ResumeEquivalent(t *testing.T) {
 		store, err := NewFlatBuffersStore(dir, WithDurabilityMode(mode))
 		require.NoError(t, err)
 		dag := buildLinearDAG(t, "eq", 200)
-		wf := &Workflow{DAG: dag, WorkflowID: "eq", Store: store}
+		wf := &Workflow{dag: dag, WorkflowID: "eq", Store: store}
 		require.NoError(t, wf.Execute(context.Background()))
 		loaded, err := store.Load("eq")
 		require.NoError(t, err)
@@ -129,7 +130,7 @@ func Test_ph61_Batched_SuspendFloorDurable(t *testing.T) {
 	dag, err := b.Build()
 	require.NoError(t, err)
 
-	wf := &Workflow{DAG: dag, WorkflowID: "park", Store: store}
+	wf := &Workflow{dag: dag, WorkflowID: "park", Store: store}
 	err = wf.Execute(context.Background())
 	require.ErrorIs(t, err, ErrSuspended, "the run parks on the signal wait")
 
@@ -153,7 +154,7 @@ func Test_ph61_F2_GetMetricsNonNilOnDisabledDefault(t *testing.T) {
 	store, err := NewFlatBuffersStore(dir)
 	require.NoError(t, err)
 	dag := buildLinearDAG(t, "m", 3)
-	wf := &Workflow{DAG: dag, WorkflowID: "m", Store: store} // MetricsConfig nil (disabled default)
+	wf := &Workflow{dag: dag, WorkflowID: "m", Store: store} // MetricsConfig nil (disabled default)
 	require.NoError(t, wf.Execute(context.Background()))
 
 	mc := wf.GetMetrics()

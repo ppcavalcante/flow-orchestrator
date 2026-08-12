@@ -39,14 +39,14 @@ func timerCycleSnapshots(t *testing.T, armNow, fireNow time.Time, dur time.Durat
 	const id = "det"
 
 	build := func(now time.Time) *Workflow {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewTimerNode("sleep", dur))
-		mustAddNode(t, d, NewNode("after", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newTimerNode("sleep", dur))
+		mustAddNode(t, d, newNode("after", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 			data.SetOutput("after", "ran")
 			return nil
 		})))
 		mustAddDep(t, d, "sleep", "after")
-		return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
+		return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(now)}
 	}
 
 	require.ErrorIs(t, build(armNow).Execute(context.Background()), ErrSuspended)
@@ -112,9 +112,9 @@ func TestTimerDeterminism_FireAtIsClockNotWallClock(t *testing.T) {
 	armNow := epoch.Add(123 * time.Hour) // a fixed instant unrelated to the real wall clock
 	dur := 7 * time.Hour
 
-	d := NewDAG(id)
-	mustAddNode(t, d, NewTimerNode("sleep", dur))
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: NewFakeClock(armNow)}
+	d := newDAGForTest(id)
+	mustAddNode(t, d, newTimerNode("sleep", dur))
+	w := &Workflow{dag: d, WorkflowID: id, Store: store, Clock: NewFakeClock(armNow)}
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
 	persisted, err := store.Load(id)
@@ -139,5 +139,5 @@ func TestTimerDeterminism_FireAtIsClockNotWallClock(t *testing.T) {
 //	  Revert to re-green. (Receipt captured in 36-PLAN-SUMMARY.md.)
 func TestTimerDeterminism_BiteInstructions(t *testing.T) {
 	// Sanity: the bite surface assertions are present and green on the real code.
-	assert.NotNil(t, NewTimerNode("x", time.Second))
+	assert.NotNil(t, newTimerNode("x", time.Second))
 }

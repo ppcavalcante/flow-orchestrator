@@ -93,7 +93,7 @@ func TestWithCompensation_SetsNodeField(t *testing.T) {
 	b.AddNode("with-action").WithAction(benchNoopAction()).
 		WithCompensation(benchNoopAction())
 	b.AddNode("with-func").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { return nil })
 	b.AddNode("no-comp").WithAction(benchNoopAction())
 
 	dag, err := b.Build()
@@ -102,22 +102,16 @@ func TestWithCompensation_SetsNodeField(t *testing.T) {
 	for _, name := range []string{"with-action", "with-func"} {
 		n, ok := dag.GetNode(name)
 		require.True(t, ok)
-		require.NotNil(t, n.Compensation, "%s should carry a compensation", name)
+		require.NotNil(t, n.compensation, "%s should carry a compensation", name)
 	}
 	noComp, ok := dag.GetNode("no-comp")
 	require.True(t, ok)
-	require.Nil(t, noComp.Compensation, "a node with no WithCompensation is a rollback no-op (nil)")
+	require.Nil(t, noComp.compensation, "a node with no WithCompensation is a rollback no-op (nil)")
 }
 
-// TestWithCompensation_UnsupportedType_BuildError — §2: an unsupported compensation
-// type is reported by Build (mirrors WithAction's actionErr discipline).
-func TestWithCompensation_UnsupportedType_BuildError(t *testing.T) {
-	b := NewWorkflowBuilder()
-	b.AddNode("bad").WithAction(benchNoopAction()).WithCompensation(42)
-	_, err := b.Build()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid compensation")
-}
+// AUD-041: the former TestWithCompensation_UnsupportedType_BuildError was removed —
+// WithCompensation now takes a typed Action (and WithCompensationFunc a typed func), so
+// an unsupported compensation type is a COMPILE error and can no longer reach Build.
 
 // TestCompensated_IsTerminal — §1: Compensated is terminal (never re-armed).
 func TestCompensated_IsTerminal(t *testing.T) {

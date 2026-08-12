@@ -57,10 +57,10 @@ func TestCancel_MidLevelReturnsCtxErrorNotExecutionError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dag := NewDAG("mid-level-cancel")
+	dag := newDAGForTest("mid-level-cancel")
 	// Two independent start nodes (same level): one cancels, one observes.
-	canceller := NewNode("canceller", cancelOnRunAction(cancel))
-	observer := NewNode("observer", ctxObservingAction())
+	canceller := newNode("canceller", cancelOnRunAction(cancel))
+	observer := newNode("observer", ctxObservingAction())
 	mustAddNode(t, dag, canceller)
 	mustAddNode(t, dag, observer)
 
@@ -83,16 +83,16 @@ func TestCancel_WinsOverGenuineFailure(t *testing.T) {
 	defer cancel()
 
 	var failerRan atomic.Bool
-	dag := NewDAG("cancel-vs-failure")
+	dag := newDAGForTest("cancel-vs-failure")
 	// Three independent nodes in one level: a genuine failer, a canceller, and a
 	// ctx-observer. The failer fails on its own; the canceller cancels; the
 	// observer blocks on ctx so the run cannot complete before the cancel lands.
-	failer := NewNode("failer", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	failer := newNode("failer", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		failerRan.Store(true)
 		return errors.New("genuine action failure")
 	}))
-	canceller := NewNode("canceller", cancelOnRunAction(cancel))
-	observer := NewNode("observer", ctxObservingAction())
+	canceller := newNode("canceller", cancelOnRunAction(cancel))
+	observer := newNode("observer", ctxObservingAction())
 	mustAddNode(t, dag, failer)
 	mustAddNode(t, dag, canceller)
 	mustAddNode(t, dag, observer)
@@ -122,12 +122,12 @@ func TestCancel_NoNodeSkippedDueToCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dag := NewDAG("no-skip-on-cancel")
+	dag := newDAGForTest("no-skip-on-cancel")
 	// L0: canceller (cancels) + observer (blocks on ctx → Failed via ctx err).
 	// L1: downstream depends on observer.
-	canceller := NewNode("canceller", cancelOnRunAction(cancel))
-	observer := NewNode("observer", ctxObservingAction())
-	downstream := NewNode("downstream", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	canceller := newNode("canceller", cancelOnRunAction(cancel))
+	observer := newNode("observer", ctxObservingAction())
+	downstream := newNode("downstream", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return nil
 	}))
 	mustAddNode(t, dag, canceller)
@@ -155,9 +155,11 @@ func TestCancel_PureCoeLevelStillReturnsCtxError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	dag := NewDAG("coe-cancel")
-	canceller := NewNode("canceller", cancelOnRunAction(cancel)).WithContinueOnError()
-	observer := NewNode("observer", ctxObservingAction()).WithContinueOnError()
+	dag := newDAGForTest("coe-cancel")
+	canceller := newNode("canceller", cancelOnRunAction(cancel))
+	canceller.continueOnError = true
+	observer := newNode("observer", ctxObservingAction())
+	observer.continueOnError = true
 	mustAddNode(t, dag, canceller)
 	mustAddNode(t, dag, observer)
 

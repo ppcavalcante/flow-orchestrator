@@ -76,7 +76,7 @@ does not re-litigate them.
 
 | Site | Mutant | Kill test |
 |---|---|---|
-| `dag.go` StartNodes/EndNodes guard | `len(DependsOn) == 0` → `!= 0` (and the EndNodes companion) | `TestValidate_StartAndEndNodes` — asserts the contents of the **public** `DAG.StartNodes`/`EndNodes` fields, previously unasserted public surface. |
+| ~~`dag.go` StartNodes/EndNodes guard~~ **— SITE REMOVED (M23 ph117 T1c)** | ~~`len(DependsOn) == 0` → `!= 0`~~ | **No kill test, and none is owed: the mutants no longer exist.** `DAG.StartNodes`/`EndNodes` and the loop that filled them were deleted, so there is no longer a statement to mutate. The kill test `TestValidate_StartAndEndNodes` went with them; `pkg/workflow/validate_startend_test.go` is kept as the tombstone. The dependency-free set is still computed where it is *used* — `GetLevels` derives level 0 from `len(node.dependsOn) == 0` on every call — and that is exercised by the executor on every run. |
 | `workflow_data.go` snapshot element-count bound | `len(m) > defaultMaxElements` → `>=` | `TestLoadSnapshot_ElementCountCap/at-exact-cap-accepted` — a section of **exactly** `defaultMaxElements` entries must be accepted; the existing cap+1 case alone left the exact-cap boundary unpinned. A real safety/availability boundary (M5 trust-contract family). |
 
 ### Accepted equivalent / low-value (NOT worth a test)

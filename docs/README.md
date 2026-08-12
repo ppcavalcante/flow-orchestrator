@@ -4,7 +4,7 @@ Welcome to the Flow Orchestrator documentation. This comprehensive guide will he
 
 ## Why Flow Orchestrator
 
-Flow Orchestrator occupies a niche no other engine holds: a **formally-verified,
+Flow Orchestrator occupies a niche no other engine holds: a **TLA+-model-checked,
 embeddable, durable workflow engine that needs no server and no database** — yet
 supports **durable timers, signals, and long-running waits** with **no determinism tax**.
 
@@ -19,9 +19,10 @@ supports **durable timers, signals, and long-running waits** with **no determini
   replay-based engines (e.g. Temporal, Azure Durable Functions / durabletask, go-workflows),
   Flow Orchestrator never re-executes your code to rebuild state, so your actions carry no
   "must be deterministic under replay" constraint.
-- **Formally verified core** — the executor's crash-resume and suspend/resume semantics are
-  machine-checked in TLA+ (TLC-exhaustive) and exercised by property-based tests over random
-  DAGs. (Scope: the core scheduling/durability *algorithm* is verified; see
+- **Machine-checked core algorithm** — the executor's crash-resume and suspend/resume
+  *algorithm* is machine-checked in TLA+ (TLC-exhaustive), and the Go *implementation* is
+  exercised by property-based tests over random DAGs. (Scope: TLC proves the design/algorithm,
+  the property suite samples the implementation — not "the engine is formally verified"; see
   [specs/README.md](../specs/README.md) for the honest design-exhaustive-vs-implementation-sampled
   boundary.)
 
@@ -93,7 +94,7 @@ Flow Orchestrator is a lightweight, high-performance workflow orchestration engi
 - **Embeddable**: Clean API for integration into any Go application
 - **Type-Safe Data**: Optional generic typed keys (`Key[T]`) over the shared data store — see [api-reference.md → Typed-Key Data API](./reference/api-reference.md#typed-key-data-api-added-v070)
 - **Resilient**: Per-node continue-on-error lets selected steps fail without halting the workflow — see the [Error Handling guide](./guides/error-handling.md#3-continue-on-error)
-- **Formally Verified core**: Crash-resume and suspend/resume semantics machine-checked in TLA+ (TLC-exhaustive) plus property-based tests over random DAGs — see [`specs/README.md`](../specs/README.md)
+- **Machine-checked core algorithm**: the crash-resume and suspend/resume *algorithm* is machine-checked in TLA+ (TLC-exhaustive); property-based tests over random DAGs exercise the Go implementation — see [`specs/README.md`](../specs/README.md) for the honest algorithm-vs-implementation boundary
 
 ## Status
 
@@ -108,7 +109,7 @@ builder := workflow.NewWorkflowBuilder().
 
 // Add workflow steps with the fluent builder pattern
 builder.AddStartNode("validate-order").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         log.Println("Validating order...")
         data.Set("order_valid", true)
         return nil

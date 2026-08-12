@@ -152,7 +152,7 @@ func benchmarkRecoveryAfterFailure(b *testing.B, failureCount int) {
 
 // Create a DAG with a specific number of failing nodes
 func createDAGWithFailingNodes(totalNodes, failingNodes int) (*workflow.DAG, []string) {
-	dag := workflow.NewDAG("recovery-dag")
+	spec := newDAGSpec("recovery-dag")
 	failedNodeNames := make([]string, 0, failingNodes)
 
 	// Create all nodes
@@ -170,23 +170,21 @@ func createDAGWithFailingNodes(totalNodes, failingNodes int) (*workflow.DAG, []s
 			action = createTestAction()
 		}
 
-		node := workflow.NewNode(nodeName, action)
-		// Setup helper (no *testing.B in scope): a graph that cannot be built is
-		// a broken benchmark — panic loudly rather than silently ignore.
-		if err := dag.AddNode(node); err != nil {
-			panic(fmt.Sprintf("createDAGWithFailingNodes: AddNode: %v", err))
-		}
+		// M23 SEAL-06: spec.dep takes AddDependency's original (from, to) order, so the
+		// (prevNodeName, nodeName) pair below is carried over unchanged — nodeName
+		// depends on prevNodeName, a forward linear chain. Errors are raised by
+		// spec.build(), which panics for the same reason the AddNode/AddDependency
+		// checks did: this helper has no *testing.B in scope.
+		spec.node(nodeName, action)
 
 		// Add dependencies - make a linear chain for simplicity
 		if i > 0 {
 			prevNodeName := fmt.Sprintf("node-%d", i-1)
-			if err := dag.AddDependency(prevNodeName, nodeName); err != nil {
-				panic(fmt.Sprintf("createDAGWithFailingNodes: AddDependency: %v", err))
-			}
+			spec.dep(prevNodeName, nodeName)
 		}
 	}
 
-	return dag, failedNodeNames
+	return spec.build(), failedNodeNames
 }
 
 // Benchmark panic recovery with middleware

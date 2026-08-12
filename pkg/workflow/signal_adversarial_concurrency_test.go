@@ -63,14 +63,14 @@ func (s *countingSink) count() int32 { return atomic.LoadInt32(&s.runs) }
 // for the whole signal-consume path.
 func buildSignalSinkWorkflow(t *testing.T, store WorkflowStore, wf string, locker Locker, sink Action) *Workflow {
 	t.Helper()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = wf
 	if locker != nil {
 		w.WithLocker(locker)
 	}
-	require.NoError(t, w.AddNode(NewWaitForSignalNode("wait", "go")))
-	require.NoError(t, w.AddNode(NewNode("sink", sink)))
-	require.NoError(t, w.AddDependency("wait", "sink"))
+	require.NoError(t, w.addNode(newWaitForSignalNode("wait", "go")))
+	require.NoError(t, w.addNode(newNode("sink", sink)))
+	require.NoError(t, w.addDependency("wait", "sink"))
 	return w
 }
 

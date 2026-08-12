@@ -4,9 +4,22 @@ on:
   push:
     branches: [ anvil-m1, main ]
   pull_request:
+  schedule:
+    # Nightly at 04:17 UTC — carries the heavy, non-blocking mutation job (AUD-050)
+    # off the every-PR hot path onto a scheduled cadence, so a slow mutation run
+    # cannot delay a PR or (on its 6h GitHub default) cancel the whole workflow.
+    - cron: '17 4 * * *'
 
 permissions:
   contents: read
+
+# GOTOOLCHAIN=local (AUD-051): go.mod carries `toolchain go1.25.11` so a
+# CONTRIBUTOR on GOTOOLCHAIN=auto is nudged to the patched toolchain. In CI the
+# Go version is pinned EXPLICITLY per job via setup-go, so `local` keeps that pin
+# authoritative and stops the directive from silently auto-upgrading the 1.25.0
+# matrix arm — which exists precisely to test the language floor, not 1.25.11.
+env:
+  GOTOOLCHAIN: local
 
 jobs:
   test:
@@ -71,6 +84,13 @@ jobs:
         # arm64 run cannot see — M14 ph60 removed one alloc, read only on amd64). Runs on
         # BOTH toolchain arms.
         run: go test -run '^TestPerfCeiling_DetTax$' ./pkg/workflow
+      # AUD-002 retired the `adversarial_copyclass` tag and its dedicated CI step. The tag existed
+      # ONLY to quarantine `go vet`'s copylocks diagnostic on `cp := *dag`, which was the first half
+      # of the copied-mutex-wedge finding. The fix makes DAG.mu a *sync.RWMutex: a value copy no
+      # longer trips copylocks AND no longer inherits a locked mutex, so the diagnostic is gone and
+      # the copy-class tests moved into the default build (seal_adversarial_117_copyclass_test.go),
+      # covered by the ordinary `go test` / `-race` steps above. There is nothing tag-specific left
+      # to run.
       - name: govulncheck (symbol-scan blocking)
         # Scoped to the 1.25.11 (release/build) toolchain ON PURPOSE — do NOT
         # un-scope this. A stdlib-advisory gate must reflect the toolchain we
@@ -176,6 +196,43 @@ jobs:
         # The durable gate is the committed seed-corpus replay in the race test job.
         run: go test ./pkg/workflow/ -run='^$' -fuzz='^FuzzFlatBuffersStoreLoad$' -fuzztime=60s
 
+  formal:
+    name: Formal models (TLC capstones, BLOCKING)
+    runs-on: ubuntu-latest
+    # AUD-046 / V-04 — the TLA+ specs were only ever run BY HAND, so they could
+    # rot relative to the code with nothing to catch it. This model-checks the
+    # load-bearing capstones (the level-executor safety+liveness proofs + the
+    # durable crash-resume algorithm) on every PR against a PINNED tools jar
+    # verified by SHA-256. It needs only a JRE — no Go build, no FlatBuffers.
+    #
+    # Scope is the "No error has been found" capstones, NOT the `*Break` mutation
+    # configs (which INVERT the pass condition — TLC is expected to find a
+    # violation there); grading those needs per-config expected-outcome metadata.
+    # See scripts/formal/run_tlc.sh.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Cache pinned tla2tools.jar
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .tlacache
+          # Key on the pinned version so a jar bump busts the cache. The script
+          # re-verifies the SHA-256 on every run regardless, so a poisoned cache
+          # cannot slip a wrong jar past the gate.
+          key: tla2tools-v1.8.0
+      - name: Model-check TLC capstones
+        run: ./scripts/formal/run_tlc.sh
+      - name: Archive TLC state-count summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tlc-summary
+          path: tlc-summary.txt
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -193,23 +250,57 @@ jobs:
         run: make generate-fb
       - name: Build
         run: go build -v ./...
+      # This step runs every example's main() as a smoke gate. A compile gate cannot
+      # see a runtime failure, so `go build` alone is insufficient; each example now
+      # exits NON-ZERO on infrastructure failure and exit 0 on a demonstrated outcome
+      # (a deliberate workflow failure the example is teaching is not an error) — so
+      # this gate reds on broken wiring, not on a demonstration working.
+      #
+      # The new suite (M23+) is the 13 numbered dirs (01-hello-dag … 12-observability)
+      # plus capstone-document-pipeline. Two need care and both are handled here:
+      #   * 12-observability is a SEPARATE Go module (its own go.mod, replace back to
+      #     the lib, pulls the OTel SDK). `go run` from the ROOT module fails for it, so
+      #     it is run from INSIDE its own dir — the `(cd $dir && go run .)` below makes
+      #     `go run .` resolve against that module.
+      #   * 03-durable-crash-resume re-execs itself as a CHILD worker that self-kills
+      #     (os.Exit(137)); the PARENT (the role `go run .` invokes here, with no role
+      #     env set) captures that expected child exit, resumes off SQLite, and exits 0.
+      #     capstone runs a longer multi-worker demo. A per-example `timeout` means a
+      #     wedged example self-terminates (reporting failure) instead of running to the
+      #     job's ceiling; `set -e` makes any non-zero example red the step (the prior
+      #     loop had no `set -e`, so a mid-loop failure was masked unless it ran last).
+      # Examples take no network and no external services; each writes durable state
+      # under its own temp/dir.
       - name: Run examples
         run: |
+          set -euo pipefail
           for example in $(find examples -name "main.go" -not -path "*/\.*" | sort); do
-            dir=$(dirname $example)
+            dir=$(dirname "$example")
             echo "Running example: $dir"
-            cd $dir && go build -v && cd -
+            (cd "$dir" && timeout 300 go run .)
           done
 
   mutation:
     name: Mutation testing (informational, non-blocking)
     runs-on: ubuntu-latest
-    # NON-BLOCKING by design: mutation testing is the rung above coverage% but is
-    # too slow and too sensitive to equivalent-mutant churn to gate the build on.
-    # continue-on-error makes the job report its result without ever failing CI —
-    # it exists to surface NEW real test gaps over time (read the log, don't trust
-    # the exit code). See docs/development/mutation_testing.md for the accepted-
-    # survivor baseline + how to triage.
+    # SCHEDULED / push-only, NOT every PR (AUD-050 / V-03). Mutation testing is the
+    # rung above coverage% but is slow enough that a runaway run once hit GitHub's
+    # 6h default job timeout and was CANCELLED, which surfaced the whole workflow as
+    # cancelled even though every blocking job had passed. Two guards close that:
+    #   * this `if` keeps it off the every-PR hot path — it runs on the nightly
+    #     schedule and on pushes to the long-lived branches, where a slow run costs
+    #     nobody a PR turnaround;
+    #   * `timeout-minutes` below caps it FAR under the 6h default, so it self-
+    #     terminates as a clean informational failure instead of a workflow-cancel.
+    if: github.event_name == 'schedule' || github.event_name == 'push'
+    # A hard ceiling well under GitHub's 6h default. Combined with continue-on-error
+    # a timeout here is reported (job red, workflow green), never a cancel.
+    timeout-minutes: 40
+    # NON-BLOCKING by design: too sensitive to equivalent-mutant churn to gate the
+    # build on. continue-on-error makes the job report its result without ever
+    # failing CI — it exists to surface NEW real test gaps over time (read the log,
+    # don't trust the exit code). See docs/development/mutation_testing.md for the
+    # accepted-survivor baseline + how to triage.
     continue-on-error: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

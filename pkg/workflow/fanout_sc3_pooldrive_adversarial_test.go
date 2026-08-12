@@ -41,9 +41,9 @@ func runFanCap(t *testing.T, store WorkflowStore, parentID string, capN int, a *
 	pb.AddStartNode(a.nodeName).WithAction(a)
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = parentID
-	w.DAG = dag
+	w.dag = dag
 	return w.Execute(context.Background())
 }
 
@@ -169,7 +169,7 @@ func TestFanOut_SC3_DiscoveryOrder_LargeN_IndexAddressed(t *testing.T) {
 
 // TestFanOut_SC3_CrashResume_ExactlyOncePersisted_LargeN — N=1000, cap=8, k=500 branch children pre-seeded durably
 // Complete (the crash-after-branch-k window: expansion journaled, fan node Pending). Re-drive: the k already-durable
-// branches are NOT re-executed (exactly-once persistence via the deterministic subFanOutChildID no-op), the
+// branches are NOT re-executed (exactly-once persistence via the deterministic FanOutChildID no-op), the
 // remaining N−k branches run + complete exactly once, the expander runs ZERO extra times (expansion-once), and the
 // final aggregate is complete + index-correct across the resume boundary. Store-seed + re-drive mirrors
 // TestFanOut_CrashResume_RealWindow (the reachable state a real out-of-process kill would leave). Run across all
@@ -212,8 +212,8 @@ func TestFanOut_SC3_CrashResume_ExactlyOncePersisted_LargeN(t *testing.T) {
 			// resumeSideEffects). Their result key "out"=idx is read back on resume via the terminal-fast-path.
 			seedBranch := fanBranch(func(_ context.Context, idx int, _ interface{}) (interface{}, error) { return idx, nil })
 			for i := range k {
-				childID := subFanOutChildID(parentID, "fan", i)
-				sw := &Workflow{DAG: seedBranch(i, i), WorkflowID: childID, Store: store}
+				childID := FanOutChildID(parentID, "fan", i)
+				sw := &Workflow{dag: seedBranch(i, i), WorkflowID: childID, Store: store}
 				require.NoError(t, sw.Execute(context.Background()))
 			}
 			require.EqualValues(t, 0, resumeSideEffects.Load(), "seeding used the non-counting body")

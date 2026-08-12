@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status-alpha-release)
 
-A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes — an **embeddable, formally-verified durable DAG engine**: crash anywhere and resume from the last completed level, with **no server, no database required, and no determinism tax.**
+A lightweight, high-performance workflow orchestration engine for Go applications that need reliable execution of complex processes — an **embeddable, TLA+-model-checked durable DAG engine**: crash anywhere and resume from the last completed level, with **no server, no database required, and no determinism tax.**
 
 ## Status: Alpha Release
 
@@ -18,7 +18,7 @@ Flow Orchestrator is currently in **alpha status**. While the core functionality
 
 Flow Orchestrator is a flexible workflow engine designed for embedding within Go applications. It allows you to define, execute, and monitor complex workflows with a clean, fluent API while handling parallelism, dependencies, error handling, and persistence automatically.
 
-It is a **durable execution core**: a workflow that crashes mid-run can be resumed — restart with the same workflow ID and store, and execution picks up from the last completed level without re-running finished work. Because a workflow here is **data (a static DAG), not replayed code**, this durability carries **no determinism tax** (unlike replay-based engines) and the resume algorithm is **machine-checked in TLA+** — a niche no other Go engine holds: an embeddable, formally-verified durable DAG engine with no server and no DB required. See [Durable Crash-Resume](#durable-crash-resume).
+It is a **durable execution core**: a workflow that crashes mid-run can be resumed — restart with the same workflow ID and store, and execution picks up from the last completed level without re-running finished work. Because a workflow here is **data (a static DAG), not replayed code**, this durability carries **no determinism tax** (unlike replay-based engines) and the resume algorithm is **machine-checked in TLA+** — a niche no other Go engine holds: an embeddable, TLA+-model-checked durable DAG engine with no server and no DB required. See [Durable Crash-Resume](#durable-crash-resume).
 
 ### Key Features
 
@@ -44,12 +44,20 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release, and there is
-> **no stable (`v1`+) release**. The latest is **`v0.21.0-alpha`** (M22 — Production Hardening:
-> a bounded `min(N, cap)` fan-out worker pool (fan-out spawns at most `cap` goroutines, not all `N`),
-> honest at-least-once-EXECUTION / exactly-once-PERSISTENCE durability contract, per-branch fan-out
-> retry with capped-jitter backoff (`WithBranchRetries`), a durable first-of(signal, timer) node
-> (`AddWaitForSignalTimeout`), and operability polish — all additive, the static-DAG executor and
-> dispatch/fencing machinery **0-diff** — on top of M21 — Dynamic Fan-out: map a
+> **no stable (`v1`+) release**. The latest is **`v0.22.0-alpha`** (M23 — Sealed Graph + Complete
+> Mediation: the Node/DAG/Workflow surface is **sealed** — post-Build mutators removed, internals
+> behind read accessors — with complete per-node action mediation via a sealed action view, a
+> structural `DefinitionDigest()` that rejects a changed graph on resume, engine-reserved keys a
+> consumer cannot overwrite, a build-time `WithBoundary` verifier-dominance check, and a store-only
+> approval correlation nonce; the outcome of an independent-audit remediation pass, all
+> **additive/defensive**, the static-DAG executor **0-diff** for valid graphs — on top of
+> **`v0.21.0-alpha`** (M22 — Production Hardening: a
+> bounded fan-out worker pool spawning at most `min(N, cap)` goroutines, per-branch fan-out retry
+> (`WithBranchRetries`) that re-drives without re-expanding, capped backoff + jitter on
+> `RetryableAction` (`WithMaxDelay` / `WithJitter`, zero values byte-for-byte prior behavior), and a
+> durable first-of(signal, timer) via `AddWaitForSignalTimeout` — all **additive**, with the
+> static-DAG executor and the dispatch/fencing machinery **0-diff**) — on top of
+> **`v0.20.0-alpha`** (M21 — Dynamic Fan-out: map a
 > branch action over `N` items discovered at runtime → `N` parallel branches, as one ordinary DAG
 > node whose `Execute` journals the expansion once and drives its own `MaxConcurrency`-bounded pool
 > (`AddFanOut` + `WithResults` / `WithMaxWidth` / `WithCollectPartial`) — crash-resume reconstructs
@@ -78,10 +86,11 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 > (suspend-resume: durable timers, wait-for-signal/condition, the `Waiting` status), the M9
 > durable execution core (crash-resume via the optional `Checkpointer` interface), and the M1–M8
 > work). Because there is no stable tag, `go get @latest` resolves to the highest pre-release —
-> currently **`v0.21.0-alpha`** — so the command above is correct. Pinning the exact version
-> (`@v0.21.0-alpha`) is optional but recommended for reproducibility, and the API may change between
-> alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) reads
-> `0.21.0-alpha`. See [CHANGELOG.md](CHANGELOG.md).
+> currently **`v0.22.0-alpha`** — so the command above is correct. Pinning the exact version
+> (`@v0.22.0-alpha`) is optional but recommended for reproducibility, and the API may change between
+> alpha minors (see [STABILITY.md](STABILITY.md)). The in-code version (`pkg/workflow.Version`) on a
+> released tag matches that tag; on a development branch it is regenerated at release time and may
+> lag. See [CHANGELOG.md](CHANGELOG.md).
 
 ### Providing Feedback
 
@@ -108,14 +117,14 @@ func main() {
     
     // Add workflow steps with the fluent builder pattern
     builder.AddStartNode("validate-order").
-        WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+        WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
             log.Println("Validating order...")
             data.Set("order_valid", true)
             return nil
         })
     
     builder.AddNode("process-payment").
-        WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+        WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
             log.Println("Processing payment...")
             data.Set("payment_id", "pmt_123456")
             return nil
@@ -123,7 +132,7 @@ func main() {
         DependsOn("validate-order")
     
     builder.AddNode("update-inventory").
-        WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+        WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
             log.Println("Updating inventory...")
             data.Set("inventory_updated", true)
             return nil
@@ -161,28 +170,36 @@ func main() {
 Flow Orchestrator uses a fluent builder pattern to create workflows:
 
 ```go
-// Create a workflow
-workflow := workflow.NewWorkflowBuilder().
+// Create a workflow builder with a durable store
+builder := workflow.NewWorkflowBuilder().
     WithWorkflowID("my-workflow").
     WithStore(store)
 
 // Add nodes with dependencies
-workflow.AddStartNode("start-node").
+builder.AddStartNode("start-node").
     WithAction(startAction).
     WithRetries(3)
 
-workflow.AddNode("process-node").
+builder.AddNode("process-node").
     WithAction(processAction).
     WithTimeout(5 * time.Second).
     DependsOn("start-node")
 
-workflow.AddNode("final-node").
+builder.AddNode("final-node").
     WithAction(finalAction).
     DependsOn("process-node")
 
-// Build and execute
-dag, _ := workflow.Build()
-err := dag.Execute(context.Background(), workflowData)
+// A builder that carries a store is turned into a runnable *Workflow with FromBuilder.
+// (Plain Build() is the store-less in-memory path and rejects a store-carrying builder,
+// returning a nil DAG and an error.) The Workflow owns its durable data: it loads prior
+// state on resume, or starts fresh, and checkpoints through the store.
+wf, err := workflow.FromBuilder(builder)
+if err != nil {
+    log.Fatalf("failed to build workflow: %v", err)
+}
+if err := wf.Execute(context.Background()); err != nil {
+    log.Fatalf("workflow execution failed: %v", err)
+}
 ```
 
 For a detailed explanation of the DAG execution model, see our [DAG Execution Model](docs/architecture/dag-execution.md) documentation.
@@ -302,8 +319,8 @@ re-running `Execute`** with the same workflow ID, store, and DAG: completed node
 skipped (their outputs rehydrated), every other node re-runs, and a persisted node
 missing from the current DAG is rejected (a graph-identity guard) rather than
 mis-resumed. A store that does not implement `Checkpointer` keeps the prior
-save-at-boundaries behavior with **zero overhead**. All three built-in stores
-(`InMemoryStore`, `JSONFileStore`, `FlatBuffersStore`) implement it.
+save-at-boundaries behavior with **zero overhead**. All four built-in stores
+(`InMemoryStore`, `JSONFileStore`, `FlatBuffersStore`, `SQLiteStore`) implement it.
 
 **At-least-once contract.** A node that had not reached `Completed` when the crash
 hit — including one that was in flight — re-runs on resume, so its side effect can
@@ -331,7 +348,7 @@ semantics are machine-checked in TLA+.
 
 ```go
 builder.AddStartNode("classify").
-    WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         data.Set("amount", 2500) // determined from input
         return nil
     })
@@ -378,7 +395,7 @@ builder.AddNode("reserve-inventory").
 
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
-    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithCompensationFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
         pid, _ := data.GetString("payment_id")
         return refundPayment(ctx, pid, key)                // MUST be idempotent
@@ -516,43 +533,44 @@ For detailed benchmark results and performance recommendations, see our [Benchma
 
 ## Examples
 
-The repository includes several examples to help you get started:
-
-### Simple Workflow
-
-A basic example demonstrating the core workflow concepts:
+The repository ships a deliberate 13-example suite that builds from a three-node graph to a
+crash-durable, multi-worker, human-in-the-loop pipeline. Every example is runnable and tested. The
+full, grouped map lives in [`examples/README.md`](examples/README.md); run the whole suite with:
 
 ```bash
-cd examples/new_simple
-go run main.go
+go test ./examples/...
 ```
 
-### API Workflow
+### Start here — Hello DAG
 
-A command-line example that models an API-orchestration pipeline (fetch → process → send → save) as a workflow, using mock service clients (no HTTP server):
+Nodes, dependencies, `WorkflowData`, and a typed `Action` / `ActionFunc`:
 
 ```bash
-cd examples/api_workflow
-go run main.go
+go run ./examples/01-hello-dag
 ```
 
-### Error Handling
+### The flagship — durable crash-resume
 
-Examples of different error handling strategies:
+A SQLite-backed run whose process is killed mid-run and resumes exactly-once, replaying no completed
+work — the core thesis, *workflow is data, not replay*:
 
 ```bash
-cd examples/error_handling
-go run main.go
+go run ./examples/03-durable-crash-resume
 ```
 
-### Comprehensive Example
+### The full showcase — capstone document pipeline
 
-A complete example showcasing all features of the workflow system:
+Fan-out + choice/merge + a sub-workflow + an approval, published on SQLite with durable multi-worker
+dispatch — the whole capability set in one app:
 
 ```bash
-cd examples/comprehensive
-go run main.go
+go run ./examples/capstone-document-pipeline
 ```
+
+For everything in between (errors/retries, branching, fan-out, saga compensation, signals/timers,
+competing consumers, scheduling, the M23 governance boundary, and OpenTelemetry observability), see
+[`examples/README.md`](examples/README.md). Prefix any `go` command with `GOTOOLCHAIN=local` in this
+repo; `12-observability` is a separate module — run it with `cd examples/12-observability && go run .`.
 
 ## Versioning and Roadmap
 
@@ -560,7 +578,7 @@ go run main.go
 
 Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
-- **Latest release**: `v0.21.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.21.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
+- **Latest release**: `v0.22.0-alpha` (the highest published tag; the `pkg/workflow.Version` marker on `main` reads `0.22.0-alpha`). Every tag is a pre-release, so `go get @latest` resolves to this; see the Versioning note under [Installation](#installation).
 - **Stable release**: none yet — the project is pre-1.0 alpha. The API may change between alpha minors (see [STABILITY.md](STABILITY.md)).
 
 ### Roadmap
@@ -590,7 +608,7 @@ Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
 
 **Deliberately out of scope (protecting the moat):** unstructured (van der Aalst) OR-joins,
 loops, arbitrary code-as-workflow / replay, and any mandatory distribution or server —
-these would forfeit the embeddable, zero-infra, formally-verified, no-determinism-tax niche.
+these would forfeit the embeddable, zero-infra, TLA+-model-checked, no-determinism-tax niche.
 
 During the alpha and beta phases, the API may change as we refine the design based on user feedback.
 

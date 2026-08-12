@@ -45,8 +45,11 @@ wf, _ := workflow.FromBuilder(b)
 // First drive parks at "sign-off" (returns ErrSuspended).
 if err := wf.Execute(ctx); !errors.Is(err, workflow.ErrSuspended) { /* ... */ }
 
-// A human approves — deliver + resume in one call.
-sig := workflow.ApproveSignal("sign-off", "alice@example.com", "LGTM", "decision-1")
+// A human approves — deliver + resume in one call. The decision carries a
+// correlation nonce (AUD-025) binding it to THIS approval park; obtain it from the
+// workflow. A decision with a wrong/absent nonce is inert (the node keeps waiting).
+nonce := wf.ApprovalNonce("sign-off")
+sig := workflow.ApproveSignal("sign-off", "alice@example.com", "LGTM", "decision-1", nonce)
 if err := wf.DeliverAndResume(ctx, sig); err != nil {
     // A reject surfaces as *ApprovalRejectedError; classify with errors.As.
     var rej *workflow.ApprovalRejectedError
@@ -57,7 +60,8 @@ if err := wf.DeliverAndResume(ctx, sig); err != nil {
 ```
 
 - The approve payload is **persisted for audit** (approver + comment) and surfaced as the node output.
-- `sigID` (the last arg) is a host-supplied dedupe key — re-delivering the same ID is idempotent.
+- The **correlation nonce** (AUD-025) — `wf.ApprovalNonce(node)`, or the pure `workflow.ApprovalNonce(workflowID, node, definitionDigest)` — binds a decision to a specific park. It is a freshness/correlation token for honest hosts, **not** a secret: it makes a stale/stray/mis-correlated decision inert, but does not defend against an attacker who controls the store (authenticate the decision before delivering it — see AUD-069). For a **queued sub-workflow** child, compute it with the child's deterministic ID and the child DAG's `DefinitionDigest()`.
+- `sigID` is a host-supplied dedupe key — re-delivering the same ID is idempotent.
 - A **missing `Approved` field decodes as `false`** — a fail-safe reject, never a phantom approve.
 - Do **not** also call `WithAction` on an approval node — the action is set directly, and retry /
   timeout are not meaningful on a park.
@@ -72,8 +76,12 @@ is a builder method, and the build-time closure-scan *enforces* the inline-safet
 | Builder method | Child | Runs | Await |
 |---|---|---|---|
 | `AddSubWorkflow(name, child *DAG)` | definition-value, **non-suspendable** | **inline** (blocks) | blocking |
-| `AddSubWorkflowParked(name, child *DAG)` | definition-value | **out-of-band** | park → wake |
+| `AddSubWorkflowParked(name, child *DAG)` | definition-value (a verdict **classifier**, never executed), **may be suspendable** | **out-of-band** (the host runs it) | park → wake |
 | `AddSubWorkflowQueued(name, childType)` | **type-ref**, may be suspendable | **queue** (`Pool`) | park → wake |
+
+A **suspendable** child is accepted on **either** the parked or the queued path — only *inline* refuses
+one. Choose between them on the **store**: parked needs a `SignalStore`; queued needs a multi-process
+`*SQLiteStore` + `Pool` + `Registry`.
 
 ### The result contract (all three modes)
 
@@ -107,7 +115,7 @@ and **blocks** on it. Requires a `Store` (else `ErrSubWorkflowRequiresStore`). T
 ```go
 // child DAG — must be non-suspendable, and must Set the declared result key.
 child := workflow.NewWorkflowBuilder()
-child.AddNode("compute").WithAction(func(ctx context.Context, d *workflow.WorkflowData) error {
+child.AddNode("compute").WithActionFunc(func(ctx context.Context, d *workflow.WorkflowData) error {
     d.Set("total", int64(1250)) // scalar → value_long-faithful on every store
     return nil
 })
@@ -120,12 +128,15 @@ parent.AddNode("charge").WithAction(charge).DependsOn("price")
 
 The child's whole spawn-closure is **scanned at build**: a suspendable node anywhere in it fails
 `Build` with `ErrSubWorkflowSuspendableChild` (an inline child blocks the parent, so it can never
-park). Route such a child to the queue path instead. Do **not** also call `WithAction`.
+park). Route such a child to **either** the queued or the parked path — both accept a suspendable
+child; choose on the store (`*SQLiteStore` + `Pool` + `Registry` vs a `SignalStore`). Do **not** also
+call `WithAction`.
 
-### Queue sub-workflow (`AddSubWorkflowQueued`) — type-ref / suspendable children
+### Queue sub-workflow (`AddSubWorkflowQueued`) — type-ref children, engine-dispatched
 
-The explicit opt-in for a child referenced by **type** and/or one that **parks** (e.g. a child with
-its own approval). The parent node enqueues the child onto the M17 work queue (carrying the parent's
+The opt-in for a child referenced by **type**, and one of the two routes for a child that **parks**
+(e.g. a child with its own approval — `AddSubWorkflowParked` takes one too, when the host runs it
+rather than the engine). The parent node enqueues the child onto the M17 work queue (carrying the parent's
 mailbox address in the trusted control columns), **parks** (`Waiting`), and a `Pool` worker claims +
 runs the child. On child-terminal a completion signal wakes the parent, which reads the result data
 key and renders the verdict.
@@ -139,7 +150,7 @@ is injected on the `Workflow` at `Execute`.
 reg := workflow.NewRegistry()
 reg.Register("risk-check", func() (*workflow.DAG, error) {
     b := workflow.NewWorkflowBuilder()
-    b.AddApproval("analyst-sign-off")           // suspendable child → must be the queue path
+    b.AddApproval("analyst-sign-off")           // suspendable child → NOT inline; queued or parked
     b.AddNode("score").WithAction(score).DependsOn("analyst-sign-off")
     return b.Build()                             // Build() returns (*DAG, error); the child Sets its result key
 })
@@ -151,19 +162,165 @@ parent.AddSubWorkflowQueued("risk", "risk-check").
 
 parent.WithStore(sqliteStore).WithWorkflowID("loan-9")
 wf, _ := workflow.FromBuilder(parent) // FromBuilder → *Workflow (Build() returns *DAG)
-wf.Registry = reg                     // inject the type→DAG map (CODE)
-// Run wf under a Pool; the parent parks at "risk" and wakes when the child terminalizes.
+
+// The Registry (CODE) belongs to the EXECUTION ENVIRONMENT, not to the workflow: it is
+// passed to the dispatcher, which injects it into each drive it starts. `Workflow.Registry`
+// was unexported in v0.22.0 (M23 SEAL-06) and has no setter — a *Workflow you construct
+// yourself cannot carry one.
+ran, _ := workflow.RunNext(ctx, sqliteStore, reg, "worker-1") // or drive a fleet with NewPool(factory, reg, ...)
+// The parent parks at "risk" and wakes when the child terminalizes.
 ```
 
 `WithInput(map)` seeds the child's data keys (JSON-encoded into the queue row's input). It is valid
-**only** on a queued node — inline/parked children read the parent data directly.
+**only** on a queued node.
+
+### Parameterizing an inline child
+
+**No child reads parent data, on any path.** Every child runs under its own WorkflowID with its own
+journal — parent and child are distinct workflows — and an inline child's `WorkflowData` is built
+**fresh** for the child ID, then loaded only from that child's own persisted state. Nothing is copied
+in from the parent. Only the **queue** path has an input mechanism (`WithInput`).
+
+`WithResult` moves exactly **one** value **into parent data**, on every path: it is a single
+`(parentKey, childDataKey)` pair, **not** additive — a second call *overwrites* the first, and a child
+that sets three data keys still lands one in the parent. That bounds the *parent-data channel* only; it
+does not bound what the **caller** can see (for parked, the host owns the child's run and its store, so
+it can read the rest back — see below).
+
+Parameterize an inline child by **capturing the values in its actions' closures at DAG-construction
+time** — build the child from a Go function taking the parameters:
+
+```go
+// The child's DECLARATION. Returns the BUILDER, not a built *DAG: the inline path
+// needs a *DAG and the parked path needs a builder (FromBuilder takes a
+// *WorkflowBuilder), so declare once and build at the point of use.
+func reviewChildBuilder(applicant string) *workflow.WorkflowBuilder {
+	cb := workflow.NewWorkflowBuilder()
+	cb.AddStartNode("review").WithAction(workflow.ActionFunc(func(_ context.Context, d *workflow.WorkflowData) error {
+		d.Set("verdict", "reviewed:"+applicant) // captured, NOT read from parent data
+		return nil
+	}))
+	return cb
+}
+
+// AddSubWorkflow takes a *DAG, so the inline path builds it here.
+func reviewChild(applicant string) (*workflow.DAG, error) {
+	return reviewChildBuilder(applicant).Build()
+}
+
+child, err := reviewChild("acme")
+if err != nil {
+	return err
+}
+parent.AddSubWorkflow("review", child).WithResult("verdict", "verdict")
+```
+
+The cost is that an inline child DAG is a **value, not a template**: a different parameterization needs
+a different child DAG, and an out-capture is bound to that one build-time DAG, shared by every run.
+Where one child definition must serve many runtime-varying inputs **on the inline path**, that is what
+the **queue path** (`AddSubWorkflowQueued` + `WithInput`) is for — it takes a child *type* and seeds the
+data keys per run. The **parked** path solves it differently, and more cheaply **than the queue path** —
+see below.
+
+### Parameterizing a parked child — the child is a verdict classifier
+
+`AddSubWorkflowParked` **never executes the child you pass.** The host runs the child; the `child`
+argument exists only to classify the host's finished run.
+
+> **The constraint.** The classifier must declare, as `ContinueOnError`, **every node name the host's
+> run may leave in status `Failed` and expect to be tolerated.** Nothing else about it is read: not its
+> edges, not its actions, not its node count, not nodes that succeed. A `Compensated` /
+> `CompensationFailed` node is always a failure regardless, and the classifier is not consulted.
+
+Diverge one axis at a time, host run held fixed at a tolerated failure:
+
+| Diverged in the classifier | Effect |
+|---|---|
+| node **name** absent | **false failure** |
+| name present, **`ContinueOnError` flag** absent | **false failure** |
+| node count | inert |
+| extra nodes the host never ran | inert |
+| edges / ordering | inert |
+| action identity (would error if invoked) | inert — never invoked |
+
+A one-node stub naming the single coe-failable node correctly classifies a larger host run. The failure
+mode is a **silent false failure**: the parent fails a run the host considered successful.
+
+Because the host runs the child, it builds a **fresh child DAG per run** with per-run captures, so **one
+parent definition serves many runtime inputs** — what the inline path cannot do. Run the child under the
+deterministic ID, which is public API:
+
+> **The host's child run MUST use the same store as the parent.** The parked node reads the child's
+> journal through the *parent's* store, so a child run on a different store is invisible to it and the
+> parent **re-parks on every wake, silently** — the node reads `ErrNotFound` and returns `ErrSuspended`,
+> so there is no error and no timeout, and no number of re-drives converges it.
+
+```go
+// The host runs the child itself, under the deterministic ID the parent will look for,
+// ON THE SAME STORE as the parent — the parked node reads the child journal through the
+// parent's store, so a different store makes the child invisible and the parent
+// re-parks on every wake — no error, and no re-drive converges it.
+childID := workflow.SubWorkflowChildID(parentWorkflowID, "review") // stable contract — do not re-derive by hand
+
+// A fresh, per-run child. NOTE this takes the BUILDER form (see the inline example
+// above): FromBuilder takes a *WorkflowBuilder, and the store and ID go ON the builder.
+// Do NOT call Build() first — Build refuses a store-configured builder, and a *DAG has
+// no WithWorkflowID/WithStore.
+cb := reviewChildBuilder("acme").WithWorkflowID(childID).WithStore(store)
+hostRun, err := workflow.FromBuilder(cb)
+if err != nil {
+	return err
+}
+if err := hostRun.Execute(ctx); err != nil {
+	return err
+}
+
+// Child is terminal — wake the parked parent with the completion signal.
+sig := workflow.SubWorkflowCompletionSignal("review", "sig-1")
+if err := parentWF.DeliverAndResume(ctx, sig); err != nil {
+	return err
+}
+```
+
+> **Do not reimplement the ID derivation.** `SubWorkflowChildID` is
+> `SHA-256(uint64-LE(len(parentID)) || parentID || nodeName)`, hex, prefixed `sub:`. The 8-byte length
+> prefix is a **collision guard**, not incidental framing — without it `("ab","c")` and `("a","bc")`
+> would collide. It is a stable contract (the same commitment `IdempotencyKey` carries), so recompute it
+> with this function rather than by hand. `FanOutChildID` is its fan-out counterpart.
+
+The host can also reach the child's **full result set**, because it owns the run and the store — via
+`store.Load(childID)`, or a closure it wrote into the child's actions. (`Workflow.Execute` returns only
+an error; the run's `WorkflowData` is not exposed, so this is a store read or a capture, not a free
+in-process handle.) So `WithResult`'s single-value limit bounds only what reaches *parent* data.
+
+### Inline vs parked — the divergences
+
+None of these are symmetric.
+
+| | inline (`AddSubWorkflow`) | parked (`AddSubWorkflowParked`) |
+|---|---|---|
+| **Suspendable child** | refused at `Build` (`ErrSubWorkflowSuspendableChild`) | **accepted** — the host may park *and resume* the child, then wake the parent |
+| **Store** | bare `WorkflowStore` | **requires `SignalStore`** |
+| **Depth ceiling, ancestor-cycle guard, closure scan** | enforced | **none** — the host's responsibility |
+| **Failure fidelity** | propagates the child's **actual error value**; `errors.Is` reaches its sentinel | verdict **reconstructed from node statuses** — the error value is **lost**, only the node name survives |
+
+> **Parked is not uniformly the lighter path.** It is lighter than the *queue* path (a `SignalStore`
+> rather than `*SQLiteStore` + `Pool` + `Registry`), but **heavier than inline**, which needs only a bare
+> `WorkflowStore`.
+
+> **Failure fidelity is the trap.** A consumer classifying child failures with `errors.Is` / `errors.As`
+> on a sentinel gets a true positive on inline and a **silent false negative** on parked. Classify a
+> parked child's failure by node name, or have the host record the reason itself.
 
 ### Parked sub-workflow (`AddSubWorkflowParked`)
 
 The definition-value child runs **out-of-band** (a host/producer runs it) and the parent parks until
 a completion signal wakes it. Use this when you run the child yourself and signal completion with
-`SubWorkflowCompletionSignal(nodeName, sigID)`. Most embedders want `AddSubWorkflowQueued` (the queue
-producer emits the completion signal for you); `AddSubWorkflowParked` is the lower-level seam.
+`SubWorkflowCompletionSignal(nodeName, sigID)`. Most embedders want `AddSubWorkflowQueued` **when the
+engine should dispatch the child** — the queue producer emits the completion signal for you.
+`AddSubWorkflowParked` is the lower-level seam: you run the child, so you also signal completion, and in
+exchange it needs only a `SignalStore` and lets one parent definition serve many runtime inputs (see
+[Parameterizing a parked child](#parameterizing-a-parked-child--the-child-is-a-verdict-classifier)).
 
 > **A parked dispatched run does not hold a running-slot, and does not bleed its retry budget.** When a
 > queue-dispatched child (or any dispatched workflow) parks (`Waiting`), its queue row is marked `parked`:

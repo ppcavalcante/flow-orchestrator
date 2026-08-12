@@ -11,8 +11,8 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > **Versioning:** every published tag is a pre-release (alpha; no stable `v1`+ release yet), so
-> `@latest` resolves to the highest pre-release — currently **`v0.21.0-alpha`** — which the command
-> above installs. Pinning `@v0.21.0-alpha` is optional but recommended for reproducibility; the API
+> `@latest` resolves to the highest pre-release — currently **`v0.22.0-alpha`** — which the command
+> above installs. Pinning `@v0.22.0-alpha` is optional but recommended for reproducibility; the API
 > may change between alpha minors. See [CHANGELOG](../../CHANGELOG.md) and
 > [STABILITY.md](../../STABILITY.md).
 
@@ -41,7 +41,7 @@ func main() {
 
 	// Add a fetch data node - start of the workflow
 	builder.AddStartNode("fetch").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			fmt.Println("Fetching data...")
 			// Simulate work
 			time.Sleep(100 * time.Millisecond)
@@ -52,7 +52,7 @@ func main() {
 
 	// Add a process data node that depends on fetch
 	builder.AddNode("process").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			fmt.Println("Processing data...")
 			// Get data from previous step
 			userID, _ := data.GetInt("user_id")
@@ -65,7 +65,7 @@ func main() {
 
 	// Add a save data node that depends on process
 	builder.AddNode("save").
-		WithAction(func(ctx context.Context, data *workflow.WorkflowData) error {
+		WithActionFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
 			fmt.Println("Saving data...")
 			// Get data from previous step
 			processed, _ := data.GetBool("processed")
@@ -147,11 +147,14 @@ You can persist workflow state using the built-in storage implementations:
 // Create an in-memory store
 store := workflow.NewInMemoryStore()
 
-// Create a workflow with the store
-wf := &workflow.Workflow{
-	DAG:        dag,
-	WorkflowID: "simple-workflow",
-	Store:      store,
+// Put the store ON the builder and leave via FromBuilder. Build() returns a bare
+// *DAG that cannot carry a store, and refuses a store-configured builder for exactly
+// that reason.
+builder.WithWorkflowID("simple-workflow").WithStore(store)
+
+wf, err := workflow.FromBuilder(builder)
+if err != nil {
+	log.Fatalf("failed to build workflow: %v", err)
 }
 
 // Execute the workflow with persistence

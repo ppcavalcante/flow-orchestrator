@@ -66,6 +66,8 @@ ADRs are numbered sequentially and named using the format `NNNN-title-with-dashe
 | [0018](0018-sub-workflow-composition-and-approvals.md) | Sub-workflow composition & approvals — a phased-hybrid exec-model, completion-signal WAKE, and the SQLite signal mailbox | Accepted | M19 |
 | [0019](0019-scheduling-and-concurrency-caps.md) | Scheduling + concurrency caps — in-txn re-check as the no-double-fire arbiter, COUNT-in-txn as the cap arbiter, parked-exempt, one-shot RETAIN | Accepted | M20 |
 | [0020](0020-dynamic-fan-out.md) | Dynamic fan-out — one journaled node that expands once and drives N MaxConcurrency-bounded branches; expansion-once as the no-replay leg, `json.Number` item fidelity, FailFast vs CollectPartial | Accepted | M21 |
+| [0021](0021-production-hardening.md) | Production hardening — bounded `min(N, cap)` fan-out worker pool, per-branch `WithBranchRetries` (no re-expand), capped backoff+jitter on `RetryableAction`, durable first-of(signal, timer) `AddWaitForSignalTimeout` | Accepted | M22 |
+| [0022](0022-sealed-graph-complete-mediation.md) | Sealed graph + complete mediation — opaque `Node`/`DAG`/`Workflow` (census-enforced), structural `DefinitionDigest` resume check, engine-reserved keys, `WithBoundary` verifier-dominance, `ApprovalNonce` correlation, + audit-remediation pass | Accepted | M23 |
 
 ## How to Create a New ADR
 

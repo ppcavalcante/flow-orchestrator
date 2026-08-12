@@ -59,8 +59,8 @@ const canWorkerPoll = 25 * time.Millisecond
 func canRegistry(entrySig, l1Marker string) *Registry {
 	reg := NewRegistry()
 	_ = reg.Register(canType, func() (*DAG, error) { //nolint:errcheck // fixed valid registration
-		d := NewDAG(canType)
-		if err := d.AddNode(NewNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
+		d := newDAGForTest(canType)
+		if err := d.addNode(newNode("n0", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
 			if entrySig != "" {
 				_ = os.WriteFile(entrySig, []byte("entered"), 0o600) //nolint:errcheck,gosec // best-effort signal
 			}
@@ -69,14 +69,14 @@ func canRegistry(entrySig, l1Marker string) *Registry {
 		}))); err != nil {
 			return nil, err
 		}
-		if err := d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
+		if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
 			// L1 witness: if this ever runs, the marker lands on disk. Under cancel it must NEVER run.
 			_ = os.WriteFile(l1Marker, []byte("n1-ran"), 0o600) //nolint:errcheck,gosec // the never-run witness
 			return nil
 		}))); err != nil {
 			return nil, err
 		}
-		return d, d.AddDependency("n0", "n1")
+		return d, d.addDependency("n0", "n1")
 	})
 	return reg
 }

@@ -41,9 +41,9 @@ func nestedInlineDAG(t *testing.T, depth int) *DAG {
 func runNestedInline(t *testing.T, depth, ceiling int) error {
 	t.Helper()
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "root"
-	w.DAG = nestedInlineDAG(t, depth)
+	w.dag = nestedInlineDAG(t, depth)
 	w.MaxSubWorkflowDepth = ceiling
 	return w.Execute(context.Background())
 }

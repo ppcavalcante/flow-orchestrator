@@ -7,6 +7,7 @@ This section provides detailed reference documentation for Flow Orchestrator, in
 - [API Reference](./api-reference.md)
 - [Configuration Options](./configuration.md)  
 - [Examples](./examples.md)
+- [Platform Support & Store Capability Matrix](./platform-support.md)
 
 ## API Reference
 
@@ -44,43 +45,60 @@ The [Examples](./examples.md) document provides an overview of the example appli
 
 #### Workflow
 
-The top-level container for a workflow execution:
+The top-level container for a workflow execution. As of M23 (SEAL-01) the graph
+is no longer an exported field; read it via the `w.DAG()` accessor. The exported
+configuration fields remain:
 
 ```go
 type Workflow struct {
-    DAG        *DAG
-    WorkflowID string
-    Store      WorkflowStore
+    WorkflowID          string
+    Store               WorkflowStore
+    MaxSubWorkflowDepth int
+    Clock               Clock
+    Locker              Locker
+    RollbackTimeout     time.Duration
+    MetricsConfig       *metrics.Config
+    // unexported fields (the graph, etc.)
 }
+
+// Read the graph:
+func (w *Workflow) DAG() *DAG
 ```
 
 #### DAG (Directed Acyclic Graph)
 
-Represents the structure of a workflow:
+Represents the structure of a workflow. As of M23 (SEAL-01/06) `DAG` is an
+**opaque handle** — every field is unexported. `Name` is now a method;
+`StartNodes`/`EndNodes` were deleted. Read the graph through its accessors:
 
 ```go
 type DAG struct {
-    Nodes      map[string]*Node
-    StartNodes []*Node
-    EndNodes   []*Node
-    Name       string
-    CycleNodes []string
+    // unexported fields
 }
+
+func (d *DAG) Name() string
+func (d *DAG) GetNode(name string) (*Node, bool)
+func (d *DAG) GetLevels() [][]*Node
+func (d *DAG) DefinitionDigest() string
+func (d *DAG) Validate() error
+func (d *DAG) Execute(ctx context.Context, data *WorkflowData) error
 ```
 
 #### Node
 
-A single unit of work in a workflow:
+A single unit of work in a workflow. As of M23 (SEAL-01/02) a `*Node` is an
+**opaque handle** — every field is unexported and the post-Build mutators were
+deleted, so a `*Node` obtained from `GetNode`/`GetLevels` is read-only. Read it
+through its accessors:
 
 ```go
 type Node struct {
-    Name            string
-    Action          Action
-    DependsOn       []*Node
-    RetryCount      int
-    Timeout         time.Duration
-    ContinueOnError bool // if true, this node's failure does not fail the workflow (v0.7.0)
+    // unexported fields
 }
+
+func (n *Node) Name() string
+func (n *Node) GetDependencies() []*Node
+func (n *Node) HasDependency(nodeName string) bool
 ```
 
 #### Action

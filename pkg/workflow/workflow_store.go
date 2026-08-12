@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,23 @@ import (
 
 // WorkflowStore defines the interface for persisting workflow state.
 // Implementations can store workflow data in memory, files, databases, etc.
+//
+// CANONICAL VALUE CONTRACT (AUD-026 / AUD-054). All four bundled stores (InMemory,
+// JSONFile, FlatBuffers, SQLite) round-trip a value to the SAME canonical Go form, so
+// a workflow tested on one store behaves identically on any other — InMemory is a
+// faithful substitute for the durable stores, not an over-faithful one:
+//
+//	data value  int/int32/int64 -> int64 ; float32/float64 -> float64 ; bool ; string
+//	            everything else (a map, a slice, an unsupported scalar kind) reloads as
+//	            its canonical JSON STRING, e.g. Set("k", map[string]any{"a":1}) reloads
+//	            as the string `{"a":1}`.
+//	node output a string stays a string; anything else reloads as its JSON string.
+//
+// The string collapse of complex values is the HONEST floor of what the durable wire
+// formats preserve without a format change: FB/SQLite store complex values as JSON
+// strings, and this contract makes InMemory and JSONFile match rather than silently
+// over-preserve. A consumer that needs structure back Unmarshal()s the string itself.
+// See canonical.go for the transform.
 type WorkflowStore interface {
 	// Save stores the workflow data.
 	// Returns an error if the save operation fails.
@@ -26,6 +44,11 @@ type WorkflowStore interface {
 
 	// Load retrieves workflow data by ID.
 	// Returns the workflow data and an error if the load operation fails.
+	//
+	// CONTRACT (AUD-037 / P-06): "no prior state" MUST be signalled by returning
+	// ErrNotFound. A (nil, nil) return is ILLEGAL — the run rejects it as ErrCorruptData
+	// rather than treat it as fresh, because a silent fresh-start would overwrite real
+	// persisted state on the next Save. On success return non-nil data and a nil error.
 	Load(workflowID string) (*WorkflowData, error)
 
 	// ListWorkflows returns all workflow IDs.
@@ -148,7 +171,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	}
 
 	// Atomic replace (same-filesystem rename).
-	if err = os.Rename(tmpName, path); err != nil {
+	if err = os.Rename(tmpName, path); err != nil { //nolint:gosec // G703 false positive: callers build path from validated single segments or their own construction input
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 
@@ -171,21 +194,77 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 type JSONFileStore struct {
 	baseDir string
 	mu      sync.RWMutex
+	// maxElements is the element-count ceiling, enforced on BOTH Save and Load — the
+	// second axis every Load path checks. Seeded from defaultMaxElements; override
+	// with WithJSONMaxElements.
+	maxElements int
+	// maxFileSize is the ONE ceiling this store enforces, on BOTH Save and Load.
+	// Seeded from defaultMaxFileSize at construction; override with
+	// WithJSONMaxFileSize. Save and Load reading the same field is what keeps the
+	// two sides from drifting apart (HYG-00).
+	maxFileSize int64
+}
+
+// JSONFileStoreOption configures a JSONFileStore at construction.
+type JSONFileStoreOption func(*JSONFileStore)
+
+// WithJSONMaxFileSize sets the size ceiling enforced on both Save and Load.
+//
+// Raising it is the supported recovery path for a workflow file already on disk
+// that exceeds the default ceiling: a Save-side cap alone cannot help state that
+// was written before the cap existed. n must be > 0; a non-positive n is ignored
+// and the default is retained.
+//
+// SCOPE — this ceiling also governs the durable SIGNAL MAILBOX, not just the
+// workflow snapshot. DeliverSignal refuses an entry above it, and TakeSignals reads
+// every entry through it. The mailbox read is all-or-nothing: ONE entry above the
+// ceiling fails the read of the WHOLE mailbox for that workflow, so LOWERING this on
+// a store whose mailbox already holds larger entries can strand a waiting run.
+//
+// Every process sharing a baseDir MUST agree on this value. Two processes at
+// different ceilings can have one write an entry the other cannot read.
+func WithJSONMaxFileSize(n int64) JSONFileStoreOption {
+	return func(s *JSONFileStore) {
+		if n > 0 {
+			s.maxFileSize = clampCeiling(n)
+		}
+	}
+}
+
+// WithJSONMaxElements sets the element-count ceiling enforced on both Save and Load.
+//
+// Raising it is the supported recovery path for a file already on disk whose largest
+// section exceeds the default — the byte ceiling cannot help, because over-count state
+// is typically far UNDER the byte limit. n must be > 0; a non-positive n is ignored.
+func WithJSONMaxElements(n int) JSONFileStoreOption {
+	return func(s *JSONFileStore) {
+		if n > 0 {
+			s.maxElements = n
+		}
+	}
 }
 
 // NewJSONFileStore creates a new JSON file-based workflow store.
 // baseDir is the directory where workflow data will be stored.
 // Returns an error if the directory cannot be created or accessed.
-func NewJSONFileStore(baseDir string) (*JSONFileStore, error) {
+// The size ceiling defaults to defaultMaxFileSize; pass WithJSONMaxFileSize to
+// change it (needed to read back a file that already exceeds the default).
+func NewJSONFileStore(baseDir string, opts ...JSONFileStoreOption) (*JSONFileStore, error) {
 	// Create the directory if it doesn't exist
-	err := os.MkdirAll(baseDir, 0750)
+	err := os.MkdirAll(baseDir, 0750) //nolint:gosec // G703 false positive: baseDir is the caller's own store-construction input, not request-derived
 	if err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return &JSONFileStore{
-		baseDir: baseDir,
-	}, nil
+	s := &JSONFileStore{
+		baseDir:     baseDir,
+		maxFileSize: defaultMaxFileSize,
+		maxElements: defaultMaxElements,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Save stores the workflow data as JSON
@@ -213,6 +292,17 @@ func (s *JSONFileStore) Save(data *WorkflowData) error {
 	// the decode/re-encode round-trip exactly — decoding into interface{} would
 	// turn numbers into float64 and silently corrupt int64 magnitudes above 2^53
 	// (json.Number re-marshals back to the original literal verbatim).
+	// Nesting-depth axis (F2), BEFORE the decode below rather than beside the two guards
+	// further down, because that decode is itself depth-limited and would otherwise reject
+	// the state first — with an error in NEITHER error domain. Measured at 264265d: an
+	// over-depth Save returned "failed to unmarshal snapshot: invalid character '[' exceeded
+	// max depth", for which errors.Is is false for BOTH ErrValidation and ErrCorruptData,
+	// while the sibling SaveToJSON returned a clean ErrValidation for identical input. The
+	// axis is now closed on all four writers in the same domain rather than on three of four.
+	if err := checkJSONDepth(snapshotData, workflowID); err != nil {
+		return err
+	}
+
 	var snapshot map[string]interface{}
 	dec := json.NewDecoder(bytes.NewReader(snapshotData))
 	dec.UseNumber()
@@ -223,10 +313,52 @@ func (s *JSONFileStore) Save(data *WorkflowData) error {
 	// Add timestamp
 	snapshot["__timestamp"] = time.Now().UnixNano() / int64(time.Millisecond)
 
-	// Marshal to JSON
+	// THIS MARSHAL IS DEPTH-COVERED BY THE checkJSONDepth ABOVE, AND THE REASON IS AN
+	// ARGUMENT RATHER THAN PROXIMITY. Stated here because a reader counting marshal sites
+	// against checkJSONDepth calls will otherwise "find" a gap that does not exist — and
+	// because the inverse mistake was already made once on this axis: four checks were
+	// read as covering four marshals when they did not pair up (SaveToJSON's check guards
+	// its own bytes, not createSnapshot's).
+	//
+	// The check above ran on snapshotData, the INPUT bytes. What is re-marshaled here is
+	// that same document decoded, plus one top-level "__timestamp" scalar. Adding a
+	// top-level key cannot deepen a document, so the depth already verified still bounds
+	// this output. If anything is ever added to `snapshot` that is NOT a top-level scalar,
+	// that argument breaks and this site needs its own check.
+	//
+	// THE HEADING ABOVE IS THE WEDGE AXIS ONLY, and saying "DEPTH-COVERED" unqualified is
+	// the one instance of this phase's axis conflation that SHIPS. The claim is TRUE; the
+	// argument given for it is a WEDGE argument that happens to also hold on the crash
+	// axis, which is being accidentally right. Both are stated separately below because
+	// everywhere else in this package they need separate guards.
+	//
+	// CRASH AXIS (AF2) — the reason MarshalIndent here cannot overflow the stack: `snapshot`
+	// is not a host value, it is the OUTPUT OF A DECODER, and json.Decoder caps nesting at
+	// the scanner's limit. Its depth is therefore bounded by construction at ~10^4, far
+	// below where json.Marshal exhausts the stack, and it cannot contain a cycle because a
+	// decoded document is a tree. That is why there is no checkValueDepth here while
+	// createSnapshot, one call earlier, has one.
+	//
+	// THE PRECONDITION THAT ARGUMENT RESTS ON IS NOT LOCAL, which the wedge argument above
+	// is blind to: this function is only reached because a CALLER ALREADY MARSHALLED
+	// SUCCESSFULLY to produce snapshotData. Its crash-axis safety is INHERITED FROM ITS
+	// CALLER and stated nowhere else. Move the guard, or feed this function bytes from a
+	// producer that marshals lazily, and every sentence above still reads as a proof while
+	// being false.
 	jsonData, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal workflow data: %w", err)
+	}
+
+	// Refuse to write state this store could never read back, on BOTH axes Load
+	// enforces (HYG-00). Bytes measured on the exact buffer about to be written;
+	// elements measured as the largest section, which is exactly what LoadSnapshot
+	// caps. A successful Save implies a loadable file on both axes.
+	if err := checkWriteSize(int64(len(jsonData)), s.maxFileSize, workflowID); err != nil {
+		return err
+	}
+	if err := checkWriteElements(data.maxSectionCount(), s.maxElements, workflowID); err != nil {
+		return err
 	}
 
 	// Write to file atomically (temp + fsync + rename) so a crash mid-write
@@ -248,7 +380,12 @@ func (s *JSONFileStore) SaveCheckpoint(data *WorkflowData) error {
 }
 
 // Load retrieves workflow data from JSON
-func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
+// The returns are NAMED so the deferred Close can actually surface its error. With
+// unnamed returns the deferred assignment wrote a local that the already-determined
+// return value ignored, silently dropping every Close error despite the comment below
+// claiming otherwise. FlatBuffersStore.Load has always had named returns; this matches
+// it, which is also why readBoundedFileCapped gets it right.
+func (s *JSONFileStore) Load(workflowID string) (data *WorkflowData, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -265,39 +402,52 @@ func (s *JSONFileStore) Load(workflowID string) (*WorkflowData, error) {
 	// cap+1 lets us distinguish "exactly at cap" (accepted) from "over cap"
 	// (rejected). openForRead is the same test seam used by FB Load (default
 	// os.Open). A missing file surfaces as ErrNotFound.
-	f, err := openForRead(filePath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	f, ferr := openForRead(filePath)
+	if ferr != nil {
+		if errors.Is(ferr, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
 		}
-		return nil, newIOError("read", workflowID, err)
+		return nil, newIOError("read", workflowID, ferr)
 	}
 	defer func() {
 		// Surface a Close error only if Load was otherwise succeeding; a failed
 		// read/parse error takes precedence (errcheck check-blank requires the
-		// Close error be consumed).
+		// Close error be consumed). This assignment reaches the CALLER only because
+		// the returns above are named.
 		if cerr := f.Close(); cerr != nil && err == nil {
 			err = newIOError("read", workflowID, cerr)
 		}
 	}()
 
-	jsonData, err := io.ReadAll(io.LimitReader(f, defaultMaxFileSize+1))
-	if err != nil {
-		return nil, newIOError("read", workflowID, err)
+	fileCeiling := effectiveFileSize(s.maxFileSize)
+	jsonData, rerr := io.ReadAll(io.LimitReader(f, readLimit(fileCeiling)))
+	if rerr != nil {
+		return nil, newIOError("read", workflowID, rerr)
 	}
-	if int64(len(jsonData)) > defaultMaxFileSize {
+	if int64(len(jsonData)) > fileCeiling {
 		return nil, fmt.Errorf("%w: file exceeds max size", ErrCorruptData)
 	}
 
 	// Create new workflow data
-	data := NewWorkflowData(workflowID)
+	data = NewWorkflowData(workflowID)
 
 	// Load from snapshot
-	if err := data.LoadSnapshot(jsonData); err != nil {
+	if err := data.loadSnapshotBounded(jsonData, effectiveElements(s.maxElements)); err != nil {
 		// A decode failure (or element-count overflow) means the persisted JSON
 		// is malformed/abusive. Keep the boundary message generic (no path / raw
 		// detail leak); the underlying error stays reachable via errors.Unwrap.
 		return nil, fmt.Errorf("%w: malformed JSON workflow data: %w", ErrCorruptData, err)
+	}
+
+	// AUD-015 / P-02: the lookup KEY is authoritative. loadSnapshotInternal set
+	// data.ID from the payload's own "id" field; if that disagrees with the key we
+	// were asked to Load, the file is a misplaced/copied/forged payload. Returning it
+	// would run actions under a mixed identity and, worse, REDIRECT the next
+	// Save(data) into the payload's workflow (Save keys on data.GetWorkflowID()).
+	// Reject as corruption rather than silently honoring the payload ID.
+	if got := data.GetWorkflowID(); got != workflowID {
+		return nil, fmt.Errorf("%w: JSON payload workflow ID %q does not match the lookup key %q (misplaced or forged file)",
+			ErrCorruptData, got, workflowID)
 	}
 
 	return data, nil
@@ -339,6 +489,31 @@ func (s *JSONFileStore) Delete(workflowID string) error {
 	// dir is a separate channel the snapshot Delete would otherwise orphan. Done
 	// FIRST + best-effort so it runs even for a mailbox with no snapshot (an early
 	// signal delivered to a workflow that never ran/saved).
+	//
+	// ONE OBJECT IS DELIBERATELY NOT RECLAIMED, and it is a stated exception to this
+	// store's "there is no background GC; reclamation is owned by Delete" contract
+	// rather than an oversight: the <id>.signals.lock file survives. Unlinking it
+	// while another process holds it would hand the next deliverer a fresh inode and
+	// re-arm the very race the lock exists to close — and it cannot be removed safely
+	// even under the lock, because proving nobody holds it requires holding it. The
+	// population and cost are stated ONCE, on signalLockSuffix, and deliberately not
+	// restated here — the phrasing has already been wrong once, and this comment is
+	// duplicated across both file stores, so a restatement drifts in two places at
+	// once. It is invisible to the *.json / *.fb listing
+	// globs, so it never surfaces as a phantom workflow, and it is not created at all
+	// on non-unix, where the lock is a no-op. Delete does NOT create one for a workflow
+	// that never had a delivery — it acquires with create=false and skips when absent,
+	// because creating here made Delete mint a permanent artifact for ids that never
+	// existed.
+	//
+	// LOCK HELD ACROSS A CROSS-PROCESS WAIT, stated because the shape deserves a reader's
+	// attention: s.mu is held across removeSignalDir, which blocks on flock(LOCK_EX) with
+	// no timeout. A delivery in ANOTHER PROCESS holding that flock therefore stalls this
+	// process's whole store — every Save/Load/List/Delete queues behind s.mu. It is not a
+	// deadlock: the only lock ordering in the package is s.mu -> flock (delivery takes the
+	// flock and no s.mu), so no cycle exists, and the kernel releases a flock when its
+	// holder dies. The case that can actually stall is a LIVE but stopped holder — a
+	// SIGSTOP'd process, or one wedged in a pathological fsync — not a crashed one.
 	//nolint:errcheck,gosec // best-effort mailbox reclamation (ph37 F2)
 	removeSignalDir(s.baseDir, workflowID)
 
@@ -363,8 +538,12 @@ func (s *JSONFileStore) Delete(workflowID string) error {
 func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStore, error) {
 	s.mu.RLock()
 
-	// Create a new FlatBuffersStore with the same base directory
-	fbStore, err := NewFlatBuffersStore(s.baseDir)
+	// Create a new FlatBuffersStore with the same base directory AND the same
+	// ceiling. Inheriting it matters in both directions (HYG-00): a store opened
+	// with a raised ceiling to rescue an oversized .json must be able to write the
+	// converted .fb, and a migration must not silently widen the bound either.
+	fbStore, err := NewFlatBuffersStore(s.baseDir,
+		WithFlatBuffersMaxFileSize(s.maxFileSize), WithFlatBuffersMaxElements(s.maxElements))
 	if err != nil {
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("failed to create FlatBuffers store: %w", err)
@@ -390,14 +569,14 @@ func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStor
 		// bounded read (io.LimitReader(cap+1)) as Load so a migration cannot be
 		// driven to unbounded allocation by an oversized .json file.
 		filePath := filepath.Join(s.baseDir, workflowID+".json")
-		jsonData, err := readBoundedFile(filePath)
+		jsonData, err := readBoundedFileCapped(filePath, s.maxFileSize)
 		if err != nil {
 			s.mu.RUnlock()
 			return nil, fmt.Errorf("failed to read workflow %s: %w", workflowID, err)
 		}
 
 		data := NewWorkflowData(workflowID)
-		if err := data.LoadSnapshot(jsonData); err != nil {
+		if err := data.loadSnapshotBounded(jsonData, effectiveElements(s.maxElements)); err != nil {
 			s.mu.RUnlock()
 			return nil, fmt.Errorf("failed to load workflow %s: %w", workflowID, err)
 		}
@@ -443,10 +622,110 @@ func (s *JSONFileStore) MigrateToFlatBuffers(cleanupJSON bool) (*FlatBuffersStor
 // reassigns it.
 var defaultMaxFileSize int64 = 64 << 20 // 64 MiB
 
+// checkWriteSize rejects a serialized snapshot that exceeds the ceiling BEFORE it
+// reaches the disk (HYG-00). Load has always capped its reads; Save never did, so
+// an over-ceiling Save succeeded and the workflow then failed to Load forever —
+// the failure surfacing at resume, far from the write that caused it. Refusing the
+// write makes the two sides symmetric: a Save that returns nil implies a file the
+// same store can read back.
+//
+// ErrValidation, not ErrCorruptData: nothing is corrupt, the caller handed over
+// more state than the configured ceiling allows. The message names the actual size
+// AND the ceiling so the operator can size the WithJSONMaxFileSize /
+// WithFlatBuffersMaxFileSize override without guessing.
+// maxAllowedCeiling is the largest ceiling any option will store. The bounded-read
+// idiom is io.LimitReader(ceiling+1) — reading one byte past the ceiling is what
+// distinguishes at-cap from over-cap — so a ceiling of exactly math.MaxInt64 would
+// overflow that +1 to MinInt64, make LimitReader return EOF immediately, and turn
+// EVERY Load into a zero-byte read reported as ErrCorruptData. math.MaxInt64 is the
+// natural way to write "no limit", so clamping is what keeps that from being a
+// silent, permanent wedge reached through this very API.
+const maxAllowedCeiling int64 = math.MaxInt64 - 1
+
+// effectiveFileSize / effectiveElements floor a store's ceiling fields, so a store
+// built as a STRUCT LITERAL (bypassing both constructors) does not get a zero ceiling
+// that would make checkWriteSize refuse every write and readLimit(0) report every
+// non-empty file corrupt. Same defensive shape batchK already uses for a literal store
+// (workflow_store_groupcommit.go). Latent today — the constructors are the only
+// construction sites — but free to hold.
+func effectiveFileSize(n int64) int64 {
+	if n <= 0 {
+		return defaultMaxFileSize
+	}
+	return n
+}
+
+func effectiveElements(n int) int {
+	if n <= 0 {
+		return defaultMaxElements
+	}
+	return n
+}
+
+// clampCeiling keeps a caller-supplied ceiling inside the range where ceiling+1 is
+// still representable. Shared by every With*MaxFileSize option.
+func clampCeiling(n int64) int64 {
+	if n > maxAllowedCeiling {
+		return maxAllowedCeiling
+	}
+	return n
+}
+
+// readLimit returns the io.LimitReader bound for a ceiling (ceiling+1), saturating
+// instead of overflowing. Defence in depth behind clampCeiling: the options clamp
+// what they store, and this clamps at the point of use, so no internal caller can
+// reintroduce the overflow by passing a raw ceiling.
+func readLimit(ceiling int64) int64 {
+	if ceiling == math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return ceiling + 1
+}
+
+func checkWriteSize(n, ceiling int64, workflowID string) error {
+	ceiling = effectiveFileSize(ceiling)
+	if n > ceiling {
+		return fmt.Errorf("%w: workflow %q state is %d bytes, exceeds the %d-byte max file size",
+			ErrValidation, workflowID, n, ceiling)
+	}
+	return nil
+}
+
 // defaultMaxElements caps each FlatBuffers vector length (the six *Length()
 // counts) before the load loops allocate/iterate, stopping a tiny header that
 // claims billions of elements.
-const defaultMaxElements int = 1 << 20 // 1,048,576 entries per vector
+// A var (not const) so tests can shrink it to assert the element bound on the live
+// paths without materializing ~1M entries — the same seam discipline as
+// defaultMaxFileSize, and what lets an anti-drift test invert the relationship
+// (default BELOW the store ceiling) so a read that reverts to the default is caught.
+// Production never reassigns it.
+var defaultMaxElements int = 1 << 20 // 1,048,576 entries per vector
+
+// checkWriteElements rejects state whose largest section/vector exceeds the element
+// ceiling BEFORE it reaches the disk — the element-count twin of checkWriteSize.
+//
+// Both Load paths enforce TWO caps (bytes AND element count); before this, every write
+// path enforced only the first. State of defaultMaxElements+1 short keys serializes to
+// ~22 MB of JSON / ~42 MB of FlatBuffers — comfortably UNDER the 64 MiB byte ceiling —
+// so Save returned nil and Load then failed permanently with "element count exceeds
+// max". Exactly the HYG-00 wedge on a second axis, and worse: the byte ceiling has an
+// option, so this one had no recovery path at all until it got one too.
+//
+// n is the LARGEST per-section (JSON) or per-vector (FlatBuffers) count, because both
+// Load paths reject if ANY single section/vector exceeds the cap — max > ceiling is
+// exactly equivalent, and a total across sections would falsely reject state that
+// loads fine.
+//
+// ErrValidation for the same reason as checkWriteSize: nothing is corrupt, the caller
+// handed over more state than the configured ceiling allows.
+func checkWriteElements(n, ceiling int, workflowID string) error {
+	ceiling = effectiveElements(ceiling)
+	if n > ceiling {
+		return fmt.Errorf("%w: workflow %q has a section of %d entries, exceeds the %d-entry max element count",
+			ErrValidation, workflowID, n, ceiling)
+	}
+	return nil
+}
 
 // openForRead is the file-open seam used by Load (default os.Open). Tests swap
 // it for a byte-counting wrapper to assert the bytes consumed from the fd are
@@ -454,14 +733,24 @@ const defaultMaxElements int = 1 << 20 // 1,048,576 entries per vector
 // nolint:gosec // controlled internal file paths
 var openForRead = func(path string) (io.ReadCloser, error) { return os.Open(path) }
 
-// readBoundedFile reads an entire file through io.LimitReader(cap+1) — the same
-// bounded-read discipline as JSONFileStore.Load / FlatBuffersStore.Load — so
-// WorkflowData.LoadFromJSON and JSONFileStore.MigrateToFlatBuffers share one
-// symmetric size bound. It bounds memory regardless of on-disk size and rejects
-// over-cap input as ErrCorruptData (cap+1 distinguishes at-cap from over-cap).
-// openForRead is the same test seam used by Load; the open error (incl.
-// fs.ErrNotExist) is returned verbatim for the caller to classify/wrap.
-func readBoundedFile(path string) (data []byte, err error) {
+// readBoundedFileCapped reads an entire file through io.LimitReader(ceiling+1) —
+// the same bounded-read discipline as JSONFileStore.Load / FlatBuffersStore.Load —
+// so every reader in the package shares one symmetric size bound. It bounds memory
+// regardless of on-disk size and rejects over-ceiling input as ErrCorruptData
+// (the +1, via readLimit, is what distinguishes at-cap from over-cap).
+//
+// The ceiling is always passed explicitly: every reader now has one to supply
+// (a store's maxFileSize, or a resolved DataFileOption). openForRead is the same
+// test seam Load uses; the open error (incl. fs.ErrNotExist) is returned verbatim
+// for the caller to classify/wrap.
+func readBoundedFileCapped(path string, ceiling int64) (data []byte, err error) {
+	// Floor the ceiling, like every other point of use. A struct-literal store
+	// (bypassing both constructors) carries maxFileSize == 0, and without this the
+	// readers that route through here — TakeSignals and MigrateToFlatBuffers —
+	// report every valid file corrupt. Save/Load floored it already; this path did
+	// not, which is why TestZeroCeiling_StructLiteralStoreStillWorks stayed green:
+	// neither Save nor Load routes through here.
+	ceiling = effectiveFileSize(ceiling)
 	f, err := openForRead(path)
 	if err != nil {
 		return nil, err
@@ -472,11 +761,11 @@ func readBoundedFile(path string) (data []byte, err error) {
 		}
 	}()
 
-	data, err = io.ReadAll(io.LimitReader(f, defaultMaxFileSize+1))
+	data, err = io.ReadAll(io.LimitReader(f, readLimit(ceiling)))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > defaultMaxFileSize {
+	if int64(len(data)) > ceiling {
 		return nil, fmt.Errorf("%w: file exceeds max size", ErrCorruptData)
 	}
 	return data, nil
@@ -499,6 +788,51 @@ type FlatBuffersStore struct {
 	// Batched(K) — strategy (d) retains the live state so a forced Sync() (the
 	// suspend/completion floor) can flush it. A Clone (clone-on-save discipline).
 	pending map[string]*WorkflowData
+	// maxElements is the element-count ceiling, enforced on BOTH the .fb write paths
+	// and Load — the second axis every Load path checks. Seeded from
+	// defaultMaxElements; override with WithFlatBuffersMaxElements.
+	maxElements int
+	// maxFileSize is the ONE ceiling this store enforces, on BOTH Load and every
+	// .fb write path (Save and the group-commit writeFullSnapshotLocked). Seeded
+	// from defaultMaxFileSize; override with WithFlatBuffersMaxFileSize (HYG-00).
+	maxFileSize int64
+}
+
+// WithFlatBuffersMaxFileSize sets the size ceiling enforced on both the .fb write
+// paths and Load.
+//
+// Raising it is the supported recovery path for a .fb already on disk that exceeds
+// the default ceiling: a write-side cap alone cannot help state written before the
+// cap existed. n must be > 0; a non-positive n is ignored and the default retained.
+//
+// SCOPE — this ceiling also governs the durable SIGNAL MAILBOX, not just the
+// workflow snapshot. DeliverSignal refuses an entry above it, and TakeSignals reads
+// every entry through it. The mailbox read is all-or-nothing: ONE entry above the
+// ceiling fails the read of the WHOLE mailbox for that workflow, so LOWERING this on
+// a store whose mailbox already holds larger entries can strand a waiting run.
+//
+// Every process sharing a baseDir MUST agree on this value. Two processes at
+// different ceilings can have one write an entry the other cannot read.
+func WithFlatBuffersMaxFileSize(n int64) func(*FlatBuffersStore) {
+	return func(s *FlatBuffersStore) {
+		if n > 0 {
+			s.maxFileSize = clampCeiling(n)
+		}
+	}
+}
+
+// WithFlatBuffersMaxElements sets the element-count ceiling enforced on both the .fb
+// write paths and Load.
+//
+// Raising it is the supported recovery path for a .fb already on disk whose largest
+// vector exceeds the default — the byte ceiling cannot help, because over-count state
+// is typically far UNDER the byte limit. n must be > 0; a non-positive n is ignored.
+func WithFlatBuffersMaxElements(n int) func(*FlatBuffersStore) {
+	return func(s *FlatBuffersStore) {
+		if n > 0 {
+			s.maxElements = n
+		}
+	}
 }
 
 // DurabilityOption configures a FlatBuffersStore's durability mode (M14 ph61).
@@ -538,16 +872,23 @@ func Batched(k uint) DurabilityOption {
 // Durability defaults to Strict (every checkpoint fsync'd); pass
 // WithDurabilityMode(Batched(k)) to enable group-commit (M14 ph61).
 func NewFlatBuffersStore(baseDir string, opts ...func(*FlatBuffersStore)) (*FlatBuffersStore, error) {
-	// Create the directory if it doesn't exist
+	// Create the directory if it doesn't exist. NO nolint here, deliberately: gosec has never
+	// flagged this site, so a directive would pre-suppress a FUTURE genuine finding on a
+	// MkdirAll that is one line from the store root. Its twin in NewJSONFileStore does carry
+	// one because gosec does flag that site. G703 on this chain is threshold-sensitive, so
+	// "the analyzer is quiet today" is only evidence across repeated cache-cleared runs — this
+	// removal was checked that way, not from a single draw.
 	err := os.MkdirAll(baseDir, 0750)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	s := &FlatBuffersStore{
-		baseDir:   baseDir,
-		batchK:    1, // default Strict
-		ckptCount: make(map[string]uint),
+		baseDir:     baseDir,
+		batchK:      1, // default Strict
+		ckptCount:   make(map[string]uint),
+		maxFileSize: defaultMaxFileSize,
+		maxElements: defaultMaxElements,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -572,7 +913,21 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 
 	// Serialize the full snapshot (extracted so the group-commit checkpoint path
 	// reuses the EXACT same serialization — M14 ph61) and write it atomically.
-	buf := buildFullStateBuffer(data)
+	buf, maxVec, err := buildFullStateBuffer(data)
+	// The fallible dominator for the two host-value encodes inside the builder (AF2 +
+	// F2). Refused before any byte is written, so a value too deep to encode safely
+	// never produces a file at all.
+	if err != nil {
+		return err
+	}
+	// Refuse to write state this store could never read back, on BOTH axes Load
+	// enforces: bytes and element count (HYG-00).
+	if err := checkWriteSize(int64(len(buf)), s.maxFileSize, workflowID); err != nil {
+		return err
+	}
+	if err := checkWriteElements(maxVec, s.maxElements, workflowID); err != nil {
+		return err
+	}
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
 	if err := writeFileAtomic(filePath, buf, 0600); err != nil {
 		return newIOError("write", workflowID, err)
@@ -589,7 +944,35 @@ func (s *FlatBuffersStore) Save(data *WorkflowData) error {
 // buildFullStateBuffer serializes data as a COMPLETE WorkflowState snapshot (M14
 // ph61 extraction of Save's builder body, so the group-commit checkpoint path reuses
 // the identical full-snapshot serialization).
-func buildFullStateBuffer(data *WorkflowData) []byte {
+// It returns the serialized buffer AND the largest vector length, so the caller can
+// apply the element-count guard against the same quantity Load will check.
+//
+// THE ERROR RETURN IS THE (iii-c) WIRING, and its shape is the point. The two host-value
+// encodes below sit inside data.ForEach / data.ForEachOutput callbacks, which return
+// NOTHING — so a refusal there has nowhere to go. It is captured into encErr at the site
+// of the encode, ADJACENT to the encode of that same value, and surfaced at the first
+// fallible frame that dominates both: this function's own return, which both writers
+// (Save and writeFullSnapshotLocked) already check alongside checkWriteSize and
+// checkWriteElements.
+//
+// A HOISTED walk over data BEFORE the build was considered and rejected. ForEach holds
+// its RLock across the WHOLE loop (workflow_data.go) — an earlier version of this comment
+// said "per call" and that was simply wrong — but the conclusion is unchanged and does not
+// depend on it: a hoisted walk is a SECOND ForEach, hence a second acquisition, with the
+// lock released in between. Two critical sections with a gap is 116-AF1's own shape (a
+// read and a use separated by an unlocked interval) reappearing on the other side of the
+// phase.
+//
+// AND EVEN ADJACENCY DOES NOT BUY SAME-VALUE OBSERVATION — stated here so this comment is
+// not read as claiming more than it can. Set stores the caller's REFERENCE, and the mutex
+// protects the map rather than the objects in it, so a host holding its own alias can
+// deepen the structure without taking any lock at all. Checking beside the encode buys the
+// narrowest window available, not a guarantee. See checkValueDepth.
+//
+// Once encErr is set the remaining callbacks short-circuit. They cannot be stopped —
+// ForEach has no break — so they return immediately instead, which also guarantees the
+// FIRST offending key is the one reported rather than the last.
+func buildFullStateBuffer(data *WorkflowData) ([]byte, int, error) {
 	workflowID := data.GetWorkflowID()
 
 	// Create FlatBuffer builder
@@ -604,7 +987,14 @@ func buildFullStateBuffer(data *WorkflowData) []byte {
 	boolDataOffsets := make([]flatbuffers.UOffsetT, 0)
 	doubleDataOffsets := make([]flatbuffers.UOffsetT, 0)
 
+	// The captured refusal — see this function's doc comment for why it is captured here
+	// rather than hoisted into a pre-pass.
+	var encErr error
+
 	data.ForEach(func(k string, value interface{}) {
+		if encErr != nil {
+			return
+		}
 		switch v := value.(type) {
 		case int:
 			// M2: write the full int64 magnitude to value_long (no clamp). The
@@ -653,13 +1043,12 @@ func buildFullStateBuffer(data *WorkflowData) []byte {
 			fb.KeyValueStringAddValue(builder, fbValue)
 			stringDataOffsets = append(stringDataOffsets, fb.KeyValueStringEnd(builder))
 		default:
-			// Complex types: fall back to JSON string
-			jsonBytes, err := json.Marshal(v)
-			var strValue string
+			// Complex types: fall back to JSON string, with BOTH depth axes closed
+			// around the marshal (AF2 crash + F2 wedge). See encodeHostValue.
+			strValue, err := encodeHostValue(v, fmt.Sprintf("data key %q", k))
 			if err != nil {
-				strValue = fmt.Sprintf("%v", v)
-			} else {
-				strValue = string(jsonBytes)
+				encErr = err
+				return
 			}
 			fbKey := builder.CreateString(k)
 			fbValue := builder.CreateString(strValue)
@@ -736,17 +1125,27 @@ func buildFullStateBuffer(data *WorkflowData) []byte {
 	// Create outputs vector
 	outputOffsets := make([]flatbuffers.UOffsetT, 0)
 	data.ForEachOutput(func(nodeName string, output interface{}) {
-		// Convert output to JSON string
+		if encErr != nil {
+			return
+		}
+		// Convert output to JSON string, with BOTH depth axes closed around the marshal
+		// (AF2 crash + F2 wedge). See encodeHostValue.
+		//
+		// A string output passes through UNCHECKED, as it always has. That is not an
+		// omission: it is stored verbatim and read back verbatim by decodeOutput (which
+		// is the identity), so it never passes a JSON decoder and has no nesting a
+		// decoder could refuse. The depth axes bound what the ENCODER must build and what
+		// a DECODER must read; a byte string that is neither is bounded by the size axis.
 		var outputStr string
 		if v, ok := output.(string); ok {
 			outputStr = v
 		} else {
-			jsonBytes, err := json.Marshal(output)
-			if err == nil {
-				outputStr = string(jsonBytes)
-			} else {
-				outputStr = fmt.Sprintf("%v", output)
+			s, err := encodeHostValue(output, fmt.Sprintf("output of node %q", nodeName))
+			if err != nil {
+				encErr = err
+				return
 			}
+			outputStr = s
 		}
 
 		// Create node name string and output string
@@ -759,6 +1158,13 @@ func buildFullStateBuffer(data *WorkflowData) []byte {
 		fb.NodeOutputEntryAddOutput(builder, fbOutput)
 		outputOffsets = append(outputOffsets, fb.NodeOutputEntryEnd(builder))
 	})
+
+	// Both host-value callbacks are done; surface a captured refusal before finishing a
+	// buffer nobody will write. Deliberately AFTER both rather than between them, so one
+	// site cannot be added later without the check moving with it.
+	if encErr != nil {
+		return nil, 0, encErr
+	}
 
 	// Create NodeOutputs vector
 	var outputsVector flatbuffers.UOffsetT
@@ -837,8 +1243,21 @@ func buildFullStateBuffer(data *WorkflowData) []byte {
 	// Finish the buffer
 	builder.Finish(workflowState)
 
+	// The largest of the SEVEN vector lengths — exactly the seven Load checks against
+	// its element cap. Computed from the same slices that produced the vectors, so the
+	// write-side guard measures precisely what the read-side guard will reject.
+	maxVec := len(intDataOffsets)
+	for _, n := range []int{
+		len(boolDataOffsets), len(doubleDataOffsets), len(stringDataOffsets),
+		len(nodeStatusOffsets), len(outputOffsets), len(waitOffsets),
+	} {
+		if n > maxVec {
+			maxVec = n
+		}
+	}
+
 	// Get the finished buffer
-	return builder.FinishedBytes()
+	return builder.FinishedBytes(), maxVec, nil
 }
 
 // SaveCheckpoint is defined in workflow_store_groupcommit.go (M14 ph61 group-commit).
@@ -883,11 +1302,12 @@ func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err erro
 		}
 	}()
 
-	buf, err := io.ReadAll(io.LimitReader(f, defaultMaxFileSize+1))
+	fileCeiling := effectiveFileSize(s.maxFileSize)
+	buf, err := io.ReadAll(io.LimitReader(f, readLimit(fileCeiling)))
 	if err != nil {
 		return nil, newIOError("read", workflowID, err)
 	}
-	if int64(len(buf)) > defaultMaxFileSize {
+	if int64(len(buf)) > fileCeiling {
 		return nil, fmt.Errorf("%w: file exceeds max size", ErrCorruptData)
 	}
 
@@ -936,13 +1356,14 @@ func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err erro
 	// of billions of elements, driving the loops below into a huge alloc/iterate.
 	// Reject any vector length over defaultMaxElements before the loops run.
 	// (Hand-rolled — the Go runtime has no Verifier MaxTables to lean on.)
-	if fbState.IntDataLength() > defaultMaxElements ||
-		fbState.BoolDataLength() > defaultMaxElements ||
-		fbState.DoubleDataLength() > defaultMaxElements ||
-		fbState.StringDataLength() > defaultMaxElements ||
-		fbState.NodeStatusesLength() > defaultMaxElements ||
-		fbState.NodeOutputsLength() > defaultMaxElements ||
-		fbState.WaitsLength() > defaultMaxElements {
+	elemCeiling := effectiveElements(s.maxElements)
+	if fbState.IntDataLength() > elemCeiling ||
+		fbState.BoolDataLength() > elemCeiling ||
+		fbState.DoubleDataLength() > elemCeiling ||
+		fbState.StringDataLength() > elemCeiling ||
+		fbState.NodeStatusesLength() > elemCeiling ||
+		fbState.NodeOutputsLength() > elemCeiling ||
+		fbState.WaitsLength() > elemCeiling {
 		return nil, fmt.Errorf("%w: element count exceeds max", ErrCorruptData)
 	}
 
@@ -1003,7 +1424,12 @@ func (s *FlatBuffersStore) Load(workflowID string) (data *WorkflowData, err erro
 			// Convert fb.NodeStatus to our NodeStatus via the shared helper
 			// (symmetric with Save's statusToFBStatus; was previously inlined here,
 			// leaving the helper dead — T3 makes it live, removing the duplication).
-			status := fbStatusToNodeStatus(entry.Status())
+			// AUD-036: an unknown enum is a corrupt/forged journal — fail closed rather
+			// than silently rerun a terminal node as Pending.
+			status, ok := fbStatusToNodeStatus(entry.Status())
+			if !ok {
+				return nil, fmt.Errorf("%w: node %q has unknown FlatBuffers status %d", ErrCorruptData, nodeName, entry.Status())
+			}
 
 			data.SetNodeStatus(nodeName, status)
 		}
@@ -1082,6 +1508,31 @@ func (s *FlatBuffersStore) Delete(workflowID string) error {
 	// dir is a separate channel the snapshot Delete would otherwise orphan. Done
 	// FIRST + best-effort so it runs even for a mailbox with no snapshot (an early
 	// signal delivered to a workflow that never ran/saved).
+	//
+	// ONE OBJECT IS DELIBERATELY NOT RECLAIMED, and it is a stated exception to this
+	// store's "there is no background GC; reclamation is owned by Delete" contract
+	// rather than an oversight: the <id>.signals.lock file survives. Unlinking it
+	// while another process holds it would hand the next deliverer a fresh inode and
+	// re-arm the very race the lock exists to close — and it cannot be removed safely
+	// even under the lock, because proving nobody holds it requires holding it. The
+	// population and cost are stated ONCE, on signalLockSuffix, and deliberately not
+	// restated here — the phrasing has already been wrong once, and this comment is
+	// duplicated across both file stores, so a restatement drifts in two places at
+	// once. It is invisible to the *.json / *.fb listing
+	// globs, so it never surfaces as a phantom workflow, and it is not created at all
+	// on non-unix, where the lock is a no-op. Delete does NOT create one for a workflow
+	// that never had a delivery — it acquires with create=false and skips when absent,
+	// because creating here made Delete mint a permanent artifact for ids that never
+	// existed.
+	//
+	// LOCK HELD ACROSS A CROSS-PROCESS WAIT, stated because the shape deserves a reader's
+	// attention: s.mu is held across removeSignalDir, which blocks on flock(LOCK_EX) with
+	// no timeout. A delivery in ANOTHER PROCESS holding that flock therefore stalls this
+	// process's whole store — every Save/Load/List/Delete queues behind s.mu. It is not a
+	// deadlock: the only lock ordering in the package is s.mu -> flock (delivery takes the
+	// flock and no s.mu), so no cycle exists, and the kernel releases a flock when its
+	// holder dies. The case that can actually stall is a LIVE but stopped holder — a
+	// SIGSTOP'd process, or one wedged in a pathological fsync — not a crashed one.
 	//nolint:errcheck,gosec // best-effort mailbox reclamation (ph37 F2)
 	removeSignalDir(s.baseDir, workflowID)
 
@@ -1108,28 +1559,32 @@ func (s *FlatBuffersStore) Delete(workflowID string) error {
 // fbStatusToNodeStatus converts an fb.NodeStatus to our NodeStatus.
 // The type-symmetric inverse of statusToFBStatus (which Save uses); called by
 // Load. Taking fb.NodeStatus directly avoids a lossy int8->byte conversion.
-func fbStatusToNodeStatus(status fb.NodeStatus) NodeStatus {
+// fbStatusToNodeStatus returns ok=false for an unknown enum value rather than silently
+// coercing it to Pending (AUD-036 / P-04). An unknown enum in a durable buffer is a
+// corrupt/forged journal; mapping it to Pending would rerun a node that was terminal. The
+// caller rejects !ok as ErrCorruptData, matching SQLite's isKnownStatus fail-closed policy.
+func fbStatusToNodeStatus(status fb.NodeStatus) (NodeStatus, bool) {
 	switch status {
 	case fb.NodeStatusPending:
-		return Pending
+		return Pending, true
 	case fb.NodeStatusRunning:
-		return Running
+		return Running, true
 	case fb.NodeStatusCompleted:
-		return Completed
+		return Completed, true
 	case fb.NodeStatusFailed:
-		return Failed
+		return Failed, true
 	case fb.NodeStatusSkipped:
-		return Skipped
+		return Skipped, true
 	case fb.NodeStatusWaiting:
-		return Waiting
+		return Waiting, true
 	case fb.NodeStatusBypassed:
-		return Bypassed
+		return Bypassed, true
 	case fb.NodeStatusCompensated:
-		return Compensated
+		return Compensated, true
 	case fb.NodeStatusCompensationFailed:
-		return CompensationFailed
+		return CompensationFailed, true
 	default:
-		return Pending
+		return "", false
 	}
 }
 
@@ -1168,8 +1623,13 @@ func (s *InMemoryStore) Save(data *WorkflowData) error {
 		return fmt.Errorf("%w: workflow ID cannot be empty", ErrValidation)
 	}
 
-	// Clone the data to avoid external modification
-	s.data[workflowID] = data.Clone()
+	// Clone the data to avoid external modification, then canonicalize the ISOLATED
+	// clone (AUD-026) so InMemory yields the SAME values the durable stores do — a
+	// faithful substitute rather than an over-faithful one. Canonicalizing the clone,
+	// never `data`, leaves a live in-flight instance untouched.
+	clone := data.Clone()
+	clone.canonicalizeForStore()
+	s.data[workflowID] = clone
 	return nil
 }
 

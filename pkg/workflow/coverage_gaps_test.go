@@ -15,7 +15,7 @@ func TestWithExecutionConfig(t *testing.T) {
 	t.Run("config propagates to the built DAG", func(t *testing.T) {
 		b := NewWorkflowBuilder().
 			WithExecutionConfig(ExecutionConfig{MaxConcurrency: 3})
-		b.AddStartNode("a").WithAction(func(context.Context, *WorkflowData) error { return nil })
+		b.AddStartNode("a").WithActionFunc(func(context.Context, *WorkflowData) error { return nil })
 
 		dag, err := b.Build()
 		if err != nil {
@@ -35,7 +35,7 @@ func TestWithExecutionConfig(t *testing.T) {
 
 	t.Run("absent config leaves DAG at DefaultConfig", func(t *testing.T) {
 		b := NewWorkflowBuilder()
-		b.AddStartNode("a").WithAction(func(context.Context, *WorkflowData) error { return nil })
+		b.AddStartNode("a").WithActionFunc(func(context.Context, *WorkflowData) error { return nil })
 		dag, err := b.Build()
 		if err != nil {
 			t.Fatalf("Build: %v", err)
@@ -58,19 +58,14 @@ func TestBuildErrorPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("node with unsupported action type", func(t *testing.T) {
-		b := NewWorkflowBuilder()
-		b.AddNode("bad").WithAction(42) // not an Action / supported func
-		_, err := b.Build()
-		if err == nil || !strings.Contains(err.Error(), "invalid action") {
-			t.Fatalf("expected invalid-action error, got %v", err)
-		}
-	})
+	// AUD-041: the "node with unsupported action type" case was removed — WithAction
+	// now takes a typed Action, so a mistyped value (e.g. 42) is a COMPILE error and can
+	// no longer reach Build's invalid-action path.
 
 	t.Run("dependency on a node that was never added", func(t *testing.T) {
 		b := NewWorkflowBuilder()
 		b.AddNode("consumer").
-			WithAction(func(context.Context, *WorkflowData) error { return nil }).
+			WithActionFunc(func(context.Context, *WorkflowData) error { return nil }).
 			DependsOn("ghost")
 		_, err := b.Build()
 		if err == nil || !strings.Contains(err.Error(), "ghost") {
@@ -81,14 +76,14 @@ func TestBuildErrorPaths(t *testing.T) {
 
 // TestDAGAddNodeDuplicate covers the duplicate-name error branch of DAG.AddNode.
 func TestDAGAddNodeDuplicate(t *testing.T) {
-	dag := NewDAG("dup")
-	n1 := NewNode("x", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
-	n2 := NewNode("x", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	dag := newDAGForTest("dup")
+	n1 := newNode("x", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	n2 := newNode("x", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
 
-	if err := dag.AddNode(n1); err != nil {
+	if err := dag.addNode(n1); err != nil {
 		t.Fatalf("first AddNode: %v", err)
 	}
-	err := dag.AddNode(n2)
+	err := dag.addNode(n2)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected duplicate-name error, got %v", err)
 	}
@@ -97,37 +92,37 @@ func TestDAGAddNodeDuplicate(t *testing.T) {
 // TestDAGAddDependencyErrors covers the two missing-node branches of
 // DAG.AddDependency (unknown from-node and unknown to-node).
 func TestDAGAddDependencyErrors(t *testing.T) {
-	dag := NewDAG("deps")
-	known := NewNode("known", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
-	if err := dag.AddNode(known); err != nil {
+	dag := newDAGForTest("deps")
+	known := newNode("known", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+	if err := dag.addNode(known); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
 
 	t.Run("unknown from-node", func(t *testing.T) {
-		err := dag.AddDependency("missing", "known")
+		err := dag.addDependency("missing", "known")
 		if err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("expected from-node error, got %v", err)
 		}
 	})
 
 	t.Run("unknown to-node", func(t *testing.T) {
-		err := dag.AddDependency("known", "missing")
+		err := dag.addDependency("known", "missing")
 		if err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("expected to-node error, got %v", err)
 		}
 	})
 
 	t.Run("both present links them", func(t *testing.T) {
-		other := NewNode("other", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
-		if err := dag.AddNode(other); err != nil {
+		other := newNode("other", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))
+		if err := dag.addNode(other); err != nil {
 			t.Fatalf("AddNode: %v", err)
 		}
-		if err := dag.AddDependency("known", "other"); err != nil {
+		if err := dag.addDependency("known", "other"); err != nil {
 			t.Fatalf("AddDependency: %v", err)
 		}
 		// other now depends on known
-		if len(other.DependsOn) != 1 || other.DependsOn[0].Name != "known" {
-			t.Errorf("dependency not wired: %+v", other.DependsOn)
+		if len(other.dependsOn) != 1 || other.dependsOn[0].name != "known" {
+			t.Errorf("dependency not wired: %+v", other.dependsOn)
 		}
 	})
 }

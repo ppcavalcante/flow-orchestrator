@@ -38,17 +38,17 @@ func (c *runCounter) get(name string) int {
 // 2-level chain n0 → n1 whose actions bump the counter. Shares the FakeClock for lease-lapse.
 func mkMPWorkflow(t *testing.T, store *SQLiteStore, owner string, ctr *runCounter) *Workflow {
 	t.Helper()
-	d := NewDAG("mp")
-	require.NoError(t, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+	d := newDAGForTest("mp")
+	require.NoError(t, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 		ctr.inc("n0")
 		return nil
 	}))))
-	require.NoError(t, d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
+	require.NoError(t, d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
 		ctr.inc("n1")
 		return nil
 	}))))
-	require.NoError(t, d.AddDependency("n0", "n1"))
-	w := &Workflow{DAG: d, WorkflowID: "wf", Store: store}
+	require.NoError(t, d.addDependency("n0", "n1"))
+	w := &Workflow{dag: d, WorkflowID: "wf", Store: store}
 	return w.WithLocker(newMultiProcessLocker(store, owner))
 }
 
@@ -73,7 +73,7 @@ func TestMPLocker_ReClaimAfterDeath_ExactlyOnce(t *testing.T) {
 	// not a lapse-bump; that was the F2 defect). We drive A's L0 commit directly (claim + a Save of
 	// n0=Completed) to leave the lease row present + the token stale.
 	sA := open()
-	tokA, err := sA.Claim("wf", "A")
+	tokA, err := sA.Claim(context.Background(), "wf", "A")
 	require.NoError(t, err)
 	require.Equal(t, FencingToken(1), tokA)
 	dL0 := NewWorkflowData("wf")
@@ -97,18 +97,18 @@ func TestMPLocker_ReClaimAfterDeath_ExactlyOnce(t *testing.T) {
 	// the lapse-reclaim bump (token 2, not a fresh token-1 INSERT) AND the committed-frontier resume.
 	var tokenDuringDrive int64
 	sB := open()
-	dB := NewDAG("mp")
-	require.NoError(t, dB.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+	dB := newDAGForTest("mp")
+	require.NoError(t, dB.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 		ctr.inc("n0")
 		return nil
 	}))))
-	require.NoError(t, dB.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
+	require.NoError(t, dB.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error {
 		ctr.inc("n1")
 		require.NoError(t, sB.db.QueryRow(`SELECT fencing_token FROM leases WHERE workflow_id='wf'`).Scan(&tokenDuringDrive))
 		return nil
 	}))))
-	require.NoError(t, dB.AddDependency("n0", "n1"))
-	wB := (&Workflow{DAG: dB, WorkflowID: "wf", Store: sB}).WithMultiProcessLocker("B")
+	require.NoError(t, dB.addDependency("n0", "n1"))
+	wB := (&Workflow{dag: dB, WorkflowID: "wf", Store: sB}).WithMultiProcessLocker("B")
 	require.NoError(t, wB.Execute(context.Background()))
 
 	// The re-claim really BUMPED the token (proving the lapse-reclaim path ran, not a fresh INSERT).
@@ -135,12 +135,12 @@ func TestMPLocker_ReClaimAfterDeath_SeedBreak(t *testing.T) {
 	ctr := newRunCounter()
 
 	sA := open()
-	dA := NewDAG("mp")
-	require.NoError(t, dA.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+	dA := newDAGForTest("mp")
+	require.NoError(t, dA.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 		ctr.inc("n0")
 		return nil
 	}))))
-	wA := (&Workflow{DAG: dA, WorkflowID: "wf", Store: sA}).WithLocker(newMultiProcessLocker(sA, "A"))
+	wA := (&Workflow{dag: dA, WorkflowID: "wf", Store: sA}).WithLocker(newMultiProcessLocker(sA, "A"))
 	require.NoError(t, wA.Execute(context.Background()))
 	require.Equal(t, 1, ctr.get("n0"))
 
@@ -153,13 +153,13 @@ func TestMPLocker_ReClaimAfterDeath_SeedBreak(t *testing.T) {
 	// committed frontier present) does NOT re-run n0. The differential proves the committed-frontier
 	// resume (Store.Load returning the durable state) is the load-bearing thing preventing double-apply.
 	sB := open()
-	dB := NewDAG("mp")
-	require.NoError(t, dB.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+	dB := newDAGForTest("mp")
+	require.NoError(t, dB.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 		ctr.inc("n0")
 		return nil
 	}))))
 	// wfFresh = a workflow with NO committed state → resume-from-empty → n0 re-runs.
-	wB := (&Workflow{DAG: dB, WorkflowID: "wfFresh", Store: sB}).WithLocker(newMultiProcessLocker(sB, "B"))
+	wB := (&Workflow{dag: dB, WorkflowID: "wfFresh", Store: sB}).WithLocker(newMultiProcessLocker(sB, "B"))
 	require.NoError(t, wB.Execute(context.Background()))
 
 	// The reset-to-empty path RE-RAN n0 → count 2. This is the double-apply the committed-frontier
@@ -186,11 +186,11 @@ func TestMPLocker_AbortOnSupersession(t *testing.T) {
 	// superseded MID-DRIVE deterministically, we pre-arrange: A's store holds token 1, B re-claims
 	// token 2 first, THEN A drives → A's checkpoint/Save fences.
 	sA := open()
-	_, err := sA.Claim("wf", "A") // A holds token 1
+	_, err := sA.Claim(context.Background(), "wf", "A") // A holds token 1
 	require.NoError(t, err)
 	clk.Advance(6 * time.Second) // lapse so B can re-claim
 	sB := open()
-	_, err = sB.Claim("wf", "B") // B re-claims → token 2; A (sA) is now stale
+	_, err = sB.Claim(context.Background(), "wf", "B") // B re-claims → token 2; A (sA) is now stale
 	require.NoError(t, err)
 
 	// A drives with its (now-stale) token-1 store. Its final Save is the fencing point.
@@ -227,12 +227,12 @@ func TestMPLocker_AbortOnSupersession_Differential(t *testing.T) {
 		}
 		ctr := newRunCounter()
 		sA := open()
-		_, err := sA.Claim("wf", "A") // A holds token 1
+		_, err := sA.Claim(context.Background(), "wf", "A") // A holds token 1
 		require.NoError(t, err)
 		if supersede {
 			clk.Advance(6 * time.Second)
 			sB := open()
-			_, err = sB.Claim("wf", "B") // B re-claims → token 2; A (token 1) is now stale
+			_, err = sB.Claim(context.Background(), "wf", "B") // B re-claims → token 2; A (token 1) is now stale
 			require.NoError(t, err)
 		}
 		// A drives with its token-1 store, NOT re-claiming (in-proc Locker so Acquire doesn't touch
@@ -306,7 +306,7 @@ func TestMPLocker_AcquireOnLiveForeignLease_ClaimLost(t *testing.T) {
 	ctr := newRunCounter()
 
 	sA := open()
-	_, err := sA.Claim("wf", "A") // A holds a LIVE lease (60s TTL, not advanced)
+	_, err := sA.Claim(context.Background(), "wf", "A") // A holds a LIVE lease (60s TTL, not advanced)
 	require.NoError(t, err)
 
 	// B tries to drive the same workflow while A's lease is live → Acquire → Claim → ErrClaimLost.

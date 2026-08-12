@@ -39,23 +39,23 @@ func TestSuspend_Adversarial_ConcurrentParksConverge(t *testing.T) {
 	coeRuns := newExecCounter()
 
 	build := func() *DAG {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		d.config.MaxConcurrency = 16 // high concurrency vs the 12+2 nodes in level 0
 		for i := 0; i < nParkers; i++ {
 			mustAddNode(t, d, completingSuspendNode(fmt.Sprintf("park%d", i), gates[i], counter))
 		}
 		mustAddNode(t, d, countingNode("sib", counter))
-		coe := NewNode("coe", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		coe := newNode("coe", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			coeRuns.inc("coe")
 			return errors.New("coe boom")
 		}))
-		coe.ContinueOnError = true
+		coe.continueOnError = true
 		mustAddNode(t, d, coe)
 		return d
 	}
 
 	// Phase 1: concurrent parks; the run suspends.
-	w1 := &Workflow{DAG: build(), WorkflowID: id, Store: store}
+	w1 := &Workflow{dag: build(), WorkflowID: id, Store: store}
 	err := w1.Execute(context.Background())
 	require.ErrorIs(t, err, ErrSuspended, "concurrent parks (no fail-fast) suspend the run")
 	var execErr *ExecutionError
@@ -74,7 +74,7 @@ func TestSuspend_Adversarial_ConcurrentParksConverge(t *testing.T) {
 	for _, g := range gates {
 		g.wake()
 	}
-	w2 := &Workflow{DAG: build(), WorkflowID: id, Store: store}
+	w2 := &Workflow{dag: build(), WorkflowID: id, Store: store}
 	require.NoError(t, w2.Execute(context.Background()))
 
 	p2, lerr := store.Load(id)
@@ -105,16 +105,16 @@ func TestSuspend_Adversarial_ConcurrentParkWithFailFast(t *testing.T) {
 		gates[i] = newParkGate()
 	}
 
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	d.config.MaxConcurrency = 16
 	for i := 0; i < nParkers; i++ {
 		mustAddNode(t, d, newSuspendingNode(fmt.Sprintf("park%d", i), gates[i]))
 	}
-	mustAddNode(t, d, NewNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	mustAddNode(t, d, newNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return errors.New("hard boom")
 	})))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 
 	var execErr *ExecutionError

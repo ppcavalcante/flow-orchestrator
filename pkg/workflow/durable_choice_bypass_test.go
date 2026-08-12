@@ -40,7 +40,7 @@ func bypassDurableWorkflow(t *testing.T, store *InMemoryStore, clk Clock) *Workf
 	wb.AddWaitForSignal("deadSignal", "wakeup").DependsOn("dead")
 	dag, err := wb.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store, Clock: clk}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store, Clock: clk}
 }
 
 // armedNodes returns the set of node names holding a persisted wait (fireAt) —

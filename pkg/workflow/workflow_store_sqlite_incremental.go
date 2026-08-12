@@ -126,7 +126,17 @@ func (s *shadowState) clone() *shadowState {
 // shadowFromData builds the encoded row-set that a full Save of data WOULD write. Used
 // to (re)seed the shadow after a full Save and after a Load (resume-into). It mirrors
 // Save's encoding EXACTLY so the diff baseline equals what is durably on disk.
-func shadowFromData(data *WorkflowData) *shadowState {
+// The error return is the (iii-c) wiring: the three encodes below sit inside ForEach*
+// callbacks that return nothing, so a depth refusal is captured beside the encode and
+// surfaced here, at the first fallible frame that dominates all three.
+//
+// TWO OF THE FIVE CALLERS CANNOT SEE A REFUSAL AND THAT IS WORTH STATING RATHER THAN
+// LEAVING TO BE REDISCOVERED: the post-commit shadow advance re-encodes values a
+// completed Save already accepted, and the post-Load one re-encodes values that came out
+// of the DB as strings. Neither can fail today. They still propagate, because "cannot fail
+// today" is a property of their callers and not of this function, and a check that exists
+// only where someone reasoned it was needed is the shape this phase kept finding.
+func shadowFromData(data *WorkflowData) (*shadowState, error) {
 	st := &shadowState{
 		rollingBack:  data.IsRollingBack(),
 		triggerCause: int64(data.TriggerCause()),
@@ -134,34 +144,61 @@ func shadowFromData(data *WorkflowData) *shadowState {
 		data:         make(map[string]encKVRow),
 		waits:        make(map[string]int64),
 	}
+	var encErr error
 	// nodes with a status entry (may also have an output).
 	data.ForEachNodeStatus(func(node string, status NodeStatus) {
+		if encErr != nil {
+			return
+		}
 		out, has := data.GetOutput(node)
 		enc := ""
 		if has {
-			enc = encodeOutput(out)
+			e, err := encodeOutput(node, out)
+			if err != nil {
+				encErr = err
+				return
+			}
+			enc = e
 		}
 		st.nodes[node] = encNodeRow{status: string(status), output: enc, hasOutput: has}
 	})
 	// output-only nodes (no status entry): '' sentinel status (ph66-F1). A node already
 	// present above (status + this output) keeps its status — do NOT downgrade it.
 	data.ForEachOutput(func(node string, out interface{}) {
+		if encErr != nil {
+			return
+		}
+		enc, err := encodeOutput(node, out)
+		if err != nil {
+			encErr = err
+			return
+		}
 		if existing, ok := st.nodes[node]; ok {
-			existing.output = encodeOutput(out)
+			existing.output = enc
 			existing.hasOutput = true
 			st.nodes[node] = existing
 			return
 		}
-		st.nodes[node] = encNodeRow{status: "", output: encodeOutput(out), hasOutput: true}
+		st.nodes[node] = encNodeRow{status: "", output: enc, hasOutput: true}
 	})
 	data.ForEach(func(k string, value interface{}) {
-		kind, iv, fv, sv := encodeKV(value)
+		if encErr != nil {
+			return
+		}
+		kind, iv, fv, sv, err := encodeKV(k, value)
+		if err != nil {
+			encErr = err
+			return
+		}
 		st.data[k] = encKVRow{kind: kind, iv: iv, fv: fv, sv: sv}
 	})
 	data.ForEachWait(func(node string, fireAt int64) {
 		st.waits[node] = fireAt
 	})
-	return st
+	if encErr != nil {
+		return nil, encErr
+	}
+	return st, nil
 }
 
 // saveIncremental is the ph67 SaveCheckpoint body. It diffs data against the shadow and
@@ -178,8 +215,14 @@ func (s *SQLiteStore) saveIncremental(data *WorkflowData) error {
 		return err
 	}
 
-	// The target encoded row-set (what the DB must equal after this checkpoint).
-	target := shadowFromData(data)
+	// The target encoded row-set (what the DB must equal after this checkpoint). This is
+	// the fallible dominator for the checkpoint path's host-value encodes — a value too
+	// deep to encode safely is refused BEFORE the transaction opens, so a refused
+	// checkpoint leaves the durable frontier and the shadow exactly where they were.
+	target, err := shadowFromData(data)
+	if err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,7 +356,7 @@ func (s *SQLiteStore) hydrateShadowFromDB(ctx context.Context, id string) (*shad
 	if triggerCause >= 0 && triggerCause <= int64(TriggerDeadlineExceeded) {
 		tmp.SetTriggerCause(TriggerCause(triggerCause))
 	}
-	return shadowFromData(tmp), nil
+	return shadowFromData(tmp)
 }
 
 // baseNodes/baseData/baseWaits return the base maps or empty maps when base is nil

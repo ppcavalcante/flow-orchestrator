@@ -37,9 +37,28 @@ generated FlatBuffers code (`internal/workflow/fb/...`) and the misc helpers
 (`internal/workflow/utils`) — these
 were previously under `pkg/` by accident and never belonged to the contract.
 
-A symbol being *exported* inside an intended-public package does not by itself make it part
-of the supported surface if it is plainly internal infrastructure; the API reference and
-this document are authoritative over what we commit to.
+### Every other export is supported — except explicitly-marked exceptions (AUD-044)
+
+To remove the "is this exported symbol actually supported?" ambiguity, the rule is now
+mechanical, not a matter of judgement:
+
+- **Every exported symbol in an intended-public package IS part of the supported surface**
+  and carries the `0.x` compatibility guarantee above — *unless* its godoc carries an explicit
+  **`EXPERIMENTAL:`** or **`RESERVED:`** marker token (greppable across `pkg/`).
+- A **`RESERVED:`** symbol is exported and durably accepted (so a future release can give it
+  behaviour without another API break) but does **not** yet have distinct observable behaviour;
+  do not rely on it doing anything beyond its documented current effect.
+- An **`EXPERIMENTAL:`** symbol may change or be removed in any `0.x` minor without the usual
+  batching, while its shape is being settled.
+
+The complete current list of marked exceptions — nothing else is unsupported:
+
+| Symbol | Marker | Meaning |
+|---|---|---|
+| `ScheduleSpec.WithCatchupOnce()` | `RESERVED:` | Records the catch-up-once missed-run policy durably, but is **currently identical to the default skip-to-next** (missed slots coalesce into one fire). A distinct per-missed-slot catch-up is a deferred increment; set it to record intent, do not yet rely on a distinct catch-up firing. (`DEC-P103-CATCHUP-RESERVED`.) |
+
+`internal/**` is never public regardless of what the Go toolchain would allow (see above);
+this table governs only the *intended-public* packages.
 
 ## Data compatibility is a STRONGER guarantee than API compatibility
 
@@ -145,12 +164,54 @@ re-running the rest. This carries a contract callers MUST design around:
   `hex(SHA-256( uint64-LE(len(workflowID)) || workflowID || nodeName ))`, 64 lowercase hex
   chars — is a **stable contract**: downstream systems may recompute it, so it will not change
   without a deliberate, documented break.
+- **`SubWorkflowChildID(parentID, nodeName)` is a stable contract.** It derives a sub-workflow child's
+  `WorkflowID` as `"sub:" + hex(SHA-256( uint64-LE(len(parentID)) || parentID || nodeName ))`. The
+  8-byte little-endian length prefix is a **collision guard**, not incidental framing: without it
+  `("ab","c")` and `("a","bc")` would produce the same ID. Exported because the **parked** sub-workflow
+  pattern is not otherwise reachable — the host runs the child itself and must know the `WorkflowID` to
+  run it under.
+- **`FanOutChildID(parentID, nodeName, index)` is a stable contract, on the same terms.** It derives a
+  fan-out **branch** child's `WorkflowID` as `"fan:" + hex(SHA-256( uint64-LE(len(parentID)) || parentID
+  || uint64-LE(len(nodeName)) || nodeName || uint64-LE(index) ))` — note **two** length prefixes and the
+  index folded into the same digest, and a distinct `"fan:"` prefix so a branch child can never collide
+  with a two-field `"sub:"` child. Exported for a different reason: `WithCollectPartial`'s contract tells
+  a consumer to diagnose a failed branch (from the `__failed__` partition) by loading that branch's own
+  child journal **by its deterministic ID** — an instruction that was not followable while this was
+  unexported.
+- **`ApprovalNonce(workflowID, node, definitionDigest)` is a stable contract (AUD-025).** It derives the
+  correlation nonce a host attaches to an approval decision as
+  `hex(SHA-256("flow-orchestrator/approval-nonce\0" || uint64-LE(len(workflowID)) || workflowID ||
+  uint64-LE(len(node)) || node || definitionDigest))`. A host recomputes it (or calls
+  `(*Workflow).ApprovalNonce`), and a decision without the matching nonce is inert — so the derivation is
+  a stable contract and will not change without a deliberate, documented break. It is a FRESHNESS /
+  CORRELATION token, **not** a secret and **not** an authorization credential: it makes an honest host's
+  stale/stray/mis-correlated decision inert, but (per the trust boundary above, and AUD-069) it does not
+  defend against a party that controls the persistence store. Authenticate the decision before delivering
+  it if you need adversarial integrity.
+- **`ApprovalNonceFromStore(store, workflowID, node)` is the store-only derivation of the same nonce
+  (AUD-025).** A dispatcher / signal pump / competing-consumer driver delivers approvals by
+  `(store, workflowID)` and holds no live `*Workflow`; this reads the definition digest the executor
+  stamped into the parked state and returns the identical nonce `(*Workflow).ApprovalNonce` would — no
+  need to rebuild the graph purely to recover its digest. It returns a typed `ErrValidation` before the
+  run has stamped a digest (not started / not checkpointed), so the correct caller loops until the
+  approval node is parked — the same poll the mailbox delivery already performs. It grants no capability a
+  signal-delivering caller lacks (the nonce is a public correlation token, and anyone who can
+  `DeliverSignal` can already read the state), so the ceiling above applies unchanged.
+- All of the above: downstream systems may recompute these, so they will not change without a deliberate,
+  documented break. Recompute via these functions rather than reimplementing the framing.
 - **Checkpoint writes are atomic.** The file stores write via temp-file + fsync + rename, so a
   crash mid-checkpoint leaves either the prior checkpoint or the new one fully intact, never a
   torn file.
-- **A changed graph is rejected, not mis-resumed.** If the persisted state references a node
-  the current DAG no longer contains, resume fails with `ErrValidation` rather than silently
-  rehydrating stale state (a node-identity graph-identity guard).
+- **A changed graph is rejected, not mis-resumed.** On resume the persisted state is checked
+  against the current DAG in two layers: a node-identity check rejects a persisted node the current
+  DAG no longer contains, and a **structural definition digest** (`DAG.DefinitionDigest()`) rejects
+  a resume whose topology, dependency edges, per-node retry/timeout/continue-on-error policy,
+  compensation, boundary declaration, action **kind**, or suspendability differs from the
+  checkpointed graph. Both fail with `ErrValidation` rather than silently rehydrating stale state.
+  The digest is *structural*: it cannot observe an action's runtime **behaviour** (a Go closure is
+  opaque), so changing what an `ActionFunc` does without changing its type is not detected — pair
+  the digest with an explicit definition version if you need that guarantee. Backward-compatible: a
+  checkpoint written before the digest existed falls back to the node-identity check alone.
 
 See [`docs/guides/persistence.md`](docs/guides/persistence.md) for the worked detail.
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -14,13 +15,12 @@ import (
 type NodeBuilder struct {
 	name            string
 	action          Action
-	actionErr       error // stores error if WithAction received an unsupported type
+	actionErr       error // deferred build error from a builder method (e.g. WithResult/WithInput misuse); surfaced by Build
 	dependencies    []string
 	retryCount      int
 	timeout         time.Duration
 	continueOnError bool
 	compensation    Action // M12 saga: optional compensating action (WithCompensation)
-	compensationErr error  // stores error if WithCompensation received an unsupported type
 	workflow        *WorkflowBuilder
 }
 
@@ -36,6 +36,8 @@ type WorkflowBuilder struct {
 	clock           Clock                // nil => system clock (M10 durable timers)
 	choiceEdges     []choiceEdge         // ChoiceNode branch edges, folded in Build (M11)
 	mergeEdges      []mergeEdge          // MergeNode join edges, folded in Build (M11 ph42)
+	boundaries      []boundaryDecl       // declared (D,V,S) boundaries, folded in Build (M23 VB-01)
+	budget          DefinitionBudget     // optional size caps enforced at Build (AUD-068); zero value = no limits
 }
 
 // NewWorkflowBuilder creates a new workflow builder.
@@ -70,6 +72,33 @@ func (b *WorkflowBuilder) WithStore(store WorkflowStore) *WorkflowBuilder {
 // Returns the builder for method chaining.
 func (b *WorkflowBuilder) WithExecutionConfig(config ExecutionConfig) *WorkflowBuilder {
 	b.executionConfig = &config
+	return b
+}
+
+// DefinitionBudget bounds the SIZE of a workflow definition, enforced once at
+// Build (AUD-068). Before this, a definition could grow without limit — a
+// runaway fan-out static expansion, a generated graph, or a config bug could
+// build an arbitrarily large DAG that only reveals its cost at execution. A
+// budget lets a host declare an explicit ceiling and get a typed ErrValidation
+// at Build instead.
+//
+// Each field is an INDEPENDENT cap; a zero (or negative) field means "no limit
+// on that axis". The zero value therefore imposes NO limits, so the budget is
+// fully opt-in and backward-compatible — a builder with no WithDefinitionBudget
+// behaves exactly as before.
+type DefinitionBudget struct {
+	MaxNodes int // reject if the graph has more than this many nodes (0 = unlimited)
+	MaxEdges int // reject if the graph has more than this many dependency edges, generated choice/merge edges included (0 = unlimited)
+	MaxWidth int // reject if any level's static width (count of concurrently-runnable nodes) exceeds this (0 = unlimited)
+}
+
+// WithDefinitionBudget sets an explicit size ceiling on the definition, checked
+// at Build (AUD-068). A graph exceeding any set cap is rejected with a typed
+// ErrValidation naming the axis, the actual count, and the ceiling. The zero
+// value of any field disables that axis, so passing a zero-value budget is a
+// no-op. Returns the builder for method chaining.
+func (b *WorkflowBuilder) WithDefinitionBudget(budget DefinitionBudget) *WorkflowBuilder {
+	b.budget = budget
 	return b
 }
 
@@ -138,6 +167,24 @@ func (b *WorkflowBuilder) AddWaitForSignalTimeout(name, signalName string, timeo
 	return node
 }
 
+// requireBuiltChild is the M23 SEAL-06 admission check for a caller-supplied child DAG
+// (R-04). AddSubWorkflow and AddSubWorkflowParked both take a *DAG straight from the
+// consumer into the sanctioned builder API, and before this they checked only nil and
+// (inline) suspendability — the child's PROVENANCE was assumed rather than checked.
+//
+// It costs nothing and it converts an argument into a check. The nil arm keeps the exact
+// wording the inline path already used, because a test pins that string and, more to the
+// point, the two conditions want the same remedy from the caller: build the child.
+func requireBuiltChild(child *DAG) error {
+	if child == nil {
+		return fmt.Errorf("%w: sub-workflow child DAG is nil", ErrValidation)
+	}
+	if !child.built {
+		return fmt.Errorf("%w: sub-workflow child DAG %q", ErrDAGNotBuilt, child.name)
+	}
+	return nil
+}
+
 // AddSubWorkflow adds a declared sub-workflow node (M19 ph91): when reached it spawns and
 // awaits the definition-value child DAG IN-PROCESS under a deterministic child ID
 // (f(parentID, name)) with the child's own journal — parent and child are DISTINCT
@@ -148,15 +195,24 @@ func (b *WorkflowBuilder) AddWaitForSignalTimeout(name, signalName string, timeo
 //
 // The child's whole spawn-closure is scanned AT BUILD for any suspendable node (an inline
 // child BLOCKS the parent, so it can never park): a suspendable node anywhere in the
-// closure fails Build with ErrSubWorkflowSuspendableChild — route such a child to the
-// queue path (ph94) instead. The action is set directly, so do NOT also call WithAction.
+// closure fails Build with ErrSubWorkflowSuspendableChild — INLINE is the only path that
+// refuses one. Route such a child to AddSubWorkflowParked (the host runs it; needs a
+// SignalStore) or AddSubWorkflowQueued (the engine dispatches it; needs a multi-process
+// *SQLiteStore + Pool + Registry) — choose on the STORE, not on capability. The action is
+// set directly, so do NOT also call WithAction.
 // Returns a NodeBuilder for dependency wiring and result declaration (WithResult).
 func (b *WorkflowBuilder) AddSubWorkflow(name string, child *DAG) *NodeBuilder {
 	node := b.AddNode(name)
 	node.action = &subWorkflowAction{nodeName: name, child: child}
-	// Scan the child's spawn-closure NOW; a suspendable node (direct or transitive) is a
-	// build error surfaced through actionErr (Build reports it — builder.go Build()).
-	if err := scanChildInlineSafe(child); err != nil {
+	// M23 SEAL-06 (R-04) — the child is CALLER-SUPPLIED and enters through the sanctioned
+	// builder, so assert its provenance HERE rather than arguing that it must be fine.
+	// Refusing at the parent's build() is the earliest possible failure and the clearest
+	// message; the token check at the child's own drive is the backstop, not the diagnosis.
+	if err := requireBuiltChild(child); err != nil {
+		node.actionErr = err
+	} else if err := scanChildInlineSafe(child); err != nil {
+		// Scan the child's spawn-closure NOW; a suspendable node (direct or transitive) is a
+		// build error surfaced through actionErr (Build reports it — builder.go Build()).
 		node.actionErr = err
 	}
 	return node
@@ -193,9 +249,49 @@ func (n *NodeBuilder) WithResult(parentKey, childDataKey string) *NodeBuilder {
 
 // WithInput sets the seeded KV input for a QUEUE-dispatched sub-workflow child (M19 ph94): the map is
 // JSON-encoded into the work_queue row's input, and RunNext's seedInput sets each key as a child data
-// key on the fresh run (so the child's first nodes read it). Only valid on an AddSubWorkflowQueued node
-// (the inline/parked children run in-process and read the parent data directly, so they need no queue
-// input). A nil/empty map is a no-op (no seed).
+// key on the fresh run (so the child's first nodes read it). Only valid on an AddSubWorkflowQueued node.
+// A nil/empty map is a no-op (no seed).
+//
+// NO CHILD READS PARENT DATA, on any path. Every child runs under its own WorkflowID with its own journal
+// (AddSubWorkflow: "parent and child are DISTINCT workflows"); an INLINE child's Execute builds a FRESH
+// WorkflowData for the child ID and loads only that child's own persisted state. Parent and child
+// WorkflowData are DISJOINT: nothing is copied in. The QUEUE path is the only one with an input
+// mechanism, and this method is it.
+//
+// WithResult moves exactly ONE value INTO PARENT DATA, on every path: a single (parentKey, childDataKey)
+// pair, NOT additive — a second call OVERWRITES the first. A child that Sets three data keys still lands
+// one in the parent. That bounds the PARENT-DATA channel only; it does not bound what the CALLER can see
+// (for parked the host owns the child's run and its store, so it can read the rest back — see
+// AddSubWorkflowParked).
+//
+// To parameterize an INLINE child, CAPTURE THE VALUES IN ITS ACTIONS' CLOSURES AT DAG-CONSTRUCTION TIME —
+// build the child *DAG from a Go function taking the parameters, and let its actions close over them:
+//
+//	func reviewChild(applicant string) (*DAG, error) {
+//		cb := NewWorkflowBuilder()
+//		cb.AddStartNode("review").WithAction(ActionFunc(func(_ context.Context, d *WorkflowData) error {
+//			d.Set("verdict", "reviewed:"+applicant) // `applicant` is CAPTURED, not read from parent data
+//			return nil
+//		}))
+//		return cb.Build()
+//	}
+//
+//	child, err := reviewChild("acme")
+//	if err != nil {
+//		return err
+//	}
+//	pb.AddSubWorkflow("review", child).WithResult("verdict", "verdict")
+//
+// The cost is that an INLINE child *DAG is a VALUE, not a template: a different parameterization needs a
+// different child DAG, and an out-capture is bound to that ONE build-time DAG, shared by every run. Where
+// one child definition must serve many runtime-varying inputs on the inline path, that is what the QUEUE
+// path (AddSubWorkflowQueued + WithInput) is for — it takes a child TYPE and seeds the data keys per run.
+//
+// PARKED PARAMETERIZES DIFFERENTLY and does not need this method: AddSubWorkflowParked never runs the
+// child, so the HOST builds a per-run child (under SubWorkflowChildID) and ONE parent definition serves
+// many runtime inputs. Do NOT read "parked is the lighter path" from that — parked requires a SignalStore
+// where an inline child runs on a bare WorkflowStore. See AddSubWorkflowParked and
+// docs/guides/sub-workflows.md for the full inline-vs-parked divergence map.
 func (n *NodeBuilder) WithInput(kv map[string]any) *NodeBuilder {
 	sub, ok := n.action.(*queueSubWorkflowAction)
 	if !ok {
@@ -205,9 +301,25 @@ func (n *NodeBuilder) WithInput(kv map[string]any) *NodeBuilder {
 	if len(kv) == 0 {
 		return n
 	}
+	// AF2: the CRASH axis, BEFORE the marshal — the depth cap below measures bytes the
+	// encoder only produces if it survived the value. Build time is where this belongs
+	// for the same reason the byte cap is: the value is refused before it is ever durable.
+	if derr := checkValueDepth(kv, "sub-workflow input"); derr != nil {
+		n.actionErr = derr
+		return n
+	}
 	b, err := json.Marshal(kv)
 	if err != nil {
 		n.actionErr = fmt.Errorf("%w: cannot encode sub-workflow input: %w", ErrValidation, err)
+		return n
+	}
+	// Depth cap at the write, same reason as every other marshal site: this input is
+	// carried into the work_queue and read back by a decoder that HAS a cap. Refusing
+	// here is a build-time validation error; accepting it produces a durable row whose
+	// reader will refuse it, which is a wedge rather than a rejection. Build time is the
+	// earliest and cheapest place this can be caught.
+	if derr := checkJSONDepth(b, "sub-workflow input"); derr != nil {
+		n.actionErr = derr
 		return n
 	}
 	sub.input = b
@@ -222,13 +334,64 @@ func (n *NodeBuilder) WithInput(kv map[string]any) *NodeBuilder {
 // the signal payload) and converges, or fails this node if the child terminalized failed
 // (INV-01, coe-aware). Requires a Store implementing SignalStore (else ErrWaitRequiresSignalStore).
 //
-// This is the PARKED counterpart to AddSubWorkflow (which BLOCKS inline). The child is carried by
-// definition-value so the parked node can render the child's coe-aware terminal verdict from the
-// journal + DAG. The action is set directly (marker visible), so do NOT also call WithAction. The
-// ROUTING between inline and parked is ph94; ph92 provides the parked mechanism.
+// This is the PARKED counterpart to AddSubWorkflow (which BLOCKS inline). The action is set directly
+// (marker visible), so do NOT also call WithAction. The ROUTING between inline and parked is ph94; ph92
+// provides the parked mechanism. A nil child fails at Build (it would otherwise kill the host process
+// when the verdict is rendered).
+//
+// THE child YOU PASS IS NEVER EXECUTED — it is a VERDICT CLASSIFIER, not a template. The HOST runs the
+// child, under SubWorkflowChildID(parentID, name); this node only classifies the host's FINISHED run from
+// the journal. The classifier must declare, as ContinueOnError, EVERY node name the host's run may leave
+// in status Failed and expect tolerated. NOTHING ELSE about it is read — not its edges, not its actions
+// (a classifier node's action is never invoked), not its node count, not extra nodes the host never ran,
+// not nodes that succeed. A Compensated/CompensationFailed node is ALWAYS a failure and the classifier is
+// not consulted. A one-node stub naming the single coe-failable node correctly classifies a larger run.
+//
+// The failure mode is a FALSE FAILURE, and it is silent: a node the host TOLERATED whose name is ABSENT
+// from the classifier — or PRESENT but not marked ContinueOnError — makes this node fail a run the host
+// considered successful.
+//
+// PARAMETERIZE PER RUN: because the host runs the child, it builds a fresh child DAG per run with per-run
+// closure captures, and ONE parent definition serves many runtime inputs (the inline path cannot — its
+// child is one build-time value shared by every run). The host can also reach the child's FULL result
+// set — it owns the run and the store, so store.Load(childID) or its own closure capture gets the rest
+// (Workflow.Execute returns only an error; the run's WorkflowData is not exposed). So WithResult's
+// single-value limit bounds only what reaches PARENT data.
+//
+// THE HOST MUST RUN THE CHILD ON THE SAME STORE AS THE PARENT — this node reads the child journal through
+// the PARENT's store, so a child run on a different store is invisible: this node reads ErrNotFound and
+// returns ErrSuspended, so the parent RE-PARKS ON EVERY WAKE — no error, no timeout, and no number of
+// re-drives converges it.
+//
+// DIVERGENCES FROM THE INLINE PATH (AddSubWorkflow), none of them symmetric:
+//   - SUSPENDABLE CHILD: inline REFUSES at Build (ErrSubWorkflowSuspendableChild); parked ACCEPTS one —
+//     the host may park AND resume the child, then wake this parent.
+//   - STORE: parked REQUIRES a SignalStore; inline runs on a bare WorkflowStore. Parked is NOT uniformly
+//     the lighter path (it IS lighter than the queue path, which needs *SQLiteStore + Pool + Registry).
+//   - GUARDS: the nesting-depth ceiling, the ancestor-cycle guard and the build-time closure scan are
+//     INLINE-ONLY. The parked action never drives, so depth and cycles are the HOST's responsibility.
+//   - FAILURE FIDELITY (the sharpest): inline propagates the child's ACTUAL error value, so errors.Is
+//     reaches the child's sentinel. Parked RECONSTRUCTS the verdict from node statuses — the error value
+//     is LOST and only the offending node NAME survives. A consumer classifying child failures with
+//     errors.Is/errors.As gets a true positive on inline and a SILENT FALSE NEGATIVE on parked.
 func (b *WorkflowBuilder) AddSubWorkflowParked(name string, child *DAG) *NodeBuilder {
 	node := b.AddNode(name)
 	node.action = &parkedSubWorkflowAction{nodeName: name, child: child}
+	// A nil child is LATENT-THEN-FATAL: Build would accept it, an all-success host run
+	// converges (childRunFailed only reads dag.Nodes on a Failed node), and the first
+	// child run that leaves any node Failed derefs the nil ON A LEVEL WORKER GOROUTINE
+	// — where a caller's recover() cannot reach it, so the HOST PROCESS dies. Refuse at
+	// Build, in the same words the inline sibling uses (scanChildInlineSafe). Parked does
+	// NOT get the inline suspendable-scan: a suspendable child is legitimate here.
+	// (F-PARK-03.)
+	// M23 SEAL-06 (R-04) folds the nil check in: requireBuiltChild refuses nil with the
+	// same wording, and additionally refuses a non-nil child that never passed build().
+	// That second half matters more on THIS path than on the inline one, because the
+	// parked child is never executed — it is read to render the run's VERDICT, so an
+	// unvalidated graph here turns a failed child into a reported success.
+	if err := requireBuiltChild(child); err != nil {
+		node.actionErr = err
+	}
 	return node
 }
 
@@ -236,8 +399,12 @@ func (b *WorkflowBuilder) AddSubWorkflowParked(name string, child *DAG) *NodeBui
 // a child of TYPE childType to the M17 work_queue (carrying this parent's mailbox address in the
 // trusted control columns) and PARKS (Waiting); a pool worker claims + runs the child; on child-terminal
 // a completion signal wakes this parent, which reads the child's result DATA key (WithResult) + renders
-// the coe-aware verdict. This is the queue counterpart to AddSubWorkflow (inline, ph91) — the explicit
-// opt-in for a TYPE-REF and/or SUSPENDABLE child (which the inline path refuses). It structurally
+// the coe-aware verdict. This is the queue counterpart to AddSubWorkflow (inline, ph91): the opt-in for a
+// TYPE-REF child, and ONE of the two onward routes for a SUSPENDABLE child — the INLINE path refuses one
+// at Build (ErrSubWorkflowSuspendableChild), but AddSubWorkflowParked ACCEPTS one (the host runs it, and
+// may park AND resume it, then wake this parent). Choose between the two on the STORE, not on capability:
+// parked needs only a SignalStore. (Parked is not uniformly the lighter choice though — it requires a
+// SignalStore where an INLINE child runs on a bare WorkflowStore.) This path structurally
 // requires a multi-process *SQLiteStore + a worker Pool + a Registry (the type→DAG map, injected at
 // Execute — the DAG carries only the type STRING, keeping the workflow pure DATA). The action is set
 // directly (marker visible), so do NOT also call WithAction. Returns a NodeBuilder for dependency wiring
@@ -262,6 +429,27 @@ func (b *WorkflowBuilder) AddSubWorkflowQueued(name, childType string) *NodeBuil
 // Returns a NodeBuilder for dependency wiring; the action is set directly, so do NOT
 // also call WithAction (that would replace it) — retry/timeout are not meaningful on a
 // park.
+//
+// AUTHORIZATION SCOPE (AUD-069 / S-02): AddApproval is an ORCHESTRATION primitive — a
+// durable decision gate — NOT an authentication or authorization protocol. The engine
+// does NOT verify WHO approved: the ApprovalDecision.Approver is a HOST-ASSERTED string
+// carried only for the audit trail, with no freshness, principal-identity, request
+// correlation/nonce, policy-version, or cryptographic/host-authenticated provenance. Any
+// decision delivered to the mailbox under this node's name is accepted as-is (a
+// misdirected or forged one included). Authenticating the approver, correlating the
+// request to a specific pending approval, and preventing replay are the HOST's
+// responsibility: deliver an already-authorized decision. (Host-endorsement provenance
+// is planned but not yet provided — do not rely on the engine for it.)
+//
+// FOR A BOUNDED DECISION, SEE AddWaitForSignalTimeout: an approval park has no deadline and
+// waits indefinitely. AddWaitForSignalTimeout arms an ABSOLUTE due instant at FIRST encounter
+// and never re-arms it (signal_timeout.go:95-110), so the deadline is durable-remaining across
+// a restart and a crash-looping run cannot hold the park open indefinitely; its timeout arm
+// sets timedOutKey(name) (signal_timeout.go:40) so a downstream M11 ChoiceNode can branch into
+// an explicit timeout subgraph. The cost of switching is this node's decision vocabulary: the
+// ApproveSignal/RejectSignal constructors and the *ApprovalRejectedError classification are
+// specific to AddApproval — a timeout-bounded wait carries a plain signal payload and a
+// disposition key instead.
 func (b *WorkflowBuilder) AddApproval(name string) *NodeBuilder {
 	node := b.AddNode(name)
 	node.action = &approvalAction{nodeName: name, signalName: name}
@@ -309,30 +497,21 @@ func (b *WorkflowBuilder) AddStartNode(name string) *NodeBuilder {
 // The action can be an Action interface or a function with the signature
 // func(ctx context.Context, data *WorkflowData) error.
 // Returns the builder for method chaining.
-func (n *NodeBuilder) WithAction(action interface{}) *NodeBuilder {
-	switch a := action.(type) {
-	case Action:
-		// Already an Action
-		n.action = a
-	case func(ctx context.Context, data *WorkflowData) error:
-		// Function with new signature
-		n.action = ActionFunc(a)
-	case func(ctx context.Context, state interface{}) (interface{}, interface{}):
-		// Legacy style function, adapt it to new Action
-		n.action = ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			// This is a simple wrapper that ignores the return values
-			// In a real implementation, you might want to handle errors or state deltas
-			_, _ = a(ctx, data)
-			return nil
-		})
-	default:
-		// Record the error for Build() to report, and create a stub action
-		// so callers that test the action directly get a clear error message.
-		n.actionErr = fmt.Errorf("unsupported action type: %T", action)
-		n.action = ActionFunc(func(_ context.Context, _ *WorkflowData) error {
-			return n.actionErr
-		})
-	}
+func (n *NodeBuilder) WithAction(action Action) *NodeBuilder {
+	// AUD-041: typed. The action IS an Action — the compiler rejects a mistyped value
+	// at the call site instead of the old interface{}+runtime-`default` rejection at
+	// Build (which could only report "unsupported action type: %T" after the fact). To
+	// supply a bare function with the Action signature, use WithActionFunc. A nil Action
+	// falls through to Build's "no action defined" guard, unchanged.
+	n.action = action
+	return n
+}
+
+// WithActionFunc sets the node's action from a bare function with the Action signature —
+// the ergonomic form for an inline closure, equivalent to WithAction(ActionFunc(fn)).
+// (AUD-041: the typed counterpart to WithAction, mirroring http.Handler / http.HandlerFunc.)
+func (n *NodeBuilder) WithActionFunc(fn func(ctx context.Context, data *WorkflowData) error) *NodeBuilder {
+	n.action = ActionFunc(fn)
 	return n
 }
 
@@ -376,15 +555,16 @@ func (n *NodeBuilder) WithContinueOnError() *NodeBuilder {
 // may be re-invoked after a crash mid-rollback (at-least-once); the executor passes
 // it a stable IdempotencyKey handle. A node with no compensation is a rollback
 // no-op. Returns the builder for method chaining.
-func (n *NodeBuilder) WithCompensation(action interface{}) *NodeBuilder {
-	switch a := action.(type) {
-	case Action:
-		n.compensation = a
-	case func(ctx context.Context, data *WorkflowData) error:
-		n.compensation = ActionFunc(a)
-	default:
-		n.compensationErr = fmt.Errorf("unsupported compensation type: %T", action)
-	}
+func (n *NodeBuilder) WithCompensation(action Action) *NodeBuilder {
+	// AUD-041: typed (see WithAction). Use WithCompensationFunc for a bare function.
+	n.compensation = action
+	return n
+}
+
+// WithCompensationFunc sets the node's compensation from a bare function with the Action
+// signature, equivalent to WithCompensation(ActionFunc(fn)) (AUD-041).
+func (n *NodeBuilder) WithCompensationFunc(fn func(ctx context.Context, data *WorkflowData) error) *NodeBuilder {
+	n.compensation = ActionFunc(fn)
 	return n
 }
 
@@ -414,7 +594,7 @@ func (b *WorkflowBuilder) Build() (*DAG, error) {
 func (b *WorkflowBuilder) build() (*DAG, error) {
 	// Create a new DAG with capacity hints based on the number of nodes
 	nodeCount := len(b.nodes)
-	dag := NewDAGWithCapacity(b.workflowID, nodeCount)
+	dag := newDAGWithCapacity(b.workflowID, nodeCount)
 
 	// Apply a custom execution config if one was provided; otherwise the DAG
 	// keeps its DefaultConfig().
@@ -429,41 +609,59 @@ func (b *WorkflowBuilder) build() (*DAG, error) {
 		dag.WithTracerProvider(b.tracerProvider)
 	}
 
-	// Fold ChoiceNode branch edges (choice -> target) and MergeNode join edges
-	// (merge -> tail) into the dependency lists. Done FIRST so the existing
-	// count/wire/cycle-check passes treat them like any other edge, and so the
-	// When/Otherwise/From wiring is independent of node-declaration order (a
-	// target/tail may be declared before or after the call). (M11.)
+	// AUD-012 / C-04: fold ChoiceNode branch edges (choice -> target) and MergeNode join
+	// edges (merge -> tail) into a LOCAL per-node effective-dependency map — built from
+	// CLONES of each NodeBuilder's declared dependencies — never back into the builders.
+	// Folded FIRST so the existing count/wire/cycle-check passes treat generated edges like
+	// any other edge, and so the When/Otherwise/From wiring is independent of node-declaration
+	// order (a target/tail may be declared before or after the call) (M11). The clone is what
+	// makes Build PURE: a builder is reusable (registry factories, tests, and the phase-121
+	// digest all rebuild the same builder), and the previous in-place append re-added the same
+	// generated edges on every Build, drifting topology (and the definition digest) with Build
+	// count. effectiveDeps is now the single authority the passes below read from.
+	effectiveDeps := make(map[string][]string, nodeCount)
+	for _, nb := range b.nodes {
+		effectiveDeps[nb.name] = append([]string(nil), nb.dependencies...)
+	}
 	if len(b.choiceEdges) > 0 || len(b.mergeEdges) > 0 {
 		builderByName := make(map[string]*NodeBuilder, nodeCount)
 		for _, nb := range b.nodes {
 			builderByName[nb.name] = nb
 		}
 		for _, e := range b.choiceEdges {
-			target, ok := builderByName[e.target]
-			if !ok {
+			if _, ok := builderByName[e.target]; !ok {
 				return nil, fmt.Errorf("choice %q routes to unknown branch target %q", e.choice, e.target)
 			}
-			target.dependencies = append(target.dependencies, e.choice)
+			effectiveDeps[e.target] = append(effectiveDeps[e.target], e.choice)
 		}
 		for _, e := range b.mergeEdges {
-			merge, ok := builderByName[e.merge]
-			if !ok {
+			if _, ok := builderByName[e.merge]; !ok {
 				return nil, fmt.Errorf("merge %q not found while wiring its tails", e.merge)
 			}
 			if _, ok := builderByName[e.tail]; !ok {
 				return nil, fmt.Errorf("merge %q joins unknown branch tail %q", e.merge, e.tail)
 			}
-			merge.dependencies = append(merge.dependencies, e.tail)
+			effectiveDeps[e.merge] = append(effectiveDeps[e.merge], e.tail)
 		}
+	}
+
+	// Boundary verifier/sink nodes are validated by validateBoundaries below with
+	// role-specific reasons (boundaryOpaqueReason covers BOTH the nil-run and the
+	// *DAG grounds and names the role). Those supersede the generic per-node action
+	// checks here, so a node named as a V/S is skipped in the AUD-001/AUD-011 checks
+	// and refused — with the better message — by the boundary layer instead.
+	boundaryRoleNode := make(map[string]bool, 2*len(b.boundaries))
+	for _, d := range b.boundaries {
+		boundaryRoleNode[d.verifier] = true
+		boundaryRoleNode[d.sink] = true
 	}
 
 	// Map to track node dependency counts for capacity hints
 	nodeDependencyCounts := make(map[string]int, nodeCount)
 
-	// First pass: count dependencies per node
+	// First pass: count dependencies per node (from the effective, generated-edge-folded map)
 	for _, builder := range b.nodes {
-		for _, depName := range builder.dependencies {
+		for _, depName := range effectiveDeps[builder.name] {
 			nodeDependencyCounts[depName]++
 		}
 	}
@@ -473,37 +671,115 @@ func (b *WorkflowBuilder) build() (*DAG, error) {
 		if builder.actionErr != nil {
 			return nil, fmt.Errorf("node %s has invalid action: %w", builder.name, builder.actionErr)
 		}
-		if builder.compensationErr != nil {
-			return nil, fmt.Errorf("node %s has invalid compensation: %w", builder.name, builder.compensationErr)
-		}
 		if builder.action == nil {
 			return nil, fmt.Errorf("node %s has no action defined", builder.name)
 		}
+		if !boundaryRoleNode[builder.name] {
+			// AUD-001 / F118-ENG-06: reject nil / typed-nil / nil-operand built-in
+			// actions at Build. Their Execute dereferences a nil operand inside an
+			// executor worker goroutine, where no caller's recover() can reach it, so
+			// the panic takes the HOST PROCESS down rather than failing the node. The
+			// boundary clause already refused these for a boundary's verifier/sink; an
+			// ORDINARY node was still exposed. Rejecting here makes the invalid state
+			// unrepresentable instead of a run-time crash. (Structural completes-on-
+			// clock/structure kinds are NOT touched — they are valid ordinary nodes.)
+			if why, unsafe := actionRunSafetyReason(builder.action); unsafe {
+				return nil, fmt.Errorf("%w: node %s has an action that cannot run: %s", ErrValidation, builder.name, why)
+			}
+			// AUD-011 / F118-ENG-01: reject a compiled *DAG smuggled in via WithAction
+			// — it bypasses AddSubWorkflow's depth/cycle/suspendable-child guards.
+			if err := rejectCompiledDAGAction(builder.name, builder.action); err != nil {
+				return nil, err
+			}
+		}
 
-		// Use capacity hints for dependencies
-		depCapacity := len(builder.dependencies)
-		node := NewNodeWithCapacity(builder.name, builder.action, depCapacity)
+		// F118-ENG-01 (compensation slot): a compiled *DAG smuggled in via
+		// WithCompensation runs under (*DAG).Execute during rollback exactly as an
+		// action would, bypassing the same AddSubWorkflow depth/cycle/suspendable-child
+		// guards. Checked for every node (not gated on boundary role): compensation is
+		// not a boundary concept, and a boundary node may still declare one.
+		if builder.compensation != nil {
+			if err := rejectCompiledDAGCompensation(builder.name, builder.compensation); err != nil {
+				return nil, err
+			}
+		}
 
-		if builder.retryCount > 0 {
-			node.WithRetries(builder.retryCount)
-		}
-		if builder.timeout > 0 {
-			node.WithTimeout(builder.timeout)
-		}
-		if builder.continueOnError {
-			node.WithContinueOnError()
-		}
-		node.Compensation = builder.compensation // M12 saga: nil when no WithCompensation
+		// Use capacity hints for dependencies (effective = declared + folded generated edges)
+		depCapacity := len(effectiveDeps[builder.name])
+		node := newNodeWithCapacity(builder.name, builder.action, depCapacity)
+
+		// M23 SEAL-01: the WithRetries/WithTimeout/WithContinueOnError mutators are
+		// deleted — they were exported, so they configured a node AFTER build() had
+		// validated it. build() owns construction, so it writes the fields directly.
+
+		// CLAMPED, and this is a correctness fix, not tidying (blocker 117-F1).
+		// WithRetries does no validation, and the old `if retryCount > 0` guard around
+		// the mutator call was silently absorbing negative input. Removing it let -1
+		// reach the node, where saga_rollback.go's compensation loop is
+		// `for attempt := 0; attempt <= n.retryCount` — UNGUARDED. With -1 the body
+		// never runs, lastErr stays nil, that reads as success, and the node is stamped
+		// Compensated with markCompensated recorded: the durable journal says an effect
+		// was undone that was never touched.
+		//
+		// Clamped HERE rather than at each reader: this is the only site that writes a
+		// CALLER-SUPPLIED value into Node.retryCount, so it is the one boundary where an
+		// out-of-range value can enter. Making the invalid state unrepresentable is this
+		// phase's thesis; tolerating it at the readers is what produced the blocker, and
+		// the reader tally below is the argument for that — count it, do not estimate it.
+		//
+		// 117-F4: an earlier version of this sentence read "four readers, three of which
+		// happen to guard" and contradicted the enumeration twelve lines down IN THE SAME
+		// BLOCK — and the A2 edit that fixed a self-contradicting comment left it standing
+		// inside the block it was fixing. MEASURED, all six non-test read sites:
+		//   (*Node).execute           `if n.retryCount > 0`     — a real guard
+		//   (*Node).execute           the read inside that guard
+		//   nodeSpanAttributes        `if n.retryCount > 0`     — a real guard
+		//   nodeSpanAttributes        the read inside that guard
+		//   runCompensationWithRetry  `attempt <= n.retryCount` — THE BLOCKER, its loop
+		//     condition, unguarded
+		//   runCompensationWithRetry  `attempt < n.retryCount`  — the backoff check in the
+		//     SAME function, and NOT a guard: it is merely unreachable on a negative,
+		//     because the loop condition above never admits a body. Reading it
+		//     as protection is the error that makes the surface look twice as defended as
+		//     it is — an accident of control flow is not an invariant.
+		// So exactly TWO of six reads carry a real `> 0` guard. The clamp is what the
+		// other four rely on.
+		//
+		// THE WRITER SETS ARE COMPILER-DERIVED — each field renamed, the error list read,
+		// never grepped, because grep-over-a-category is the instrument that produced
+		// 117-F1. TWO fields had to be renamed, and an earlier version of this comment
+		// renamed only the first while asserting a property of the second:
+		//   NodeBuilder.retryCount — 2 non-test sites: WithRetries (sole writer),
+		//     build() (sole reader). Plus 2 test reads.
+		//   Node.retryCount — 3 non-test WRITES, not one: this line, and the
+		//     `retryCount: 0` literals in NewNode and NewNodeWithCapacity. Its non-test
+		//     READS are enumerated once, above; deliberately not re-tallied here, because
+		//     a second tally of the same set in the same block is precisely how 117-F4
+		//     happened.
+		// So "the sole writer" was false as literally written; the two constructor writes
+		// are zero literals and cannot be out of range, which is the property that
+		// actually holds and the one stated above.
+		//
+		// WithBranchRetries (fanout.go) does NOT reach either field — CHECKED, not
+		// assumed, since it was the reviewer's open question. It guards its own count
+		// with `if count <= 0 { branchRetry = nil; … }`, so its consumer
+		// (branchRetryPolicy.count, renamed: 2 non-test sites, both under that guard)
+		// only ever sees >= 1. No second clamp is owed on that path.
+		node.retryCount = max(0, builder.retryCount)
+		node.timeout = builder.timeout
+		node.continueOnError = builder.continueOnError
+		node.compensation = builder.compensation // M12 saga: nil when no WithCompensation
 
 		// Add node to DAG
-		if err := dag.AddNode(node); err != nil {
+		if err := dag.addNode(node); err != nil {
 			return nil, fmt.Errorf("failed to add node %s: %w", builder.name, err)
 		}
 	}
 
-	// Add dependencies
+	// Add dependencies (from the effective map, so generated choice/merge edges are wired)
 	for _, builder := range b.nodes {
-		if len(builder.dependencies) == 0 {
+		nodeDeps := effectiveDeps[builder.name]
+		if len(nodeDeps) == 0 {
 			continue
 		}
 
@@ -512,10 +788,10 @@ func (b *WorkflowBuilder) build() (*DAG, error) {
 			return nil, fmt.Errorf("node %s not found", builder.name)
 		}
 
-		deps := make([]*Node, 0, len(builder.dependencies))
+		deps := make([]*Node, 0, len(nodeDeps))
 
 		// Collect all dependencies first
-		for _, depName := range builder.dependencies {
+		for _, depName := range nodeDeps {
 			depNode, exists := dag.GetNode(depName)
 			if !exists {
 				return nil, fmt.Errorf("dependency %s for node %s not found",
@@ -524,8 +800,8 @@ func (b *WorkflowBuilder) build() (*DAG, error) {
 			deps = append(deps, depNode)
 		}
 
-		// Add all dependencies in one operation
-		node.AddDependencies(deps...)
+		// M23 SEAL-01: AddDependencies is deleted (it mutated the edge set post-build).
+		node.dependsOn = append(node.dependsOn, deps...)
 	}
 
 	// Validate the DAG
@@ -541,5 +817,73 @@ func (b *WorkflowBuilder) build() (*DAG, error) {
 		return nil, fmt.Errorf("invalid workflow: %w", err)
 	}
 
+	// M23 SEAL-06 — the builder token, and it MUST REMAIN THE LAST STATEMENT HERE.
+	// validateReconvergence above does not merely check: it APPENDS the DEC-M11-DEPMODEL
+	// merge<-choice edges as its final act. Stamping any earlier — in particular right
+	// after dag.Validate() — would certify a graph that then gained edges, which is a
+	// token that means something subtly other than what it says.
+	//
+	// This is also the ONLY assignment to dag.built in non-test code, and that is the
+	// property the whole mechanism rests on: stamped anywhere else, the token would
+	// certify "a DAG was constructed" rather than "build() validated it", the mechanism
+	// would be void, and every test would still pass. Guarded by
+	// TestSealed_BuiltIsStampedOnlyInBuild.
+	//
+	// M23 VB-01 — the token now certifies a SECOND thing: that every declared boundary
+	// holds over this graph. The seat is here for the same reason the stamp is: a
+	// dominance predicate evaluated before validateReconvergence would be evaluated
+	// against a graph that then gains the merge<-choice edges.
+	// slices.Clone, not the slice itself (118-F5): the builder is reusable and its
+	// slice header outlives this call, so an aliased dag.boundaries could be mutated
+	// after validation by a further WithBoundary on the same builder -- validated set,
+	// changed content, stamped graph. Cloning makes the run-constancy class true by
+	// construction rather than by nobody having tried it.
+	dag.boundaries = slices.Clone(b.boundaries)
+	dag.hasBoundaries = len(b.boundaries) > 0
+	if err := validateBoundaries(dag, dag.boundaries); err != nil {
+		return nil, fmt.Errorf("invalid workflow: %w", err)
+	}
+
+	// Definition budget (AUD-068): reject an over-budget graph with a typed
+	// ErrValidation. Checked here, after the graph is fully wired and validated so
+	// GetLevels() is well-defined (acyclic), and before the built token is stamped
+	// so an over-budget DAG is never certified. edgeCount is the effective edge set
+	// (declared + folded choice/merge edges), the same set the wiring above used.
+	if b.budget.MaxNodes > 0 || b.budget.MaxEdges > 0 || b.budget.MaxWidth > 0 {
+		edgeCount := 0
+		for _, deps := range effectiveDeps {
+			edgeCount += len(deps)
+		}
+		if err := validateDefinitionBudget(nodeCount, edgeCount, dag.GetLevels(), b.budget); err != nil {
+			return nil, err
+		}
+	}
+
+	dag.built = true
 	return dag, nil
+}
+
+// validateDefinitionBudget rejects a definition that exceeds any set cap in the
+// budget (AUD-068). A zero/negative cap disables that axis. Errors are typed
+// ErrValidation and name the axis, the actual count, and the ceiling so a host
+// can see how far over it is.
+func validateDefinitionBudget(nodeCount, edgeCount int, levels [][]*Node, budget DefinitionBudget) error {
+	if budget.MaxNodes > 0 && nodeCount > budget.MaxNodes {
+		return fmt.Errorf("%w: definition has %d nodes, exceeds the %d-node budget", ErrValidation, nodeCount, budget.MaxNodes)
+	}
+	if budget.MaxEdges > 0 && edgeCount > budget.MaxEdges {
+		return fmt.Errorf("%w: definition has %d dependency edges, exceeds the %d-edge budget", ErrValidation, edgeCount, budget.MaxEdges)
+	}
+	if budget.MaxWidth > 0 {
+		widest, atLevel := 0, 0
+		for i, level := range levels {
+			if len(level) > widest {
+				widest, atLevel = len(level), i
+			}
+		}
+		if widest > budget.MaxWidth {
+			return fmt.Errorf("%w: definition level %d has static width %d, exceeds the %d-width budget", ErrValidation, atLevel, widest, budget.MaxWidth)
+		}
+	}
+	return nil
 }

@@ -19,10 +19,12 @@ In Flow Orchestrator, a DAG consists of:
 +---------------------+
 |         DAG         |
 +---------------------+
-| - Nodes             |
-| - StartNodes        |
-| - EndNodes          |
-| - Name              |
+| (all fields sealed) |
+| Execute()           |
+| Validate()          |
+| GetLevels()         |
+| GetNode() / Name()  |
+| TopologicalSort()   |
 +---------------------+
          |
          | contains
@@ -38,10 +40,15 @@ In Flow Orchestrator, a DAG consists of:
 +---------------------+
 ```
 
-- **Nodes**: A map of node names to node instances
-- **StartNodes**: Nodes with no dependencies
-- **EndNodes**: Nodes with no dependents
-- **Name**: Identifier for the DAG
+**A `*DAG` is opaque as of v0.22.0 (M23 SEAL-06)** — it has no exported fields, and
+`DAG.StartNodes`/`EndNodes` were **deleted** in ph117 rather than merely unexported.
+The dependency-free set is not stored; `GetLevels()` re-derives it
+(`len(node.dependsOn) == 0`) on every call. What a consumer can reach:
+
+- **`GetLevels()`**: the nodes grouped into dependency levels, level 0 being the
+  dependency-free set
+- **`GetNode(name)`**: one node by name
+- **`Name()`**: identifier for the DAG
 
 Each Node contains:
 
@@ -170,9 +177,14 @@ Before a DAG can be executed, it undergoes validation to ensure:
 1. All node names are unique
 2. No cycles exist in the dependency graph
 3. All dependencies refer to existing nodes
-4. At least one start node exists
 
 If validation fails, the `Build()` method returns an error with details about the validation failure.
+
+> ⚠️ **"At least one start node exists" is NOT a guarantee** — it was listed here and is
+> not enforced. An **empty** builder both builds and executes successfully: `Build()`
+> returns a non-nil `*DAG` with `err == nil`, and `Execute` on it returns `nil` with
+> `GetLevels()` reporting `0` levels. An empty workflow is a well-formed no-op, not a
+> validation error. Do not rely on `Build()` to catch a graph you failed to populate.
 
 ## Topological Sorting
 
@@ -188,8 +200,15 @@ in `dag.go`):
    dependents, enqueueing any that reach zero
 3. If not all nodes are emitted, the graph contains a cycle (returned as an error)
 
-`TopologicalSort()` returns `([][]*Node, error)` — the nodes grouped into
-dependency levels.
+`TopologicalSort()` returns `([]*Node, error)` — a **single flat topological order**
+over every node, **not** grouped into dependency levels (AUD-039: the return type is a
+flat `[]*Node`, not the nested `[][]*Node` an earlier revision of this page described).
+On the graph `a → {b, d}`, `b → c` it yields one ordering of all four nodes, whereas
+`GetLevels()` on the same graph measures `outer=3, inner=[1 2 1]` — the parallel level
+structure.
+
+**Use `GetLevels()` for the parallel structure**; `TopologicalSort()` gives a valid
+serial ordering only.
 
 ## Level-Based Execution
 
@@ -336,8 +355,9 @@ chose". The mechanism is deliberately small: it adds no new persistence path and
 mandatory background service.
 
 1. **Park.** A *declared suspension node* — built via `AddTimer`,
-   `AddWaitForSignal`, or `AddWaitForCondition` (equivalently `NewTimerNode` /
-   `NewWaitForSignalNode` / `NewWaitForConditionNode`) — runs its action, which
+   `AddWaitForSignal`, or `AddWaitForCondition` on the builder (the standalone
+   `NewTimerNode` / `NewWaitForSignalNode` / `NewWaitForConditionNode` constructors
+   were unexported in v0.22.0, M23 SEAL-01) — runs its action, which
    returns the internal `ErrSuspended` sentinel when its event is not yet ready. The
    executor records the node `Waiting` (non-terminal) instead of treating the return
    as a failure. Suspension nodes are declared statically (a package-internal

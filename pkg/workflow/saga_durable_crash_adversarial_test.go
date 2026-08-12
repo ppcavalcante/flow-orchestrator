@@ -163,10 +163,10 @@ func buildCrashSaga(seed int64, layers, maxWidth int, forceFail bool) *crashSaga
 			}
 			switch beh {
 			case 0:
-				nb.WithCompensation(mkComp(name, false))
+				nb.WithCompensationFunc(mkComp(name, false))
 				cs.hasComp[name] = true
 			case 1:
-				nb.WithCompensation(mkComp(name, true))
+				nb.WithCompensationFunc(mkComp(name, true))
 				cs.hasComp[name] = true
 				cs.compFails[name] = true
 			default:
@@ -201,7 +201,7 @@ func buildCrashSaga(seed int64, layers, maxWidth int, forceFail bool) *crashSaga
 }
 
 func (cs *crashSaga) workflow(store WorkflowStore) *Workflow {
-	return &Workflow{DAG: cs.dag, WorkflowID: cs.id, Store: store}
+	return &Workflow{dag: cs.dag, WorkflowID: cs.id, Store: store}
 }
 
 // runToCompletion drives Execute, recovering a simulated-crash panic and re-driving
@@ -375,8 +375,8 @@ func TestSagaDurableCrash_CancelTrigger_CleanResume_ReturnsNil(t *testing.T) {
 	comp := func(context.Context, *WorkflowData) error { return nil } // clean compensation
 
 	b := NewWorkflowBuilder().WithWorkflowID("cancel-crash")
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(comp)
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(comp).DependsOn("a")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(comp)
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(comp).DependsOn("a")
 	b.AddNode("fail").WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).DependsOn("b")
 	dag, err := b.Build()
 	require.NoError(t, err)
@@ -389,7 +389,7 @@ func TestSagaDurableCrash_CancelTrigger_CleanResume_ReturnsNil(t *testing.T) {
 	seed.SetRollingBack(true)
 	require.NoError(t, store.Save(seed))
 
-	w := &Workflow{DAG: dag, WorkflowID: "cancel-crash", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "cancel-crash", Store: store}
 	resErr := w.Execute(context.Background())
 
 	// The run DID roll back: statuses are Compensated, marker still set.
@@ -412,8 +412,8 @@ func TestSagaDurableCrash_FailedTrigger_CleanResume_NonNil_Control(t *testing.T)
 	store := NewInMemoryStore()
 	comp := func(context.Context, *WorkflowData) error { return nil }
 	b := NewWorkflowBuilder().WithWorkflowID("fail-crash")
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(comp)
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(comp).DependsOn("a")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(comp)
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(comp).DependsOn("a")
 	b.AddNode("fail").WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).DependsOn("b")
 	dag, err := b.Build()
 	require.NoError(t, err)
@@ -425,7 +425,7 @@ func TestSagaDurableCrash_FailedTrigger_CleanResume_NonNil_Control(t *testing.T)
 	seed.SetRollingBack(true)
 	require.NoError(t, store.Save(seed))
 
-	err = (&Workflow{DAG: dag, WorkflowID: "fail-crash", Store: store}).Execute(context.Background())
+	err = (&Workflow{dag: dag, WorkflowID: "fail-crash", Store: store}).Execute(context.Background())
 	var ee *ExecutionError
 	require.ErrorAs(t, err, &ee, "the Failed node reconstructs a non-nil cause on resume")
 }
@@ -570,8 +570,8 @@ func TestSagaDurableCrash_AfterCompensationFailed_StaysFailed(t *testing.T) {
 	failing := 0
 	b := NewWorkflowBuilder().WithWorkflowID("after-cf")
 	b.AddNode("x").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { failing++; return errors.New("x re-attempted!") })
-	b.AddNode("y").WithAction(benchNoopAction()).WithCompensation(comp).DependsOn("x")
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { failing++; return errors.New("x re-attempted!") })
+	b.AddNode("y").WithAction(benchNoopAction()).WithCompensationFunc(comp).DependsOn("x")
 	b.AddNode("fail").WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).DependsOn("y")
 	dag, err := b.Build()
 	require.NoError(t, err)
@@ -583,7 +583,7 @@ func TestSagaDurableCrash_AfterCompensationFailed_StaysFailed(t *testing.T) {
 	seed.SetRollingBack(true)
 	require.NoError(t, store.Save(seed))
 
-	resErr := (&Workflow{DAG: dag, WorkflowID: "after-cf", Store: store}).Execute(context.Background())
+	resErr := (&Workflow{dag: dag, WorkflowID: "after-cf", Store: store}).Execute(context.Background())
 
 	var se *SagaError
 	require.ErrorAs(t, resErr, &se, "a run with a CompensationFailed node surfaces a *SagaError on resume")

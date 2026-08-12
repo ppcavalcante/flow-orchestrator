@@ -323,31 +323,37 @@ func TestFBStatusToNodeStatus(t *testing.T) {
 		name     string
 		status   fb.NodeStatus
 		expected NodeStatus
+		known    bool
 	}{
 		{
 			name:     "Pending status",
 			status:   fb.NodeStatusPending,
 			expected: Pending,
+			known:    true,
 		},
 		{
 			name:     "Running status",
 			status:   fb.NodeStatusRunning,
 			expected: Running,
+			known:    true,
 		},
 		{
 			name:     "Completed status",
 			status:   fb.NodeStatusCompleted,
 			expected: Completed,
+			known:    true,
 		},
 		{
 			name:     "Failed status",
 			status:   fb.NodeStatusFailed,
 			expected: Failed,
+			known:    true,
 		},
 		{
 			name:     "Skipped status",
 			status:   fb.NodeStatusSkipped,
 			expected: Skipped,
+			known:    true,
 		},
 		{
 			// MH-1 no-silent-clobber: the wire-5 Waiting value must decode back to
@@ -355,18 +361,24 @@ func TestFBStatusToNodeStatus(t *testing.T) {
 			name:     "Waiting status",
 			status:   fb.NodeStatusWaiting,
 			expected: Waiting,
+			known:    true,
 		},
 		{
-			name:     "Unknown status",
-			status:   fb.NodeStatus(127), // out-of-range value
-			expected: Pending,            // should default to pending
+			// AUD-036: an out-of-range enum is now REJECTED (ok=false), not silently
+			// coerced to Pending (which would rerun a terminal node on a forged journal).
+			name:   "Unknown status",
+			status: fb.NodeStatus(127),
+			known:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := fbStatusToNodeStatus(tt.status)
-			assert.Equal(t, tt.expected, result, "fbStatusToNodeStatus(%d) returned unexpected value", tt.status)
+			result, ok := fbStatusToNodeStatus(tt.status)
+			assert.Equal(t, tt.known, ok, "fbStatusToNodeStatus(%d) known mismatch", tt.status)
+			if tt.known {
+				assert.Equal(t, tt.expected, result, "fbStatusToNodeStatus(%d) returned unexpected value", tt.status)
+			}
 		})
 	}
 }
@@ -385,9 +397,10 @@ func TestStatusConversionRoundTrip(t *testing.T) {
 		t.Run(string(status), func(t *testing.T) {
 			// Convert to FB status and back
 			fbStatus := statusToFBStatus(status)
-			roundTrip := fbStatusToNodeStatus(fbStatus)
+			roundTrip, ok := fbStatusToNodeStatus(fbStatus)
 
 			// Should get the same status back
+			require.True(t, ok, "round trip must decode a known status for %s", status)
 			assert.Equal(t, status, roundTrip, "Status conversion round trip failed for %s", status)
 		})
 	}

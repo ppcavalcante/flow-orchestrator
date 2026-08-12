@@ -204,9 +204,11 @@ func TestSQLiteIncremental_OnlyChangedRowsWritten(t *testing.T) {
 
 	// Bump updated_at is not observable; instead assert via the shadow diff directly:
 	// change ONE node, and confirm the diff targets exactly one node row.
-	base := shadowFromData(d)
+	base, berr := shadowFromData(d)
+	require.NoError(t, berr)
 	d.SetNodeStatus("n07", Failed) // one change
-	target := shadowFromData(d)
+	target, terr := shadowFromData(d)
+	require.NoError(t, terr)
 
 	changed := 0
 	for node, row := range target.nodes {

@@ -10,10 +10,21 @@ import (
 // and an optional free-text comment for the audit trail. It is JSON-round-trip-safe
 // (all bool/string — no int64 magnitude trap), but a durable round-trip decodes it
 // back as a generic value (see decodeApprovalDecision), never this typed struct.
+//
+// AUTHORIZATION SCOPE (AUD-069): Approver is HOST-ASSERTED and carried for audit only —
+// the engine does NOT authenticate it. Approval is orchestration, not an authorization
+// protocol; see AddApproval. A host that needs a trustworthy approver must authenticate
+// the decision itself before delivering it.
 type ApprovalDecision struct {
 	Approved bool   // true = approve (resume downstream); false = reject (fail fast)
-	Approver string // identity of the deciding party (persisted for audit)
+	Approver string // host-asserted identity of the deciding party (persisted for audit; NOT authenticated by the engine — AUD-069)
 	Comment  string // optional free-text rationale (persisted for audit)
+	// Nonce is the correlation nonce binding this decision to a specific approval
+	// park (AUD-025). It MUST equal ApprovalNonce(workflowID, node, definitionDigest)
+	// — recompute it via ApprovalNonce or (*Workflow).ApprovalNonce — or the engine
+	// treats the decision as not-for-this-park and leaves the node waiting. It is a
+	// freshness/correlation token, not a secret; see approval_nonce.go for the ceiling.
+	Nonce string
 }
 
 // ApprovalRejectedError is returned by an approval node when the delivered decision
@@ -81,6 +92,9 @@ func (a *approvalAction) Execute(ctx context.Context, data *WorkflowData) error 
 	if err != nil {
 		return err
 	}
+	// AUD-025: the correlation nonce this park expects. A delivered decision must
+	// carry it or it is not this park's decision. Computed once (stable for the drive).
+	expectedNonce := expectedApprovalNonce(data, a.nodeName)
 	for _, sig := range sigs {
 		if sig.Name != a.signalName {
 			continue
@@ -88,6 +102,14 @@ func (a *approvalAction) Execute(ctx context.Context, data *WorkflowData) error 
 		decision, derr := decodeApprovalDecision(sig.Payload)
 		if derr != nil {
 			return derr
+		}
+		// AUD-025: a decision not correlated to THIS park (wrong or absent nonce) is
+		// INERT — skip it and keep scanning; if none is correctly correlated the node
+		// stays parked (ErrSuspended below). It is neither consumed nor acked, so a
+		// stale/stray Approved=true payload cannot approve and a stale reject cannot
+		// fail the node — the node simply waits for the correctly-correlated decision.
+		if decision.Nonce != expectedNonce {
+			continue
 		}
 		if !decision.Approved {
 			// A reject fails the node (non-ErrSuspended → Failed → *ExecutionError). The
@@ -115,17 +137,21 @@ func (a *approvalAction) Execute(ctx context.Context, data *WorkflowData) error 
 
 // ApproveSignal constructs the decision Signal a host delivers to APPROVE the approval
 // node named node. sigID is the host-supplied dedupe key (re-delivering the same ID is
-// idempotent — one mailbox entry). The signal Name is the node name, matching
-// AddApproval's 1:1 derivation, so the two can never drift.
-func ApproveSignal(node, approver, comment, sigID string) Signal {
-	return Signal{ID: sigID, Name: node, Payload: ApprovalDecision{Approved: true, Approver: approver, Comment: comment}}
+// idempotent — one mailbox entry). nonce is the correlation nonce for this park
+// (AUD-025), obtained from (*Workflow).ApprovalNonce(node) or ApprovalNonce(...): the
+// engine consumes the decision only if it matches, so a stale or mis-correlated
+// approval is inert. The signal Name is the node name, matching AddApproval's 1:1
+// derivation, so the two can never drift.
+func ApproveSignal(node, approver, comment, sigID, nonce string) Signal {
+	return Signal{ID: sigID, Name: node, Payload: ApprovalDecision{Approved: true, Approver: approver, Comment: comment, Nonce: nonce}}
 }
 
 // RejectSignal constructs the decision Signal a host delivers to REJECT the approval
 // node named node (→ fail-fast *ApprovalRejectedError). sigID is the host-supplied
-// dedupe key; Name is the node name (see ApproveSignal).
-func RejectSignal(node, approver, comment, sigID string) Signal {
-	return Signal{ID: sigID, Name: node, Payload: ApprovalDecision{Approved: false, Approver: approver, Comment: comment}}
+// dedupe key; nonce is the correlation nonce for this park (see ApproveSignal —
+// a stale reject is likewise inert); Name is the node name.
+func RejectSignal(node, approver, comment, sigID, nonce string) Signal {
+	return Signal{ID: sigID, Name: node, Payload: ApprovalDecision{Approved: false, Approver: approver, Comment: comment, Nonce: nonce}}
 }
 
 // decodeApprovalDecision decodes a delivered-or-persisted approval payload into an
@@ -202,6 +228,13 @@ func decodeApprovalDecisionMap(p map[string]any) (ApprovalDecision, error) {
 			return ApprovalDecision{}, fmt.Errorf("%w: approval decision Comment is not a string (%T)", ErrValidation, v)
 		}
 		d.Comment = s
+	}
+	if v, ok := p["Nonce"]; ok {
+		s, sok := v.(string)
+		if !sok {
+			return ApprovalDecision{}, fmt.Errorf("%w: approval decision Nonce is not a string (%T)", ErrValidation, v)
+		}
+		d.Nonce = s
 	}
 	return d, nil
 }

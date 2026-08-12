@@ -9,6 +9,26 @@ server**, preserving **one-writer-per-workflow** and the **static-DAG** moat, **
 `Execute` / `dag.go` / `parallel_execution.go` behavior is byte-unchanged (the only executor change is an
 additive `withMaxConcurrency` set-site at `dag.go` that non-fan-out nodes never read). Target v0.20.0-alpha.
 
+**Addendum — the "expands once" claim, stated precisely (M23, 2026-08-06; finding `F-M22-CLOSE-01`).**
+The decision text below is **unchanged and re-ratified**; this addendum narrows how its summary label
+should be read. The title and the §Decision step-2 heading both say *"expands once"*, and a reader who
+takes that from the header alone will take it one notch too wide. The precise form:
+
+> The expander's **RESULT** (`{N + per-item keys}`) is journaled **exactly once**, and once journaled it
+> is never recomputed — every resume decodes the journal instead. The expander's **EXECUTION** is
+> **at-least-once**: a crash in the window between "the expander returned" and "the journal flushed
+> durably" leaves no journal, so the next drive runs it again. §Decision step 2 names that window itself
+> ("a crash between *expander returned* and *branch 1* would lose N"), so the body was always accurate —
+> **it is the skimmable label that overclaims, not the design.**
+
+**Consequence for a consumer: keep the expander side-effect-free or idempotent.** It may run more than
+once; only its result is single-valued. This is the same *at-least-once EXECUTION + exactly-once
+PERSISTENCE* contract the branches carry (`F-PG-13`) — it applies to the expander too. The full statement
+lives in [the fan-out guide](../../guides/fanout.md#crash-resume--expansion-once).
+
+`docs/guides/fanout.md` and `docs/reference/api-reference.md` had restated the label as a guarantee about
+execution and were corrected; this record is retained as-written for history, per the ADR convention.
+
 ## Context
 
 The platform program needs `map`-over-runtime-N before 1.0: fan out N branches where N is only known once
@@ -64,10 +84,13 @@ still EXISTS in the DAG (persisted ⊆ DAG); it does **not** require every DAG n
 So expansion carried as journaled **data** that the node fans over satisfies the resume identity check — it
 does **not** breach the static-DAG invariant. That is the insight that makes Option A moat-safe.
 
-- **A — In-workflow journal expansion (chosen).** Expander runs once → `{N + items}` journaled as durable
-  DATA → the one node drives N inline branches in its own bounded pool → fan-in reads N results in
-  discovery order. Recovery reads the journal, re-runs no user code. **Keeps all six moat legs, runs on any
-  `Checkpointer` (InMemory/JSON/SQLite), `dag.go`/`Execute` 0-diff.**
+- **A — In-workflow journal expansion (chosen).** The expander's result (`{N + items}`) is journaled as
+  durable DATA **exactly-once-persisted** → the one node drives N inline branches in its own bounded pool →
+  fan-in reads N results in discovery order. Once the journal exists, recovery reads it and re-runs no user
+  code. (The expander's *execution* is at-least-once, not exactly-once: a crash in the expander→flush window
+  leaves no journal, so resume re-runs the expander — keep it side-effect-free/idempotent, F-PG-13. Only the
+  journaled result is exactly-once.) **Keeps all six moat legs, runs on any `Checkpointer`
+  (InMemory/JSON/SQLite), `dag.go`/`Execute` 0-diff.**
 - **B — Child-run-per-item over the M17 queue + M19 composition (deferred to M22).** True cross-process
   N-parallelism, but (1) forces the MP-SQLite store (loses InMemory/JSON for fan-out) and (2) the await-K
   join is genuinely net-new (every await today is hardwired to exactly ONE child). Justified only if true

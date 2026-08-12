@@ -82,14 +82,14 @@ func TestSubWorkflowCompensationBoundary(t *testing.T) {
 	pb := NewWorkflowBuilder().WithWorkflowID("comp-parent")
 	pb.AddStartNode("step").
 		WithAction(ActionFunc(func(_ context.Context, d *WorkflowData) error { d.Set("step", "ok"); return nil })).
-		WithCompensation(func(context.Context, *WorkflowData) error { compensatedFlag = true; return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { compensatedFlag = true; return nil })
 	pb.AddSubWorkflow("sub", childDAG).DependsOn("step")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
 
-	pw := NewWorkflow(store)
+	pw := newWorkflowForTest(store)
 	pw.WorkflowID = "comp-parent"
-	pw.DAG = pdag
+	pw.dag = pdag
 	perr := pw.Execute(context.Background())
 	require.Error(t, perr, "the child failed → the parent node fails → the run fails and rolls back")
 
@@ -102,7 +102,7 @@ func TestSubWorkflowCompensationBoundary(t *testing.T) {
 
 	// (b) THE BOUNDARY: the child's journal nodes are NOT Compensated — the parent's compensation drive
 	// iterates the PARENT's DAG.Nodes only (saga_rollback.go), so it structurally cannot reach the child.
-	childID := subWorkflowChildID("comp-parent", "sub")
+	childID := SubWorkflowChildID("comp-parent", "sub")
 	childFinal, err := store.Load(childID)
 	require.NoError(t, err)
 	for node, st := range childFinal.GetAllNodeStatuses() {

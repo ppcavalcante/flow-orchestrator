@@ -39,11 +39,11 @@ func buildCauseSaga(t *testing.T, store WorkflowStore, id string, rec *compRecor
 	t.Helper()
 	b := NewWorkflowBuilder()
 	b.AddNode("a").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
 	b.AddNode("b").WithAction(benchNoopAction()).DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store}
 }
 
 // seedRollingBack persists a mid-rollback snapshot ACROSS the store boundary (the

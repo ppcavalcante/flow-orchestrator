@@ -24,13 +24,13 @@ func TestStatus_PendingIsInitial(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("pending-init")
 	// Two independent chains so the run halts on one but leaves the other's later
 	// node genuinely unreached (and unrelated to the failure).
-	b.AddStartNode("a").WithAction(failAction("boom")) // fail-fast halts at level 0
+	b.AddStartNode("a").WithActionFunc(failAction("boom")) // fail-fast halts at level 0
 	b.AddNode("downstream").DependsOn("a").
-		WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+		WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 	b.AddStartNode("root"). // independent root, runs at level 0
-				WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+				WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 	b.AddNode("leaf").DependsOn("root"). // independent, unreached after halt
-						WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+						WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 
 	dag, err := b.Build()
 	if err != nil {
@@ -59,9 +59,9 @@ func TestStatus_PendingIsInitial(t *testing.T) {
 func TestStatus_TransitiveSkipOnFailFast(t *testing.T) {
 	var bRan, cRan atomic.Bool
 	b := NewWorkflowBuilder().WithWorkflowID("transitive-skip")
-	b.AddStartNode("a").WithAction(failAction("boom"))
-	b.AddNode("b").DependsOn("a").WithAction(markAction(&bRan))
-	b.AddNode("c").DependsOn("b").WithAction(markAction(&cRan))
+	b.AddStartNode("a").WithActionFunc(failAction("boom"))
+	b.AddNode("b").DependsOn("a").WithActionFunc(markAction(&bRan))
+	b.AddNode("c").DependsOn("b").WithActionFunc(markAction(&cRan))
 
 	dag, err := b.Build()
 	if err != nil {
@@ -95,15 +95,15 @@ func TestStatus_TransitiveSkipOnFailFast(t *testing.T) {
 func TestStatus_IndependentUnreachedStaysPending(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("independent-pending")
 	// Failure chain: fail -> blocked
-	b.AddStartNode("fail").WithAction(failAction("boom"))
+	b.AddStartNode("fail").WithActionFunc(failAction("boom"))
 	b.AddNode("blocked").DependsOn("fail").
-		WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+		WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 	// Independent chain: root -> leaf, no relation to fail. root is at level 0
 	// and runs; leaf is at level 1 and is unreached after halt.
 	var rootRan atomic.Bool
-	b.AddStartNode("root").WithAction(markAction(&rootRan))
+	b.AddStartNode("root").WithActionFunc(markAction(&rootRan))
 	b.AddNode("leaf").DependsOn("root").
-		WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+		WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 
 	dag, err := b.Build()
 	if err != nil {
@@ -129,8 +129,8 @@ func TestStatus_IndependentUnreachedStaysPending(t *testing.T) {
 func TestStatus_CoeResolvedDepDoesNotSkip(t *testing.T) {
 	var depRan atomic.Bool
 	b := NewWorkflowBuilder().WithWorkflowID("coe-no-skip")
-	b.AddStartNode("soft").WithAction(failAction("boom")).WithContinueOnError()
-	b.AddNode("dependent").DependsOn("soft").WithAction(markAction(&depRan))
+	b.AddStartNode("soft").WithActionFunc(failAction("boom")).WithContinueOnError()
+	b.AddNode("dependent").DependsOn("soft").WithActionFunc(markAction(&depRan))
 
 	dag, err := b.Build()
 	if err != nil {
@@ -156,9 +156,9 @@ func TestStatus_CoeResolvedDepDoesNotSkip(t *testing.T) {
 // not appear in the chunk-2 ExecutionError aggregate.
 func TestStatus_SkippedNotInExecutionError(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("skip-not-fail")
-	b.AddStartNode("a").WithAction(failAction("boom"))
+	b.AddStartNode("a").WithActionFunc(failAction("boom"))
 	b.AddNode("b").DependsOn("a").
-		WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+		WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 
 	dag, err := b.Build()
 	if err != nil {

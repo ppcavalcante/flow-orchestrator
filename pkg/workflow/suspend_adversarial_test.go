@@ -70,7 +70,7 @@ func TestSuspend_Adversarial_MultiCycleConvergence(t *testing.T) {
 			gate := newParkGate()
 			counter := newExecCounter()
 			build := func() *DAG {
-				d := NewDAG(id)
+				d := newDAGForTest(id)
 				mustAddNode(t, d, countingNode("a", counter))
 				mustAddNode(t, d, completingSuspendNode("park", gate, counter))
 				mustAddNode(t, d, countingNode("c", counter))
@@ -81,7 +81,7 @@ func TestSuspend_Adversarial_MultiCycleConvergence(t *testing.T) {
 
 			// N re-entries while the gate stays parked: each must re-park.
 			for i := 0; i < cycles; i++ {
-				w := &Workflow{DAG: build(), WorkflowID: id, Store: sc.store}
+				w := &Workflow{dag: build(), WorkflowID: id, Store: sc.store}
 				err := w.Execute(context.Background())
 				require.ErrorIsf(t, err, ErrSuspended, "cycle %d must re-park", i)
 
@@ -105,7 +105,7 @@ func TestSuspend_Adversarial_MultiCycleConvergence(t *testing.T) {
 
 			// The event arrives; the re-entry converges.
 			gate.wake()
-			w := &Workflow{DAG: build(), WorkflowID: id, Store: sc.store}
+			w := &Workflow{dag: build(), WorkflowID: id, Store: sc.store}
 			require.NoError(t, w.Execute(context.Background()), "re-entry after wake converges")
 
 			final, lerr := sc.store.Load(id)
@@ -133,7 +133,7 @@ func TestSuspend_Adversarial_SequentialParksAcrossLevels(t *testing.T) {
 	counter := newExecCounter()
 
 	build := func() *DAG {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		mustAddNode(t, d, completingSuspendNode("pA", gateA, counter))
 		mustAddNode(t, d, completingSuspendNode("pB", gateB, counter))
 		mustAddDep(t, d, "pA", "pB")
@@ -141,7 +141,7 @@ func TestSuspend_Adversarial_SequentialParksAcrossLevels(t *testing.T) {
 	}
 
 	// Run 1: pA parks at level 0; pB is never reached.
-	w1 := &Workflow{DAG: build(), WorkflowID: id, Store: store}
+	w1 := &Workflow{dag: build(), WorkflowID: id, Store: store}
 	require.ErrorIs(t, w1.Execute(context.Background()), ErrSuspended)
 	p1, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, p1, "pA", Waiting)
@@ -149,7 +149,7 @@ func TestSuspend_Adversarial_SequentialParksAcrossLevels(t *testing.T) {
 
 	// Wake only pA. Run 2: pA completes, pB now parks at level 1.
 	gateA.wake()
-	w2 := &Workflow{DAG: build(), WorkflowID: id, Store: store}
+	w2 := &Workflow{dag: build(), WorkflowID: id, Store: store}
 	require.ErrorIs(t, w2.Execute(context.Background()), ErrSuspended)
 	p2, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, p2, "pA", Completed)
@@ -159,7 +159,7 @@ func TestSuspend_Adversarial_SequentialParksAcrossLevels(t *testing.T) {
 
 	// Wake pB. Run 3: converge; pA must NOT re-run.
 	gateB.wake()
-	w3 := &Workflow{DAG: build(), WorkflowID: id, Store: store}
+	w3 := &Workflow{dag: build(), WorkflowID: id, Store: store}
 	require.NoError(t, w3.Execute(context.Background()))
 	p3, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, p3, "pA", Completed)
@@ -189,8 +189,8 @@ func TestSuspend_Adversarial_Int64DataSurvivesParkResume(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) {
 			gate := newParkGate()
 			build := func() *DAG {
-				d := NewDAG(id)
-				writer := NewNode("writer", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+				d := newDAGForTest(id)
+				writer := newNode("writer", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 					for k, v := range killers {
 						data.Set(k, v)
 					}
@@ -202,7 +202,7 @@ func TestSuspend_Adversarial_Int64DataSurvivesParkResume(t *testing.T) {
 				return d
 			}
 
-			w1 := &Workflow{DAG: build(), WorkflowID: id, Store: sc.store}
+			w1 := &Workflow{dag: build(), WorkflowID: id, Store: sc.store}
 			require.ErrorIs(t, w1.Execute(context.Background()), ErrSuspended)
 
 			assertInt64s := func(stage string, data *WorkflowData) {
@@ -220,7 +220,7 @@ func TestSuspend_Adversarial_Int64DataSurvivesParkResume(t *testing.T) {
 			assertInt64s("parked", parked)
 
 			gate.wake()
-			w2 := &Workflow{DAG: build(), WorkflowID: id, Store: sc.store}
+			w2 := &Workflow{dag: build(), WorkflowID: id, Store: sc.store}
 			require.NoError(t, w2.Execute(context.Background()))
 			final, lerr := sc.store.Load(id)
 			require.NoError(t, lerr)
@@ -240,10 +240,10 @@ func TestSuspend_Adversarial_CompositeHidingSuspendDoesNotPark(t *testing.T) {
 	t.Run("node.Execute fails loudly", func(t *testing.T) {
 		gate := newParkGate()
 		composite := NewCompositeAction(&suspendingAction{gate: gate})
-		node := NewNode("composite", composite)
+		node := newNode("composite", composite)
 		data := NewWorkflowData("wf")
 
-		err := node.Execute(context.Background(), data)
+		err := node.execute(context.Background(), data)
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, ErrSuspended),
 			"a park hidden inside a CompositeAction must not escape as the suspend sentinel")
@@ -255,10 +255,10 @@ func TestSuspend_Adversarial_CompositeHidingSuspendDoesNotPark(t *testing.T) {
 		store := NewInMemoryStore()
 		const id = "composite-wf"
 		gate := newParkGate()
-		d := NewDAG(id)
-		mustAddNode(t, d, NewNode("composite", NewCompositeAction(&suspendingAction{gate: gate})))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newNode("composite", NewCompositeAction(&suspendingAction{gate: gate})))
 
-		w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+		w := &Workflow{dag: d, WorkflowID: id, Store: store}
 		err := w.Execute(context.Background())
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, ErrSuspended), "a hidden park must not suspend the run")
@@ -287,9 +287,9 @@ func TestSuspend_Adversarial_MiddlewareWrappedSuspendDoesNotPark(t *testing.T) {
 	_, stillMarked := wrapped.(suspendableAction)
 	require.False(t, stillMarked, "middleware must hide the suspendableAction marker")
 
-	node := NewNode("mw", wrapped)
+	node := newNode("mw", wrapped)
 	data := NewWorkflowData("wf")
-	err := node.Execute(context.Background(), data)
+	err := node.execute(context.Background(), data)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrSuspended),
 		"a middleware-wrapped suspend action must not park (marker hidden)")
@@ -315,10 +315,10 @@ func TestSuspend_Adversarial_NonCheckpointerViaWorkflowExecute(t *testing.T) {
 
 	const id = "nocp-wf"
 	gate := newParkGate()
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: st}
+	w := &Workflow{dag: d, WorkflowID: id, Store: st}
 	err := w.Execute(context.Background())
 
 	require.ErrorIs(t, err, ErrSuspendRequiresCheckpointer,
@@ -347,25 +347,25 @@ func TestSuspend_Adversarial_GraphIdentityRejectsRenamedParkNode(t *testing.T) {
 	counter := newExecCounter()
 
 	build1 := func() *DAG {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		mustAddNode(t, d, countingNode("a", counter))
 		mustAddNode(t, d, completingSuspendNode("park", gate, counter))
 		mustAddDep(t, d, "a", "park")
 		return d
 	}
-	w1 := &Workflow{DAG: build1(), WorkflowID: id, Store: store}
+	w1 := &Workflow{dag: build1(), WorkflowID: id, Store: store}
 	require.ErrorIs(t, w1.Execute(context.Background()), ErrSuspended)
 	p1, _ := store.Load(id) //nolint:errcheck // test asserts on the loaded value below; a Load error would fail those assertions
 	assertStatus(t, p1, "park", Waiting)
 
 	// Resume against a graph where "park" was renamed to "park2".
-	d2 := NewDAG(id)
+	d2 := newDAGForTest(id)
 	mustAddNode(t, d2, countingNode("a", counter))
 	mustAddNode(t, d2, completingSuspendNode("park2", gate, counter))
 	mustAddDep(t, d2, "a", "park2")
 
 	gate.wake() // even with the event fired, the resume must be rejected on identity
-	w2 := &Workflow{DAG: d2, WorkflowID: id, Store: store}
+	w2 := &Workflow{dag: d2, WorkflowID: id, Store: store}
 	err := w2.Execute(context.Background())
 	require.Error(t, err, "resume against a renamed parked node must be rejected")
 	assert.ErrorIs(t, err, ErrValidation)
@@ -381,13 +381,13 @@ func TestSuspend_Adversarial_PreCancelledContextDoesNotPark(t *testing.T) {
 	store := NewInMemoryStore()
 	const id = "precancel"
 	gate := newParkGate()
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before Execute
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(ctx)
 
 	require.Error(t, err)
@@ -411,9 +411,9 @@ func TestSuspend_Adversarial_TimeoutDuringParkLevelClearsWaiting(t *testing.T) {
 	const id = "timeout-park"
 	gate := newParkGate()
 
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
-	mustAddNode(t, d, NewNode("slow", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
+	mustAddNode(t, d, newNode("slow", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
 		<-ctx.Done() // block until the run's deadline fires
 		return ctx.Err()
 	})))
@@ -421,7 +421,7 @@ func TestSuspend_Adversarial_TimeoutDuringParkLevelClearsWaiting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(ctx)
 
 	require.Error(t, err)

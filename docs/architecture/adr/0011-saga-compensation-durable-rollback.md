@@ -20,7 +20,7 @@ mid-undo leaves a half-rolled-back run with no way to resume the rollback), and 
 about partial failure (a compensation that itself fails is invisible).
 
 The design had to add real rollback while preserving the project moat — an **embeddable,
-no-server, no-DB, formally-verified** engine with **no determinism tax** — and, critically,
+no-server, no-DB, TLA+-model-checked** engine with **no determinism tax** — and, critically,
 had to make the rollback **itself durable**: a crash during compensation must resume and
 finish, not restart the forward run or strand the undo.
 

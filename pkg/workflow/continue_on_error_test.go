@@ -32,13 +32,13 @@ func TestContinueOnError_FailedNodeDoesNotFailWorkflow(t *testing.T) {
 
 	b := NewWorkflowBuilder().WithWorkflowID("coe")
 	b.AddStartNode("flaky").
-		WithAction(failAction("boom")).
+		WithActionFunc(failAction("boom")).
 		WithContinueOnError()
 	b.AddStartNode("sibling").
-		WithAction(markAction(&siblingRan))
+		WithActionFunc(markAction(&siblingRan))
 	b.AddNode("downstream").
 		DependsOn("flaky").
-		WithAction(func(_ context.Context, d *WorkflowData) error {
+		WithActionFunc(func(_ context.Context, d *WorkflowData) error {
 			dependentRan.Store(true)
 			if st, ok := d.GetNodeStatus("flaky"); ok && st == Failed {
 				dependentSawFailed.Store(true)
@@ -77,8 +77,8 @@ func TestContinueOnError_DistinctFromNormalFailedDep(t *testing.T) {
 	t.Run("continue-on-error dep -> dependent runs", func(t *testing.T) {
 		var dependentRan atomic.Bool
 		b := NewWorkflowBuilder().WithWorkflowID("coe-dep")
-		b.AddStartNode("up").WithAction(failAction("boom")).WithContinueOnError()
-		b.AddNode("down").DependsOn("up").WithAction(markAction(&dependentRan))
+		b.AddStartNode("up").WithActionFunc(failAction("boom")).WithContinueOnError()
+		b.AddNode("down").DependsOn("up").WithActionFunc(markAction(&dependentRan))
 
 		dag, err := b.Build()
 		if err != nil {
@@ -96,8 +96,8 @@ func TestContinueOnError_DistinctFromNormalFailedDep(t *testing.T) {
 	t.Run("normal dep -> dependent does NOT run", func(t *testing.T) {
 		var dependentRan atomic.Bool
 		b := NewWorkflowBuilder().WithWorkflowID("normal-dep")
-		b.AddStartNode("up").WithAction(failAction("boom")) // no WithContinueOnError
-		b.AddNode("down").DependsOn("up").WithAction(markAction(&dependentRan))
+		b.AddStartNode("up").WithActionFunc(failAction("boom")) // no WithContinueOnError
+		b.AddNode("down").DependsOn("up").WithActionFunc(markAction(&dependentRan))
 
 		dag, err := b.Build()
 		if err != nil {
@@ -121,8 +121,8 @@ func TestContinueOnError_DistinctFromNormalFailedDep(t *testing.T) {
 // must still halt the workflow (fail-fast wins): Execute errors.
 func TestContinueOnError_MixedLevelNormalFailureWins(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("mixed")
-	b.AddStartNode("soft").WithAction(failAction("soft-boom")).WithContinueOnError()
-	b.AddStartNode("hard").WithAction(failAction("hard-boom")) // normal -> fail-fast
+	b.AddStartNode("soft").WithActionFunc(failAction("soft-boom")).WithContinueOnError()
+	b.AddStartNode("hard").WithActionFunc(failAction("hard-boom")) // normal -> fail-fast
 
 	dag, err := b.Build()
 	if err != nil {
@@ -154,8 +154,8 @@ func TestContinueOnError_MixedLevelNormalFailureWins(t *testing.T) {
 func TestContinueOnError_DefaultUnchanged(t *testing.T) {
 	var downstreamRan atomic.Bool
 	b := NewWorkflowBuilder().WithWorkflowID("default")
-	b.AddStartNode("a").WithAction(failAction("boom"))
-	b.AddNode("b").DependsOn("a").WithAction(markAction(&downstreamRan))
+	b.AddStartNode("a").WithActionFunc(failAction("boom"))
+	b.AddNode("b").DependsOn("a").WithActionFunc(markAction(&downstreamRan))
 
 	dag, err := b.Build()
 	if err != nil {
@@ -179,11 +179,11 @@ func TestContinueOnError_ConcurrentFanoutRace(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("fanout")
 	for i := 0; i < n; i++ {
 		b.AddStartNode(fmt.Sprintf("f%d", i)).
-			WithAction(failAction("boom")).
+			WithActionFunc(failAction("boom")).
 			WithContinueOnError()
 	}
 	var okRan atomic.Bool
-	b.AddStartNode("ok").WithAction(markAction(&okRan))
+	b.AddStartNode("ok").WithActionFunc(markAction(&okRan))
 
 	dag, err := b.Build()
 	if err != nil {

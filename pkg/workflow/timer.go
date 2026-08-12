@@ -69,6 +69,10 @@ func (a *timerAction) suspendable() {}
 // read through the injected Clock (clockFrom(ctx)); it NEVER calls time.Now()
 // directly — the no-determinism-tax discipline (D36-07) the analyzer-spec and the
 // determinism property enforce.
+// engineTrusted marks timerAction as engine machinery: it arms/disarms the durable
+// wait (SetWait/ClearWait), so it runs against unsealed data (M24 DEC-M24-MEDIATION).
+func (a *timerAction) engineTrusted() {}
+
 func (a *timerAction) Execute(ctx context.Context, data *WorkflowData) error {
 	clock := clockFrom(ctx)
 
@@ -115,7 +119,7 @@ func (a *timerAction) Execute(ctx context.Context, data *WorkflowData) error {
 	return ErrSuspended
 }
 
-// NewTimerNode builds a declared TimerNode: a node that, when reached, sleeps
+// newTimerNode builds a declared TimerNode: a node that, when reached, sleeps
 // until an absolute due-time (clock.Now()+d, frozen at the first encounter) that
 // survives crash/suspend and re-arms from the persisted fireAt on load. It parks
 // the run (Waiting) via the chunk-1 suspend seam; on resume or a host Tick where
@@ -123,8 +127,8 @@ func (a *timerAction) Execute(ctx context.Context, data *WorkflowData) error {
 // converges. See timerAction for the full semantics. The action is set DIRECTLY
 // (not via the middleware stack) so the suspension marker is visible to
 // node.Execute (middleware wrapping would hide it — chunk-1 forward constraint).
-func NewTimerNode(name string, d time.Duration) *Node {
-	return NewNode(name, &timerAction{nodeName: name, duration: d})
+func newTimerNode(name string, d time.Duration) *Node {
+	return newNode(name, &timerAction{nodeName: name, duration: d})
 }
 
 // DueTimers returns the names of this workflow's armed timers whose persisted
@@ -133,6 +137,18 @@ func NewTimerNode(name string, d time.Duration) *Node {
 // re-enter), the query a host loop uses to decide whether to call Tick. A
 // workflow with no persisted state (never run, or no Store) yields no due timers.
 func (w *Workflow) DueTimers(now time.Time) ([]string, error) {
+	// The SECOND of the two graph-deref sites (the other is executeLocked). This one is
+	// easy to miss: DueTimers reads no graph field itself, but runHasHardFailure below
+	// calls w.dag.GetNode, and only for a Failed node — so a nil graph is invisible here
+	// until a run happens to hold a hard failure, which is why the plain parked probe
+	// came back clean and the parked-plus-Failed one panicked.
+	//
+	// Ahead of the Store check on purpose: with both nil the old code returned
+	// (nil, nil), i.e. "no timers are due" for a workflow that cannot answer the
+	// question — the vacuous-success shape this phase exists to remove.
+	if err := w.checkGraph(); err != nil {
+		return nil, err
+	}
 	if w.Store == nil {
 		return nil, nil
 	}
@@ -191,14 +207,16 @@ func (w *Workflow) DueTimers(now time.Time) ([]string, error) {
 // (non-continue-on-error) Failed node — i.e. the run failed and is not a
 // resumable suspend. Used by the F2 boundary in DueTimers to refuse to
 // timer-wake a terminally-failed run. The continue-on-error flag lives on the
-// DAG node (not the snapshot), so it is read from w.DAG; ForEachNodeStatus holds
+// DAG node (not the snapshot), so it is read from w.dag; ForEachNodeStatus holds
 // only the WorkflowData read lock and GetNode touches a different structure, so
 // there is no lock nesting.
 func (w *Workflow) runHasHardFailure(data *WorkflowData) bool {
 	hard := false
-	data.ForEachNodeStatus(func(name string, st NodeStatus) {
+	// Trusted internal read-only scan (GetNode touches the DAG, not this WorkflowData) —
+	// use the non-allocating locked iterator.
+	data.forEachNodeStatusLocked(func(name string, st NodeStatus) {
 		if st == Failed {
-			if node, ok := w.DAG.GetNode(name); ok && !node.ContinueOnError {
+			if node, ok := w.dag.GetNode(name); ok && !node.continueOnError {
 				hard = true
 			}
 		}

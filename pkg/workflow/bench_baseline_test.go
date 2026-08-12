@@ -22,24 +22,24 @@ func benchNoopAction() Action {
 // compares ±2% against the committed number here).
 func benchDiamondDAG(tb testing.TB) *DAG {
 	tb.Helper()
-	d := NewDAG("bench-diamond")
-	if err := d.AddNode(NewNode("root", benchNoopAction())); err != nil {
+	d := newDAGForTest("bench-diamond")
+	if err := d.addNode(newNode("root", benchNoopAction())); err != nil {
 		tb.Fatalf("AddNode(root): %v", err)
 	}
 	mids := []string{"a", "b", "c", "d"}
 	for _, n := range mids {
-		if err := d.AddNode(NewNode(n, benchNoopAction())); err != nil {
+		if err := d.addNode(newNode(n, benchNoopAction())); err != nil {
 			tb.Fatalf("AddNode(%s): %v", n, err)
 		}
-		if err := d.AddDependency("root", n); err != nil {
+		if err := d.addDependency("root", n); err != nil {
 			tb.Fatalf("AddDependency(root->%s): %v", n, err)
 		}
 	}
-	if err := d.AddNode(NewNode("sink", benchNoopAction())); err != nil {
+	if err := d.addNode(newNode("sink", benchNoopAction())); err != nil {
 		tb.Fatalf("AddNode(sink): %v", err)
 	}
 	for _, n := range mids {
-		if err := d.AddDependency(n, "sink"); err != nil {
+		if err := d.addDependency(n, "sink"); err != nil {
 			tb.Fatalf("AddDependency(%s->sink): %v", n, err)
 		}
 	}

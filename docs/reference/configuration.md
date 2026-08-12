@@ -10,6 +10,12 @@ This document provides a reference for the configuration options available in Fl
 ```go
 type ExecutionConfig struct {
     MaxConcurrency int // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency)
+
+    // TracerProvider is the OpenTelemetry trace provider used to emit a span per
+    // executed node (and a parent span per run). Zero value (nil) disables tracing;
+    // the hot path stays byte-identical to an untraced run. API-only — the host owns
+    // the SDK/exporter; the library never imports the OTel SDK.
+    TracerProvider trace.TracerProvider
 }
 
 // DefaultMaxConcurrency is the bounded default used when MaxConcurrency is unset/non-positive.
@@ -119,9 +125,14 @@ config := metrics.NewConfig().
     WithSlowOperationThreshold(100 * time.Millisecond).
     WithHighContentionThreshold(10)
 
-// Apply to default collector
-config.Apply()
+// Attach it to the run. There is NO `config.Apply()` and no default/global collector to
+// apply to — metrics are opted in per workflow by setting the field before Execute:
+wf.MetricsConfig = config
 ```
+
+> `*metrics.Config` exposes the seven `With*` chainers above plus `GetInternalConfig()`.
+> A nil `MetricsConfig` (the default) keeps the frozen disabled collector — that is what
+> makes the metrics path zero-cost when unused.
 
 ### Exporting to OpenTelemetry
 
@@ -192,7 +203,8 @@ type WorkflowStore interface {
 }
 ```
 
-All three built-in stores additionally implement the optional `Checkpointer`
+All **four** built-in stores — `InMemoryStore`, `JSONFileStore`, `FlatBuffersStore`
+and `SQLiteStore` — additionally implement the optional `Checkpointer`
 interface, so they enable durable crash-resume out of the box (checkpoint at each
 completed level barrier; non-completed nodes re-run on resume). See the
 [Persistence guide → Durability & Idempotency](../guides/persistence.md#durability--idempotency-crash-resume).

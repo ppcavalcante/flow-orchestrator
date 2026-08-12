@@ -79,100 +79,87 @@ func (s *testStore) ListWorkflows() ([]string, error) {
 	return []string{"workflow1", "workflow2", "workflow3"}, nil
 }
 
+// M23 SEAL-06: the three topology helpers below assemble their graphs through the
+// SANCTIONED builder API. They previously used workflow.NewDAG + NewNode + AddNode +
+// AddDependency, all of which T6 unexported — this package is `package benchmark`,
+// i.e. OUT of package workflow, so the census's "nearly every test file is in-package, so
+// unexporting is a rename" mitigation never covered it (F-117-ARCH-03).
+//
+// EDGE DIRECTION IS INVERTED, DELIBERATELY, AND IT IS THE ONLY PLACE A SILENT ERROR
+// COULD HIDE HERE. dag.AddDependency(from, to) means "to depends on from" — it is
+// written parent-first. The builder is written child-first: AddNode(child).DependsOn(
+// parent). Every loop below therefore enumerates each node's PARENTS where the old
+// code enumerated each node's CHILDREN. A transcription that kept the old direction
+// would still build a valid DAG of the same node count and would still execute
+// cleanly; it would simply be the reverse topology, and no benchmark asserts shape.
+// TestBenchTopologies_ShapeIsPreserved pins level-by-level shape for exactly that
+// reason.
+//
+// These now run build(), i.e. full Validate + validateReconvergence. Callers must
+// construct OUTSIDE the timed region — see the note on BenchmarkFocusedArena.
+
 // createLinearDAG creates a linear DAG with the specified number of nodes
 // nolint:unused
 func createLinearDAG(size int) *workflow.DAG {
-	dag := workflow.NewDAG("linear")
-
-	// Create nodes
+	b := workflow.NewWorkflowBuilder().WithWorkflowID("linear")
 	for i := 0; i < size; i++ {
-		node := workflow.NewNode(fmt.Sprintf("node%d", i), CreateNoOpAction())
-		if err := dag.AddNode(node); err != nil {
-			panic(fmt.Sprintf("Failed to add node: %v", err))
+		nb := b.AddNode(fmt.Sprintf("node%d", i)).WithAction(CreateNoOpAction())
+		if i > 0 {
+			nb.DependsOn(fmt.Sprintf("node%d", i-1))
 		}
 	}
-
-	// Add dependencies to create a linear chain
-	for i := 0; i < size-1; i++ {
-		if err := dag.AddDependency(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i+1)); err != nil {
-			panic(fmt.Sprintf("Failed to add dependency: %v", err))
-		}
-	}
-
-	return dag
+	return mustBuild(b)
 }
 
 // createDiamondDAG creates a diamond-shaped DAG with the specified number of nodes
 // nolint:unused
 func createDiamondDAG(size int) *workflow.DAG {
-	dag := workflow.NewDAG("diamond")
-
-	// Calculate sizes for each level to distribute nodes
-	firstLevelSize := 1
+	// The original shape: node0 is the source, nodes 1..middle are the fan-out band,
+	// and node(1+middle) is the sink that fans back in.
+	const firstLevelSize = 1
 	middleLevelSize := size - 2
 
-	// Create nodes
+	b := workflow.NewWorkflowBuilder().WithWorkflowID("diamond")
 	for i := 0; i < size; i++ {
-		node := workflow.NewNode(fmt.Sprintf("node%d", i), CreateNoOpAction())
-		if err := dag.AddNode(node); err != nil {
-			panic(fmt.Sprintf("Failed to add node: %v", err))
+		name := fmt.Sprintf("node%d", i)
+		nb := b.AddNode(name).WithAction(CreateNoOpAction())
+		switch {
+		case i == 0:
+			// the source
+		case i < firstLevelSize+middleLevelSize:
+			nb.DependsOn("node0")
+		case i == firstLevelSize+middleLevelSize:
+			for j := 0; j < middleLevelSize; j++ {
+				nb.DependsOn(fmt.Sprintf("node%d", firstLevelSize+j))
+			}
 		}
 	}
-
-	// Connect first level to middle level (fan out)
-	for j := 0; j < middleLevelSize; j++ {
-		if err := dag.AddDependency(
-			fmt.Sprintf("node%d", 0),
-			fmt.Sprintf("node%d", firstLevelSize+j),
-		); err != nil {
-			panic(fmt.Sprintf("Failed to add dependency: %v", err))
-		}
-	}
-
-	// Connect middle level to last level (fan in)
-	for i := 0; i < middleLevelSize; i++ {
-		if err := dag.AddDependency(
-			fmt.Sprintf("node%d", firstLevelSize+i),
-			fmt.Sprintf("node%d", firstLevelSize+middleLevelSize),
-		); err != nil {
-			panic(fmt.Sprintf("Failed to add dependency: %v", err))
-		}
-	}
-
-	return dag
+	return mustBuild(b)
 }
 
 // createBinaryTreeDAG creates a binary tree DAG with the specified number of nodes
 // nolint:unused
 func createBinaryTreeDAG(size int) *workflow.DAG {
-	dag := workflow.NewDAG("binary-tree")
-
-	// Create nodes
+	// Child-first restatement of "node i has children 2i+1 and 2i+2": node j depends
+	// on its parent (j-1)/2, for every j > 0.
+	b := workflow.NewWorkflowBuilder().WithWorkflowID("binary-tree")
 	for i := 0; i < size; i++ {
-		node := workflow.NewNode(fmt.Sprintf("node%d", i), CreateNoOpAction())
-		if err := dag.AddNode(node); err != nil {
-			panic(fmt.Sprintf("Failed to add node: %v", err))
+		nb := b.AddNode(fmt.Sprintf("node%d", i)).WithAction(CreateNoOpAction())
+		if i > 0 {
+			nb.DependsOn(fmt.Sprintf("node%d", (i-1)/2))
 		}
 	}
+	return mustBuild(b)
+}
 
-	// Add dependencies to form a binary tree
-	// Each node i has children 2i+1 and 2i+2 (if they exist)
-	for i := 0; i < size; i++ {
-		leftChild := 2*i + 1
-		if leftChild < size {
-			if err := dag.AddDependency(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", leftChild)); err != nil {
-				panic(fmt.Sprintf("Failed to add dependency: %v", err))
-			}
-		}
-
-		rightChild := 2*i + 2
-		if rightChild < size {
-			if err := dag.AddDependency(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", rightChild)); err != nil {
-				panic(fmt.Sprintf("Failed to add dependency: %v", err))
-			}
-		}
+// mustBuild panics on a build error, matching what the AddNode/AddDependency loops
+// these helpers replaced already did.
+// nolint:unused
+func mustBuild(b *workflow.WorkflowBuilder) *workflow.DAG {
+	dag, err := b.Build()
+	if err != nil {
+		panic(fmt.Sprintf("failed to build benchmark DAG: %v", err))
 	}
-
 	return dag
 }
 

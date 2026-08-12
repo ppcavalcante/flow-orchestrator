@@ -32,10 +32,8 @@ func (t *TestAction) Execute(ctx context.Context, data *WorkflowData) error {
 
 	// Check if this action should fail
 	if t.ShouldFail {
-		// Record this node as failed
-		data.SetNodeStatus(t.Name, Failed)
-
-		// Return an error
+		// The executor stamps Failed from the returned error (M24: an action may not set
+		// its own status through the sealed view — the previous SetNodeStatus was redundant).
 		if t.Err != nil {
 			return t.Err
 		}
@@ -53,9 +51,13 @@ func (t *TestAction) Execute(ctx context.Context, data *WorkflowData) error {
 		t.DataModifier(data)
 	}
 
-	// Set output and completed status
-	data.SetOutput(t.Name, t.Output)
-	data.SetNodeStatus(t.Name, Completed)
+	// Record this node's own output when a name was configured. Anonymous helpers
+	// (SuccessAction/FailingAction leave Name empty) just signal success. The executor
+	// stamps Completed from the nil return (M24: an action may not set its own status,
+	// and SetOutput is scoped to the running node — an empty/foreign name is refused).
+	if t.Name != "" {
+		data.SetOutput(t.Name, t.Output)
+	}
 
 	return nil
 }
@@ -86,7 +88,7 @@ func (b *TestDAGBuilder) WithWorkflowStore(store WorkflowStore) *TestDAGBuilder 
 // AddNode adds a new node to the test DAG
 func (b *TestDAGBuilder) AddNode(name string, action *TestAction) *TestDAGBuilder {
 	action.Name = name
-	node := NewNode(name, action)
+	node := newNode(name, action)
 	b.nodes[name] = node
 	b.nodeNames = append(b.nodeNames, name)
 	return b
@@ -103,7 +105,7 @@ func (b *TestDAGBuilder) AddDependency(from, to string) *TestDAGBuilder {
 		panic(fmt.Sprintf("node %s not found", to))
 	}
 
-	toNode.AddDependency(fromNode)
+	toNode.dependsOn = append(toNode.dependsOn, fromNode)
 
 	// Track the edge for visualization
 	if _, exists := b.edges[from]; !exists {
@@ -117,7 +119,7 @@ func (b *TestDAGBuilder) AddDependency(from, to string) *TestDAGBuilder {
 // Build creates the final DAG
 func (b *TestDAGBuilder) Build(t *testing.T) *DAG {
 	t.Helper()
-	dag := NewDAG("test-dag")
+	dag := newDAGForTest("test-dag")
 
 	// Add all nodes
 	for _, node := range b.nodes {
@@ -220,24 +222,24 @@ func (a *AssertDAGExecution) ExpectNodeOutput(nodeName string, expected string) 
 
 func TestDAGBasicOperations(t *testing.T) {
 	t.Run("NewDAG creates empty DAG", func(t *testing.T) {
-		dag := NewDAG("test-dag")
+		dag := newDAGForTest("test-dag")
 
-		if len(dag.Nodes) != 0 {
-			t.Errorf("Expected empty nodes map, got %d nodes", len(dag.Nodes))
+		if len(dag.nodes) != 0 {
+			t.Errorf("Expected empty nodes map, got %d nodes", len(dag.nodes))
 		}
 	})
 
 	t.Run("AddNode adds a node to the DAG", func(t *testing.T) {
-		dag := NewDAG("test-dag")
-		node := NewNode("test", SuccessAction("test-output"))
+		dag := newDAGForTest("test-dag")
+		node := newNode("test", SuccessAction("test-output"))
 
-		err := dag.AddNode(node)
+		err := dag.addNode(node)
 		if err != nil {
 			t.Errorf("Failed to add node: %v", err)
 		}
 
-		if len(dag.Nodes) != 1 {
-			t.Errorf("Expected 1 node, got %d nodes", len(dag.Nodes))
+		if len(dag.nodes) != 1 {
+			t.Errorf("Expected 1 node, got %d nodes", len(dag.nodes))
 		}
 
 		addedNode, exists := dag.GetNode("test")
@@ -251,10 +253,10 @@ func TestDAGBasicOperations(t *testing.T) {
 	})
 
 	t.Run("AddDependency creates a dependency between nodes", func(t *testing.T) {
-		dag := NewDAG("test-dag")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", SuccessAction("output_B"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-dag")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", SuccessAction("output_B"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -263,11 +265,11 @@ func TestDAGBasicOperations(t *testing.T) {
 		mustAddDep(t, dag, "A", "B")
 		mustAddDep(t, dag, "B", "C")
 		// Verify dependencies
-		if len(nodeB.DependsOn) != 1 || nodeB.DependsOn[0] != nodeA {
+		if len(nodeB.dependsOn) != 1 || nodeB.dependsOn[0] != nodeA {
 			t.Errorf("Node B should depend on node A")
 		}
 
-		if len(nodeC.DependsOn) != 1 || nodeC.DependsOn[0] != nodeB {
+		if len(nodeC.dependsOn) != 1 || nodeC.dependsOn[0] != nodeB {
 			t.Errorf("Node C should depend on node B")
 		}
 	})
@@ -283,8 +285,8 @@ func TestDAGBasicOperations(t *testing.T) {
 		if !exists {
 			t.Error("Expected node to exist")
 		}
-		if retrieved.Name != "test" {
-			t.Errorf("Expected node name 'test', got '%s'", retrieved.Name)
+		if retrieved.name != "test" {
+			t.Errorf("Expected node name 'test', got '%s'", retrieved.name)
 		}
 
 		// Try getting non-existent node
@@ -298,10 +300,10 @@ func TestDAGBasicOperations(t *testing.T) {
 func TestDAGDependencies(t *testing.T) {
 	t.Run("Basic dependency chain", func(t *testing.T) {
 		// Create a DAG with dependencies: A -> B -> C
-		dag := NewDAG("test-dag")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", SuccessAction("output_B"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-dag")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", SuccessAction("output_B"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -309,25 +311,25 @@ func TestDAGDependencies(t *testing.T) {
 		mustAddDep(t, dag, "A", "B")
 		mustAddDep(t, dag, "B", "C")
 		// Check dependency relationships
-		if len(nodeA.DependsOn) != 0 {
+		if len(nodeA.dependsOn) != 0 {
 			t.Error("Node A should not have dependencies")
 		}
 
-		if len(nodeB.DependsOn) != 1 || nodeB.DependsOn[0] != nodeA {
+		if len(nodeB.dependsOn) != 1 || nodeB.dependsOn[0] != nodeA {
 			t.Errorf("Node B should depend on node A")
 		}
 
-		if len(nodeC.DependsOn) != 1 || nodeC.DependsOn[0] != nodeB {
+		if len(nodeC.dependsOn) != 1 || nodeC.dependsOn[0] != nodeB {
 			t.Errorf("Node C should depend on node B")
 		}
 	})
 
 	t.Run("Multiple dependencies", func(t *testing.T) {
 		// Create a DAG with dependencies: A -> C, B -> C
-		dag := NewDAG("test-dag")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", SuccessAction("output_B"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-dag")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", SuccessAction("output_B"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -338,7 +340,7 @@ func TestDAGDependencies(t *testing.T) {
 		dependsOnA := false
 		dependsOnB := false
 
-		for _, dep := range nodeC.DependsOn {
+		for _, dep := range nodeC.dependsOn {
 			if dep == nodeA {
 				dependsOnA = true
 			}
@@ -356,10 +358,10 @@ func TestDAGDependencies(t *testing.T) {
 func TestDAGTopologicalSort(t *testing.T) {
 	t.Run("Simple sort", func(t *testing.T) {
 		// Create a DAG with dependencies: A -> B -> C
-		dag := NewDAG("test-dag")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", SuccessAction("output_B"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-dag")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", SuccessAction("output_B"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -375,15 +377,15 @@ func TestDAGTopologicalSort(t *testing.T) {
 			return
 		}
 
-		if len(levels[0]) != 1 || levels[0][0].Name != "A" {
+		if len(levels[0]) != 1 || levels[0][0].name != "A" {
 			t.Errorf("Expected level 0 to contain only node A")
 		}
 
-		if len(levels[1]) != 1 || levels[1][0].Name != "B" {
+		if len(levels[1]) != 1 || levels[1][0].name != "B" {
 			t.Errorf("Expected level 1 to contain only node B")
 		}
 
-		if len(levels[2]) != 1 || levels[2][0].Name != "C" {
+		if len(levels[2]) != 1 || levels[2][0].name != "C" {
 			t.Errorf("Expected level 2 to contain only node C")
 		}
 	})
@@ -392,10 +394,10 @@ func TestDAGTopologicalSort(t *testing.T) {
 func TestDAGCycleDetection(t *testing.T) {
 	t.Run("No cycle detection in valid DAG", func(t *testing.T) {
 		// Create a valid DAG without cycles
-		dag := NewDAG("test-dag")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", SuccessAction("output_B"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-dag")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", SuccessAction("output_B"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -411,10 +413,10 @@ func TestDAGCycleDetection(t *testing.T) {
 
 	t.Run("Cycle detection in invalid DAG", func(t *testing.T) {
 		// Create an invalid DAG with a cycle: A -> B -> C -> A
-		dag := NewDAG("test-dag")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", SuccessAction("output_B"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-dag")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", SuccessAction("output_B"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -433,16 +435,16 @@ func TestDAGCycleDetection(t *testing.T) {
 func TestDAGExecution(t *testing.T) {
 	t.Run("Basic execution flow", func(t *testing.T) {
 		// Create a DAG with dependencies: A -> B -> C
-		dag := NewDAG("test-workflow")
+		dag := newDAGForTest("test-workflow")
 
 		// Create test actions with correct node names
 		actionA := &TestAction{Name: "A", Output: "output_A"}
 		actionB := &TestAction{Name: "B", Output: "output_B"}
 		actionC := &TestAction{Name: "C", Output: "output_C"}
 
-		nodeA := NewNode("A", actionA)
-		nodeB := NewNode("B", actionB)
-		nodeC := NewNode("C", actionC)
+		nodeA := newNode("A", actionA)
+		nodeB := newNode("B", actionB)
+		nodeC := newNode("C", actionC)
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -472,10 +474,10 @@ func TestDAGExecution(t *testing.T) {
 	t.Run("Node execution failure", func(t *testing.T) {
 		// Create a DAG with a failing node: A -> B -> C
 		// where B fails
-		dag := NewDAG("test-workflow")
-		nodeA := NewNode("A", SuccessAction("output_A"))
-		nodeB := NewNode("B", FailingAction("node B failed"))
-		nodeC := NewNode("C", SuccessAction("output_C"))
+		dag := newDAGForTest("test-workflow")
+		nodeA := newNode("A", SuccessAction("output_A"))
+		nodeB := newNode("B", FailingAction("node B failed"))
+		nodeC := newNode("C", SuccessAction("output_C"))
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -508,23 +510,23 @@ func TestDAGExecution(t *testing.T) {
 		// runs; the level barrier lets A's level finish, then the ctx.Err()
 		// check at the top of DAG.Execute's level loop must stop before
 		// scheduling B (level 1) and C (level 2).
-		dag := NewDAG("cancel-workflow")
+		dag := newDAGForTest("cancel-workflow")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		var aRan, bRan, cRan atomic.Int32
 
-		nodeA := NewNode("A", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		nodeA := newNode("A", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			aRan.Add(1)
 			cancel() // request cancellation mid-run, after A but before B's level
 			return nil
 		}))
-		nodeB := NewNode("B", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		nodeB := newNode("B", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			bRan.Add(1)
 			return nil
 		}))
-		nodeC := NewNode("C", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		nodeC := newNode("C", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			cRan.Add(1)
 			return nil
 		}))
@@ -551,10 +553,10 @@ func TestDAGExecution(t *testing.T) {
 	t.Run("Already-cancelled context halts before any level", func(t *testing.T) {
 		// A context cancelled before Execute must stop at the first loop-top
 		// check — no level runs at all.
-		dag := NewDAG("precancelled-workflow")
+		dag := newDAGForTest("precancelled-workflow")
 
 		var ran atomic.Int32
-		node := NewNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		node := newNode("only", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 			ran.Add(1)
 			return nil
 		}))
@@ -574,26 +576,26 @@ func TestDAGExecution(t *testing.T) {
 
 func TestTopologicalSort(t *testing.T) {
 	t.Run("Empty DAG", func(t *testing.T) {
-		dag := NewDAG("empty")
+		dag := newDAGForTest("empty")
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
 		assert.Empty(t, sorted)
 	})
 
 	t.Run("Single Node", func(t *testing.T) {
-		dag := NewDAG("single")
-		node := NewNode("A", nil)
+		dag := newDAGForTest("single")
+		node := newNode("A", nil)
 		mustAddNode(t, dag, node)
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"A"}, getNodeNames(sorted[0]))
+		assert.Equal(t, []string{"A"}, getNodeNames(sorted))
 	})
 
 	t.Run("Linear DAG", func(t *testing.T) {
-		dag := NewDAG("linear")
-		nodeA := NewNode("A", nil)
-		nodeB := NewNode("B", nil)
-		nodeC := NewNode("C", nil)
+		dag := newDAGForTest("linear")
+		nodeA := newNode("A", nil)
+		nodeB := newNode("B", nil)
+		nodeC := newNode("C", nil)
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -603,15 +605,15 @@ func TestTopologicalSort(t *testing.T) {
 		mustAddDep(t, dag, "B", "C")
 		sorted, err := dag.TopologicalSort()
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"A", "B", "C"}, getNodeNames(sorted[0]))
+		assert.Equal(t, []string{"A", "B", "C"}, getNodeNames(sorted))
 	})
 
 	t.Run("Diamond DAG", func(t *testing.T) {
-		dag := NewDAG("diamond")
-		nodeA := NewNode("A", nil)
-		nodeB := NewNode("B", nil)
-		nodeC := NewNode("C", nil)
-		nodeD := NewNode("D", nil)
+		dag := newDAGForTest("diamond")
+		nodeA := newNode("A", nil)
+		nodeB := newNode("B", nil)
+		nodeC := newNode("C", nil)
+		nodeD := newNode("D", nil)
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -626,7 +628,7 @@ func TestTopologicalSort(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Check that A comes before B and C, and B and C come before D
-		sortedNames := getNodeNames(sorted[0])
+		sortedNames := getNodeNames(sorted)
 		aIndex := indexOf(sortedNames, "A")
 		bIndex := indexOf(sortedNames, "B")
 		cIndex := indexOf(sortedNames, "C")
@@ -639,12 +641,12 @@ func TestTopologicalSort(t *testing.T) {
 	})
 
 	t.Run("Complex DAG", func(t *testing.T) {
-		dag := NewDAG("complex")
+		dag := newDAGForTest("complex")
 		nodes := make(map[string]*Node)
 		nodeNames := []string{"A", "B", "C", "D", "E", "F"}
 
 		for _, name := range nodeNames {
-			nodes[name] = NewNode(name, nil)
+			nodes[name] = newNode(name, nil)
 			mustAddNode(t, dag, nodes[name])
 		}
 
@@ -663,7 +665,7 @@ func TestTopologicalSort(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify topological ordering
-		sortedNames := getNodeNames(sorted[0])
+		sortedNames := getNodeNames(sorted)
 		indices := make(map[string]int)
 		for i, name := range sortedNames {
 			indices[name] = i
@@ -680,10 +682,10 @@ func TestTopologicalSort(t *testing.T) {
 	})
 
 	t.Run("DAG with Cycle", func(t *testing.T) {
-		dag := NewDAG("cycle")
-		nodeA := NewNode("A", nil)
-		nodeB := NewNode("B", nil)
-		nodeC := NewNode("C", nil)
+		dag := newDAGForTest("cycle")
+		nodeA := newNode("A", nil)
+		nodeB := newNode("B", nil)
+		nodeC := newNode("C", nil)
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -702,7 +704,7 @@ func TestTopologicalSort(t *testing.T) {
 func getNodeNames(nodes []*Node) []string {
 	names := make([]string, len(nodes))
 	for i, node := range nodes {
-		names[i] = node.Name
+		names[i] = node.name
 	}
 	return names
 }
@@ -718,8 +720,8 @@ func indexOf(slice []string, item string) int {
 }
 
 func TestGetNode(t *testing.T) {
-	dag := NewDAG("test")
-	nodeA := NewNode("A", nil)
+	dag := newDAGForTest("test")
+	nodeA := newNode("A", nil)
 	mustAddNode(t, dag, nodeA)
 	t.Run("Existing Node", func(t *testing.T) {
 		node, exists := dag.GetNode("A")
@@ -736,14 +738,14 @@ func TestGetNode(t *testing.T) {
 
 func TestGetLevels(t *testing.T) {
 	t.Run("Empty DAG", func(t *testing.T) {
-		dag := NewDAG("empty")
+		dag := newDAGForTest("empty")
 		levels := dag.GetLevels()
 		assert.Empty(t, levels)
 	})
 
 	t.Run("Single Node", func(t *testing.T) {
-		dag := NewDAG("single")
-		nodeA := NewNode("A", nil)
+		dag := newDAGForTest("single")
+		nodeA := newNode("A", nil)
 		mustAddNode(t, dag, nodeA)
 		levels := dag.GetLevels()
 		require.Len(t, levels, 1)
@@ -751,10 +753,10 @@ func TestGetLevels(t *testing.T) {
 	})
 
 	t.Run("Linear DAG", func(t *testing.T) {
-		dag := NewDAG("linear")
-		nodeA := NewNode("A", nil)
-		nodeB := NewNode("B", nil)
-		nodeC := NewNode("C", nil)
+		dag := newDAGForTest("linear")
+		nodeA := newNode("A", nil)
+		nodeB := newNode("B", nil)
+		nodeC := newNode("C", nil)
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -770,11 +772,11 @@ func TestGetLevels(t *testing.T) {
 	})
 
 	t.Run("Diamond DAG", func(t *testing.T) {
-		dag := NewDAG("diamond")
-		nodeA := NewNode("A", nil)
-		nodeB := NewNode("B", nil)
-		nodeC := NewNode("C", nil)
-		nodeD := NewNode("D", nil)
+		dag := newDAGForTest("diamond")
+		nodeA := newNode("A", nil)
+		nodeB := newNode("B", nil)
+		nodeC := newNode("C", nil)
+		nodeD := newNode("D", nil)
 
 		mustAddNode(t, dag, nodeA)
 		mustAddNode(t, dag, nodeB)
@@ -793,12 +795,12 @@ func TestGetLevels(t *testing.T) {
 	})
 
 	t.Run("Complex DAG", func(t *testing.T) {
-		dag := NewDAG("complex")
+		dag := newDAGForTest("complex")
 		nodes := make(map[string]*Node)
 		nodeNames := []string{"A", "B", "C", "D", "E", "F"}
 
 		for _, name := range nodeNames {
-			nodes[name] = NewNode(name, nil)
+			nodes[name] = newNode(name, nil)
 			mustAddNode(t, dag, nodes[name])
 		}
 

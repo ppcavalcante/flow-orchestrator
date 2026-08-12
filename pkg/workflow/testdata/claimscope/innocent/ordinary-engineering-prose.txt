@@ -1,0 +1,5 @@
+# author: t8-seat
+# DERIVED: ordinary workflow prose using the banned words in their everyday senses. The concrete argument against inverting the trigger.
+The retry policy takes effect after the first failure. The store's fsync is
+verified by the crash suite, and every batch is mediated by the group-commit
+queue before it reaches disk.

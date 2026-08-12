@@ -20,9 +20,9 @@ func buildApprovalWorkflow(t *testing.T, store WorkflowStore, wf string, counter
 	wb.AddNode("after").DependsOn("gate").WithAction(countingAction(counter))
 	dag, err := wb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = wf
-	w.DAG = dag
+	w.dag = dag
 	return w
 }
 
@@ -42,7 +42,7 @@ func TestApproval_ParkThenApprove(t *testing.T) {
 	require.EqualValues(t, 0, afterN.Load(), "downstream must not run while parked")
 
 	// Deliver an approve decision (a typed payload; in-process, no durable round-trip).
-	require.NoError(t, w.DeliverAndResume(context.Background(), ApproveSignal("gate", "alice", "ship it", "d1")))
+	require.NoError(t, w.DeliverAndResume(context.Background(), ApproveSignal("gate", "alice", "ship it", "d1", w.ApprovalNonce("gate"))))
 
 	final, err := store.Load("wf-appr")
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestApproval_Reject_FailFast(t *testing.T) {
 	w := buildApprovalWorkflow(t, store, "wf-rej", &afterN)
 
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
-	err := w.DeliverAndResume(context.Background(), RejectSignal("gate", "bob", "no budget", "d1"))
+	err := w.DeliverAndResume(context.Background(), RejectSignal("gate", "bob", "no budget", "d1", w.ApprovalNonce("gate")))
 	require.Error(t, err, "a reject must fail the run")
 
 	var rejErr *ApprovalRejectedError
@@ -97,8 +97,8 @@ func TestApproval_Reject_FailFast(t *testing.T) {
 func TestApproval_NoSignalStore_LoudFail(t *testing.T) {
 	// Drive the action directly through DAG.Execute with no SignalStore injected —
 	// the same shape as TestWaitForSignal_RequiresSignalStore.
-	d := NewDAG("wf-nostore")
-	require.NoError(t, d.AddNode(NewNode("gate", &approvalAction{nodeName: "gate", signalName: "gate"})))
+	d := newDAGForTest("wf-nostore")
+	require.NoError(t, d.addNode(newNode("gate", &approvalAction{nodeName: "gate", signalName: "gate"})))
 	cp := func(*WorkflowData) error { return nil }
 	err := d.Execute(withCheckpoint(context.Background(), cp), NewWorkflowData("wf-nostore"))
 	require.ErrorIs(t, err, ErrWaitRequiresSignalStore, "no SignalStore → loud failure, never a forever-park")
@@ -119,7 +119,7 @@ func TestApproval_DecodeAfterDurableRoundTrip(t *testing.T) {
 
 	// Deliver, then re-drive as two separate steps so the payload is written to and
 	// read back from disk (the durable round-trip that generalizes the payload).
-	require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "carol", "lgtm", "d1")))
+	require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "carol", "lgtm", "d1", w.ApprovalNonce("gate"))))
 	require.NoError(t, w.Execute(context.Background()), "the defensively-decoded round-tripped decision resumes")
 
 	final, err := store.Load("wf-rt")
@@ -184,8 +184,8 @@ func TestApproval_NoDoubleApply(t *testing.T) {
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
 	// Deliver the same approve twice under the SAME sig.ID → one mailbox entry.
-	require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "dana", "ok", "dup")))
-	require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "dana", "ok", "dup")))
+	require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "dana", "ok", "dup", w.ApprovalNonce("gate"))))
+	require.NoError(t, w.DeliverSignal(ApproveSignal("gate", "dana", "ok", "dup", w.ApprovalNonce("gate"))))
 	pending, err := store.TakeSignals("wf-idem")
 	require.NoError(t, err)
 	require.Len(t, pending, 1, "a duplicate sig.ID is deduped to one mailbox entry")
@@ -217,7 +217,7 @@ func TestApproval_Reject_ReDriveStable(t *testing.T) {
 	w := buildApprovalWorkflow(t, store, "wf-rej2", &afterN)
 
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
-	require.NoError(t, w.DeliverSignal(RejectSignal("gate", "erin", "denied", "d1")))
+	require.NoError(t, w.DeliverSignal(RejectSignal("gate", "erin", "denied", "d1", w.ApprovalNonce("gate"))))
 
 	// First drive: fail-fast with a classifiable *ApprovalRejectedError.
 	err1 := w.Execute(context.Background())

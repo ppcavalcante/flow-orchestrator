@@ -14,10 +14,16 @@ A workflow is the top-level container for a set of coordinated tasks. In Flow Or
 - Maintains state across executions
 
 ```go
-wf := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "my-workflow",
-    Store:      store,
+// A durable workflow is built from a builder, and FromBuilder is the way out of one.
+// The store goes ON the builder; FromBuilder carries it onto the *Workflow.
+b := workflow.NewWorkflowBuilder().
+    WithWorkflowID("my-workflow").
+    WithStore(store)
+// ... AddStartNode / AddNode / WithAction / DependsOn ...
+
+wf, err := workflow.FromBuilder(b)
+if err != nil {
+    log.Fatalf("failed to build workflow: %v", err)
 }
 ```
 
@@ -49,8 +55,16 @@ graph TD
 ```
 
 ```go
-dag := workflow.NewDAG("my-dag")
-// Add nodes and dependencies
+// A DAG is produced by the builder, never constructed directly — Build() returns a
+// bare, validated *DAG for a NON-durable run. For a durable one, put the store on the
+// builder and use FromBuilder instead (Build refuses a store-configured builder).
+b := workflow.NewWorkflowBuilder().WithWorkflowID("my-dag")
+// ... add nodes and dependencies ...
+
+dag, err := b.Build()
+if err != nil {
+    log.Fatalf("failed to build DAG: %v", err)
+}
 ```
 
 ### Node
@@ -63,10 +77,14 @@ A node represents a single unit of work in a workflow. Each node:
 - Has execution options (retries, timeout)
 
 ```go
-// NewNode takes an Action; wrap a plain func with ActionFunc.
-// (The builder's AddNode(...).WithAction(...) accepts a bare func directly.)
-node := workflow.NewNode("process-data", workflow.ActionFunc(processDataAction))
-node.WithRetries(3).WithTimeout(5 * time.Second)
+// Nodes are declared on the builder and configured in the same chain. The retry and
+// timeout options are *NodeBuilder methods, applied at declaration — a *Node is an
+// opaque handle and carries no setters.
+b.AddNode("process-data").
+    WithActionFunc(processDataAction).
+    WithRetries(3).
+    WithTimeout(5 * time.Second).
+    DependsOn("fetch-data")
 ```
 
 ### Action
@@ -79,13 +97,29 @@ type Action interface {
 }
 ```
 
-You can create actions as functions:
+You can create actions as plain functions:
 
 ```go
 processDataAction := func(ctx context.Context, data *workflow.WorkflowData) error {
     // Process data
     return nil
 }
+```
+
+There are two ways to attach one to a node. `WithAction` takes an `Action`
+(anything implementing the interface above); a bare func does NOT satisfy it,
+so wrap it with `workflow.ActionFunc`:
+
+```go
+b.AddNode("process-data").WithAction(workflow.ActionFunc(processDataAction))
+```
+
+`WithActionFunc` is the convenience sibling that takes the bare
+`func(ctx context.Context, data *workflow.WorkflowData) error` directly and
+wraps it for you:
+
+```go
+b.AddNode("process-data").WithActionFunc(processDataAction)
 ```
 
 ### WorkflowData
@@ -407,7 +441,7 @@ forward durability (M9/M10) + branching (M11) + **undo** (M12).
 ```go
 builder.AddNode("process-payment").
     WithAction(processPaymentAction).
-    WithCompensation(func(ctx context.Context, data *workflow.WorkflowData) error {
+    WithCompensationFunc(func(ctx context.Context, data *workflow.WorkflowData) error {
         pid, _ := data.GetString("payment_id")
         key, _ := workflow.CompensationIdempotencyKey(ctx) // stable across an at-least-once re-run
         return refundPayment(ctx, pid, key)                // MUST be idempotent

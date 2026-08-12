@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // --- Type-level tests (no executor) — locked under both Option A and B. ---
@@ -123,10 +124,44 @@ func TestNodeError_UnwrapAndError(t *testing.T) {
 // under both Option A and Option B.
 func TestExecute_MultipleConcurrentFailFastFailures_AllCaptured(t *testing.T) {
 	const n = 8
+
+	// START BARRIER (V-02 flake fix). The property under test is that when several
+	// nodes fail-fast CONCURRENTLY, EVERY in-flight failure is captured, not just
+	// the first. The naive version — n instant-fail start nodes — does NOT test
+	// that reliably: executeNodesInLevel's launch loop is deliberately
+	// cancellation-responsive (parallel_execution.go:177), so the first node's
+	// instant failure can cancel the level and `break launchLoop` BEFORE the last
+	// node is even launched. How many launch is then pure scheduling timing — all n
+	// under a fast non-race run, but often n-1 under -race's slower interleaving
+	// (observed: always fN-1 dropped). Asserting `== n` on that count is a flake,
+	// not a contract.
+	//
+	// The barrier removes the timing dependence: each action signals it has STARTED
+	// and blocks until all n have started, so all n are genuinely in flight BEFORE
+	// any of them fails. Only then do they all fail together, so every one is
+	// captured deterministically — and the assertion still bites the original
+	// "only the first failure is captured, the rest dropped" defect (a regression
+	// to that would capture 1, not n). The timeout guard keeps a genuine
+	// launch/aggregation regression a loud FAIL rather than a hang.
+	var startedN atomic.Int32
+	allStarted := make(chan struct{})
+	barrierAction := func(msg string) func(context.Context, *WorkflowData) error {
+		return func(_ context.Context, _ *WorkflowData) error {
+			if startedN.Add(1) == int32(n) {
+				close(allStarted) // the nth starter releases everyone
+			}
+			select {
+			case <-allStarted:
+			case <-time.After(2 * time.Second): // guard: <n launched ⇒ fail loud, don't hang
+			}
+			return errors.New(msg)
+		}
+	}
+
 	b := NewWorkflowBuilder().WithWorkflowID("multi-fail")
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("f%d", i)
-		b.AddStartNode(name).WithAction(failAction(fmt.Sprintf("boom-%d", i)))
+		b.AddStartNode(name).WithActionFunc(barrierAction(fmt.Sprintf("boom-%d", i)))
 	}
 
 	dag, err := b.Build()
@@ -167,7 +202,7 @@ func TestExecute_MultipleConcurrentFailFastFailures_AllCaptured(t *testing.T) {
 // normal failure still produces an ExecutionError naming that node.
 func TestExecute_SingleFailure_StillReported(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("single")
-	b.AddStartNode("only").WithAction(failAction("boom"))
+	b.AddStartNode("only").WithActionFunc(failAction("boom"))
 
 	dag, err := b.Build()
 	if err != nil {
@@ -189,7 +224,7 @@ func TestExecute_SingleFailure_StillReported(t *testing.T) {
 func TestExecute_Success_NilError(t *testing.T) {
 	var ran atomic.Bool
 	b := NewWorkflowBuilder().WithWorkflowID("ok")
-	b.AddStartNode("a").WithAction(markAction(&ran))
+	b.AddStartNode("a").WithActionFunc(markAction(&ran))
 
 	dag, err := b.Build()
 	if err != nil {
@@ -210,7 +245,7 @@ func TestExecute_Success_NilError(t *testing.T) {
 // returned by Execute (through Node.Execute + the aggregate Unwrap).
 func TestExecute_ErrorIsReachesSentinelThroughExecutor(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("sentinel")
-	b.AddStartNode("boom").WithAction(func(_ context.Context, _ *WorkflowData) error {
+	b.AddStartNode("boom").WithActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return fmt.Errorf("action failed: %w", ErrExecutionFailed)
 	})
 
@@ -239,7 +274,7 @@ func TestExecute_NoDataLeakInError(t *testing.T) {
 	const secret = "SUPERSECRET-XYZ"
 
 	b := NewWorkflowBuilder().WithWorkflowID("noleak")
-	b.AddStartNode("leaky").WithAction(func(_ context.Context, d *WorkflowData) error {
+	b.AddStartNode("leaky").WithActionFunc(func(_ context.Context, d *WorkflowData) error {
 		// Plant the secret in the data map; return a CLEAN error (no secret).
 		d.Set("secret", secret)
 		return errors.New("boom")

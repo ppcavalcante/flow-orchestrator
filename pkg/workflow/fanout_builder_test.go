@@ -15,7 +15,7 @@ import (
 )
 
 // intItemsExpander yields items 0..n-1 (as int) for the public expander signature.
-func intItemsExpander(n int) fanOutExpander {
+func intItemsExpander(n int) FanOutExpander {
 	return func(_ context.Context, _ *WorkflowData) ([]interface{}, error) {
 		out := make([]interface{}, n)
 		for i := range out {
@@ -59,9 +59,9 @@ func runBuilderFanOut(t *testing.T, store WorkflowStore, id string, configure fu
 	}
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = id
-	w.DAG = dag
+	w.dag = dag
 	execErr := w.Execute(context.Background())
 	final, lerr := store.Load(id)
 	require.NoError(t, lerr)
@@ -122,9 +122,9 @@ func TestAddFanOut_ItemInt64Fidelity(t *testing.T) {
 			b.AddFanOut("fan", bigExpander, echoAction).WithResults("results", "out")
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-big"
-			w.DAG = dag
+			w.dag = dag
 			require.NoError(t, w.Execute(context.Background()))
 
 			final, lerr := w.Store.Load("wf-big")
@@ -161,9 +161,9 @@ func TestAddFanOut_WidthCap_LoudFail(t *testing.T) {
 			b.AddFanOut("fan", intItemsExpander(5), countingBranch).WithResults("r", "out").WithMaxWidth(3)
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-cap"
-			w.DAG = dag
+			w.dag = dag
 
 			err = w.Execute(context.Background())
 			require.ErrorIs(t, err, ErrFanOutMaxWidth, "5 branches > cap 3 → loud ErrFanOutMaxWidth")
@@ -182,9 +182,9 @@ func TestAddFanOut_WidthCap_BoundaryExactVsOver(t *testing.T) {
 		b.AddFanOut("fan", intItemsExpander(width), noResultBranch).WithMaxWidth(cap)
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(NewInMemoryStore())
+		w := newWorkflowForTest(NewInMemoryStore())
 		w.WorkflowID = "wf-bound"
-		w.DAG = dag
+		w.dag = dag
 		return w.Execute(context.Background())
 	}
 	require.NoError(t, mk(4, 4), "N == cap is allowed (boundary inclusive)")
@@ -207,9 +207,9 @@ func TestAddFanOut_ZeroWidth(t *testing.T) {
 			}))
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-zero"
-			w.DAG = dag
+			w.dag = dag
 			require.NoError(t, w.Execute(context.Background()))
 
 			require.True(t, downstreamRan, "N=0 does not hang the downstream dependent")
@@ -230,9 +230,9 @@ func TestAddFanOut_SingleWidth(t *testing.T) {
 			b.AddFanOut("fan", intItemsExpander(1), doubleItemAction()).WithResults("results", "out")
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-one"
-			w.DAG = dag
+			w.dag = dag
 			require.NoError(t, w.Execute(context.Background()))
 			final := store2Load(t, w)
 			require.Equal(t, 1, fanCount(t, final, "results"))
@@ -255,9 +255,9 @@ func TestAddFanOut_ResultKeyCollision(t *testing.T) {
 	b.AddFanOut("fan", intItemsExpander(3), doubleItemAction()).WithResults("results", "out").DependsOn("seed")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-collide"
-	w.DAG = dag
+	w.dag = dag
 	err = w.Execute(context.Background())
 	require.ErrorIs(t, err, ErrFanOutResultKeyCollision, "a foreign pre-existing base key is a loud collision")
 }
@@ -278,9 +278,9 @@ func TestAddFanOut_IndexedKeyValueAwareCollision(t *testing.T) {
 		b.AddFanOut("fan", intItemsExpander(3), doubleItemAction()).WithResults("results", "out").DependsOn("seed")
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(NewInMemoryStore())
+		w := newWorkflowForTest(NewInMemoryStore())
 		w.WorkflowID = "wf-eq"
-		w.DAG = dag
+		w.dag = dag
 		require.NoError(t, w.Execute(context.Background()), "an equal pre-existing indexed value is an idempotent re-apply")
 	})
 	// (b) foreign value: seed results[1] = 999 (branch 1 produces 10). Loud collision.
@@ -293,9 +293,9 @@ func TestAddFanOut_IndexedKeyValueAwareCollision(t *testing.T) {
 		b.AddFanOut("fan", intItemsExpander(3), doubleItemAction()).WithResults("results", "out").DependsOn("seed")
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(NewInMemoryStore())
+		w := newWorkflowForTest(NewInMemoryStore())
 		w.WorkflowID = "wf-foreign"
-		w.DAG = dag
+		w.dag = dag
 		require.ErrorIs(t, w.Execute(context.Background()), ErrFanOutResultKeyCollision, "a foreign indexed value is a loud collision")
 	})
 }

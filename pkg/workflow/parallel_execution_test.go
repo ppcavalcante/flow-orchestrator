@@ -23,7 +23,7 @@ func TestParallelExecution(t *testing.T) {
 
 	t.Run("ParallelExecutionOfIndependentNodes", func(t *testing.T) {
 		// Create a DAG
-		dag := NewDAG("test-dag")
+		dag := newDAGForTest("test-dag")
 
 		// Track execution order
 		var mu sync.Mutex
@@ -31,7 +31,7 @@ func TestParallelExecution(t *testing.T) {
 		nodeNames := make([]string, 0)
 
 		// Create nodes with different sleep durations
-		node1 := NewNode("slow", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		node1 := newNode("slow", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			time.Sleep(100 * time.Millisecond)
 			mu.Lock()
 			executionTimes = append(executionTimes, time.Now())
@@ -40,7 +40,7 @@ func TestParallelExecution(t *testing.T) {
 			return nil
 		}))
 
-		node2 := NewNode("fast", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		node2 := newNode("fast", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			time.Sleep(10 * time.Millisecond)
 			mu.Lock()
 			executionTimes = append(executionTimes, time.Now())
@@ -84,10 +84,10 @@ func TestParallelExecution(t *testing.T) {
 
 	t.Run("NodeFailureInParallelExecution", func(t *testing.T) {
 		// Create a DAG
-		dag := NewDAG("test-fail")
+		dag := newDAGForTest("test-fail")
 
 		// Create a failing node
-		failingNode := NewNode("failing", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		failingNode := newNode("failing", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			return fmt.Errorf("intentional failure")
 		}))
 
@@ -109,10 +109,10 @@ func TestParallelExecution(t *testing.T) {
 		defer cancel()
 
 		// Create a DAG
-		dag := NewDAG("test-cancel")
+		dag := newDAGForTest("test-cancel")
 
 		// Create a node that checks for cancellation
-		node := NewNode("long-running", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+		node := newNode("long-running", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			select {
 			case <-time.After(5 * time.Second):
 				return nil
@@ -173,9 +173,9 @@ func TestParallelExecutionWithDefaultConfig(t *testing.T) {
 	action2 := &testAction{delay: 100 * time.Millisecond}
 	action3 := &testAction{}
 
-	node1 := NewNode("node1", action1)
-	node2 := NewNode("node2", action2)
-	node3 := NewNode("node3", action3)
+	node1 := newNode("node1", action1)
+	node2 := newNode("node2", action2)
+	node3 := newNode("node3", action3)
 
 	// Test parallel execution via the live level-executor; no failures on the
 	// happy path.
@@ -207,9 +207,9 @@ func TestParallelExecutionWithError(t *testing.T) {
 	action2 := &testAction{err: assert.AnError}
 	action3 := &testAction{}
 
-	node1 := NewNode("node1", action1)
-	node2 := NewNode("node2", action2)
-	node3 := NewNode("node3", action3)
+	node1 := newNode("node1", action1)
+	node2 := newNode("node2", action2)
+	node3 := newNode("node3", action3)
 
 	// Test parallel execution via the live level-executor. The failing node is
 	// returned as a NodeError; the slice is non-empty.
@@ -237,8 +237,8 @@ func TestParallelExecutionWithContext(t *testing.T) {
 	action1 := &testAction{delay: 1 * time.Second}
 	action2 := &testAction{delay: 1 * time.Second}
 
-	node1 := NewNode("node1", action1)
-	node2 := NewNode("node2", action2)
+	node1 := newNode("node1", action1)
+	node2 := newNode("node2", action2)
 
 	// Create context with short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -273,9 +273,9 @@ func TestMaxConcurrencyIsHonored(t *testing.T) {
 	buildSingleLevelDAG := func(n int) (*DAG, *int64) {
 		var inFlight int64
 		var peak int64
-		dag := NewDAG("maxconc-test")
+		dag := newDAGForTest("maxconc-test")
 		for i := 0; i < n; i++ {
-			node := NewNode(fmt.Sprintf("node%d", i), ActionFunc(func(ctx context.Context, data *WorkflowData) error {
+			node := newNode(fmt.Sprintf("node%d", i), ActionFunc(func(ctx context.Context, data *WorkflowData) error {
 				cur := atomic.AddInt64(&inFlight, 1)
 				// CAS-max: bump peak up to cur if cur is larger.
 				for {
@@ -289,7 +289,7 @@ func TestMaxConcurrencyIsHonored(t *testing.T) {
 				atomic.AddInt64(&inFlight, -1)
 				return nil
 			}))
-			require.NoError(t, dag.AddNode(node))
+			require.NoError(t, dag.addNode(node))
 		}
 		return dag, &peak
 	}

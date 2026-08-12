@@ -19,14 +19,14 @@ func TestWorkflowBuilder(t *testing.T) {
 
 		// Build workflow DAG with fluent API
 		builder.AddStartNode("fetch").
-			WithAction(func(ctx context.Context, data *WorkflowData) error {
+			WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 				return nil
 			}).
 			WithRetries(1).
 			WithTimeout(100 * time.Millisecond)
 
 		builder.AddNode("process").
-			WithAction(func(ctx context.Context, data *WorkflowData) error {
+			WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 				return errors.New("validation error") // Return a standard error
 			}).
 			WithRetries(1).
@@ -55,7 +55,7 @@ func TestWorkflowBuilder(t *testing.T) {
 
 		// Try to create invalid dependencies
 		builder.AddNode("B").
-			WithAction(func(ctx context.Context, data *WorkflowData) error {
+			WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 				return nil
 			}).
 			DependsOn("A") // Depends on non-existent node
@@ -74,7 +74,7 @@ func TestWorkflowBuilder(t *testing.T) {
 
 		// Add a node that depends on itself (clear cycle)
 		builder.AddNode("self-cycle").
-			WithAction(func(ctx context.Context, data *WorkflowData) error {
+			WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 				return nil
 			}).
 			DependsOn("self-cycle") // Self-dependency creates an obvious cycle
@@ -201,38 +201,23 @@ func TestNodeBuilderWithAction(t *testing.T) {
 	fn := func(ctx context.Context, data *WorkflowData) error {
 		return nil
 	}
-	nodeBuilder.WithAction(fn)
+	nodeBuilder.WithActionFunc(fn)
 
 	// Check that the action was set correctly
 	if nodeBuilder.action == nil {
 		t.Error("Expected action to be set from function")
 	}
 
-	// Test with a legacy function signature
-	nodeBuilder = builder.AddNode("legacy-node")
-	legacyFn := func(ctx context.Context, state interface{}) (interface{}, interface{}) {
-		return "output", nil
-	}
-	nodeBuilder.WithAction(legacyFn)
+	// AUD-041: WithAction is typed, so a legacy 3-arg func or any non-Action value is a
+	// COMPILE error and can no longer reach the builder — the former runtime rejection
+	// (actionErr + stub) is gone by construction. Use WithActionFunc for a bare function.
 
-	// Check that the action was set correctly
-	if nodeBuilder.action == nil {
-		t.Error("Expected action to be set from legacy function")
-	}
-
-	// Test with nil action
+	// A nil action is accepted by the builder as a nil Action interface value (no stub is
+	// synthesized); Build is what rejects a node with no action.
 	nodeBuilder = builder.AddNode("nil-node")
 	nodeBuilder.WithAction(nil)
-
-	// Check that a default action was created
-	if nodeBuilder.action == nil {
-		t.Error("Expected default action to be created for nil")
-	}
-
-	// Execute the default action to verify it returns an error
-	err := nodeBuilder.action.Execute(context.Background(), NewWorkflowData("test"))
-	if err == nil {
-		t.Error("Expected default action to return an error")
+	if nodeBuilder.action != nil {
+		t.Error("Expected a nil action to remain nil (no stub is created)")
 	}
 
 	// Test with a composite action
@@ -297,20 +282,8 @@ func TestNodeBuilderWithAction(t *testing.T) {
 		t.Error("Expected action to be set from retryable action")
 	}
 
-	// Test with an unsupported type
-	nodeBuilder = builder.AddNode("unsupported-node")
-	nodeBuilder.WithAction("not an action")
-
-	// Check that a default action was created
-	if nodeBuilder.action == nil {
-		t.Error("Expected default action to be created")
-	}
-
-	// Execute the default action to verify it returns an error
-	err = nodeBuilder.action.Execute(context.Background(), NewWorkflowData("test"))
-	if err == nil {
-		t.Error("Expected default action to return an error")
-	}
+	// AUD-041: an unsupported type (e.g. "not an action") is now a COMPILE error at the
+	// WithAction call site — there is no runtime stub path left to exercise.
 }
 
 func TestNodeBuilderDependsOn(t *testing.T) {
@@ -419,8 +392,8 @@ func TestWorkflowBuilderBuild(t *testing.T) {
 	}
 
 	// Check that all nodes were added
-	if len(dag.Nodes) != 4 {
-		t.Errorf("Expected 4 nodes in DAG, got %d", len(dag.Nodes))
+	if len(dag.nodes) != 4 {
+		t.Errorf("Expected 4 nodes in DAG, got %d", len(dag.nodes))
 	}
 
 	// Check that dependencies were set up correctly
@@ -428,32 +401,32 @@ func TestWorkflowBuilderBuild(t *testing.T) {
 	if !exists {
 		t.Fatal("Node A not found in DAG")
 	}
-	if len(nodeAInDag.DependsOn) != 0 {
-		t.Errorf("Expected node A to have 0 dependencies, got %d", len(nodeAInDag.DependsOn))
+	if len(nodeAInDag.dependsOn) != 0 {
+		t.Errorf("Expected node A to have 0 dependencies, got %d", len(nodeAInDag.dependsOn))
 	}
 
 	nodeBInDag, exists := dag.GetNode("B")
 	if !exists {
 		t.Fatal("Node B not found in DAG")
 	}
-	if len(nodeBInDag.DependsOn) != 1 {
-		t.Errorf("Expected node B to have 1 dependency, got %d", len(nodeBInDag.DependsOn))
+	if len(nodeBInDag.dependsOn) != 1 {
+		t.Errorf("Expected node B to have 1 dependency, got %d", len(nodeBInDag.dependsOn))
 	}
-	if nodeBInDag.DependsOn[0].Name != "A" {
-		t.Errorf("Expected node B to depend on A, got %s", nodeBInDag.DependsOn[0].Name)
+	if nodeBInDag.dependsOn[0].name != "A" {
+		t.Errorf("Expected node B to depend on A, got %s", nodeBInDag.dependsOn[0].name)
 	}
 
 	// Check that configuration was applied
-	if nodeBInDag.RetryCount != 3 {
-		t.Errorf("Expected node B to have retry count 3, got %d", nodeBInDag.RetryCount)
+	if nodeBInDag.retryCount != 3 {
+		t.Errorf("Expected node B to have retry count 3, got %d", nodeBInDag.retryCount)
 	}
 
 	nodeCInDag, exists := dag.GetNode("C")
 	if !exists {
 		t.Fatal("Node C not found in DAG")
 	}
-	if nodeCInDag.Timeout != 5*time.Second {
-		t.Errorf("Expected node C to have timeout 5s, got %v", nodeCInDag.Timeout)
+	if nodeCInDag.timeout != 5*time.Second {
+		t.Errorf("Expected node C to have timeout 5s, got %v", nodeCInDag.timeout)
 	}
 
 	// Test building with a node that has no action
@@ -485,19 +458,8 @@ func TestWorkflowBuilderBuild(t *testing.T) {
 func TestNodeBuilderWithActionErrorCases(t *testing.T) {
 	builder := NewWorkflowBuilder()
 
-	t.Run("Legacy function with error", func(t *testing.T) {
-		nodeBuilder := builder.AddNode("legacy-error-node")
-		legacyFn := func(ctx context.Context, state interface{}) (interface{}, interface{}) {
-			return nil, errors.New("legacy error")
-		}
-		nodeBuilder.WithAction(legacyFn)
-
-		// Execute the action - should not return error since legacy function errors are ignored
-		err := nodeBuilder.action.Execute(context.Background(), NewWorkflowData("test"))
-		if err != nil {
-			t.Errorf("Legacy function errors should be ignored, got: %v", err)
-		}
-	})
+	// AUD-041: the "Legacy signature is rejected" subtest was removed — a legacy 3-arg
+	// func is now a COMPILE error at WithAction, not a runtime actionErr.
 
 	t.Run("Panicking function", func(t *testing.T) {
 		nodeBuilder := builder.AddNode("panic-node")
@@ -519,7 +481,7 @@ func TestNodeBuilderWithActionErrorCases(t *testing.T) {
 
 	t.Run("Cancelled context", func(t *testing.T) {
 		nodeBuilder := builder.AddNode("context-node")
-		nodeBuilder.WithAction(func(ctx context.Context, data *WorkflowData) error {
+		nodeBuilder.WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -628,4 +590,36 @@ func (m *mockStoreForBuilder) ListWorkflows() ([]string, error) {
 
 func (m *mockStoreForBuilder) Delete(id string) error {
 	return nil
+}
+
+// TestAUD041_TypedActionAPI — the typed WithAction/WithActionFunc surface. WithAction
+// takes an Action (compiler-enforced); WithActionFunc takes a bare func with the Action
+// signature (the ergonomic inline form). A mistyped value is a COMPILE error, not a
+// runtime rejection, so there is no "unsupported action type" path left to test. A nil
+// action is accepted by the builder and caught at Build as a missing action.
+func TestAUD041_TypedActionAPI(t *testing.T) {
+	ran := false
+	b := NewWorkflowBuilder().WithWorkflowID("aud041")
+	b.AddStartNode("f").WithActionFunc(func(_ context.Context, _ *WorkflowData) error {
+		ran = true
+		return nil
+	})
+	b.AddNode("a").DependsOn("f").WithAction(ActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil }))
+	dag, err := b.Build()
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if err := dag.Execute(context.Background(), NewWorkflowData("aud041")); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if !ran {
+		t.Error("WithActionFunc's function did not run")
+	}
+
+	// WithAction(nil) leaves the action nil (no stub); Build reports the missing action.
+	bad := NewWorkflowBuilder().WithWorkflowID("aud041-nil")
+	bad.AddStartNode("n").WithAction(nil)
+	if _, err := bad.Build(); err == nil || !strings.Contains(err.Error(), "no action defined") {
+		t.Fatalf("expected 'no action defined' error for a nil action, got %v", err)
+	}
 }

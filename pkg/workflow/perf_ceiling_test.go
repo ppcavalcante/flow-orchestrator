@@ -44,7 +44,7 @@ func TestPerfCeiling_DetTax(t *testing.T) {
 	// Measure the SAME WAY the frozen bench does (testing.Benchmark → AllocsPerOp), so the
 	// numbers match bench_baseline_preM12_test.go's 283/277 (AllocsPerRun warms away the
 	// first-call lazy-init allocs and would read 280/274 — a different measurement).
-	w := &Workflow{DAG: d, WorkflowID: "det-tax"}
+	w := &Workflow{dag: d, WorkflowID: "det-tax"}
 	wr := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -52,8 +52,15 @@ func TestPerfCeiling_DetTax(t *testing.T) {
 			benchErrSink = w.Execute(ctx)
 		}
 	})
-	if got := wr.AllocsPerOp(); got > 283 {
-		t.Errorf("det-tax BREACH: Workflow non-durable drive = %d allocs/op, want <= 283 (frozen arm64 ceiling)", got)
+	// RE-RATIFIED 283 -> 284 (M24 DEC-M24-MEDIATION, user-approved 2026-08-11). The
+	// complete-mediation sealed view shares the run's lock, which required WorkflowData.mu
+	// to become a *sync.RWMutex; on the Workflow drive that is exactly +1 alloc/op. This is
+	// the MEASURED cost of a deliberate feature recorded transparently, NOT a silent tune to
+	// hide a regression: the DAG drive is unchanged (277 below), the sealed view itself is
+	// allocation-free (channel freelist), and the zero-REPLAY-tax moat is untouched. A real
+	// regression still adds allocs on TOP of this and reddens here.
+	if got := wr.AllocsPerOp(); got > 284 {
+		t.Errorf("det-tax BREACH: Workflow non-durable drive = %d allocs/op, want <= 284 (arm64 ceiling; 283 + 1 for M24 mediation's shared *sync.RWMutex)", got)
 	}
 
 	dr := testing.Benchmark(func(b *testing.B) {
@@ -81,7 +88,7 @@ func TestPerfCeiling_NotSuperlinearNonDurable(t *testing.T) {
 		r := testing.Benchmark(func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				w := &Workflow{DAG: dag, WorkflowID: "ns"}
+				w := &Workflow{dag: dag, WorkflowID: "ns"}
 				perfSink = w.Execute(ctx)
 			}
 		})
@@ -104,7 +111,7 @@ func TestPerfCeiling_NotSuperlinearNonDurable(t *testing.T) {
 // finding F-M13-P54-1 (a blocker-candidate), not a blessed ceiling.
 func TestPerfCeiling_WideDurabilityBounded(t *testing.T) {
 	cc := &countingCheckpointer{InMemoryStore: NewInMemoryStore()}
-	w := &Workflow{DAG: buildWide(100), WorkflowID: "wide-dur", Store: cc}
+	w := &Workflow{dag: buildWide(100), WorkflowID: "wide-dur", Store: cc}
 	if err := w.Execute(context.Background()); err != nil {
 		t.Fatal(err)
 	}

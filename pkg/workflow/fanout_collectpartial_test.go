@@ -63,9 +63,9 @@ func TestCollectPartial_NodeCompletesWithPartition(t *testing.T) {
 			b.AddNode("after").DependsOn("fan").WithAction(ActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil }))
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(st.mk(t))
+			w := newWorkflowForTest(st.mk(t))
 			w.WorkflowID = "wf-cp"
-			w.DAG = dag
+			w.dag = dag
 			require.NoError(t, w.Execute(context.Background()), "CollectPartial: the run COMPLETES despite k failures")
 
 			d, lerr := w.Store.Load("wf-cp")
@@ -100,9 +100,9 @@ func TestFailFast_vs_CollectPartial_Distinct(t *testing.T) {
 		b.AddFanOut("fan", intItemsExpander(n), partialBranch(failIdxs)).WithResults("r", "out")
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(NewInMemoryStore())
+		w := newWorkflowForTest(NewInMemoryStore())
 		w.WorkflowID = "wf-ff"
-		w.DAG = dag
+		w.dag = dag
 		require.Error(t, w.Execute(context.Background()), "FailFast: a branch failure fails the run")
 		d, lerr := w.Store.Load("wf-ff")
 		require.NoError(t, lerr)
@@ -115,9 +115,9 @@ func TestFailFast_vs_CollectPartial_Distinct(t *testing.T) {
 		b.AddFanOut("fan", intItemsExpander(n), partialBranch(failIdxs)).WithResults("r", "out").WithCollectPartial()
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(NewInMemoryStore())
+		w := newWorkflowForTest(NewInMemoryStore())
 		w.WorkflowID = "wf-cp2"
-		w.DAG = dag
+		w.dag = dag
 		require.NoError(t, w.Execute(context.Background()), "CollectPartial: the run completes")
 		d, lerr := w.Store.Load("wf-cp2")
 		require.NoError(t, lerr)
@@ -160,9 +160,9 @@ func TestCollectPartial_ExternalCancelNotFailure(t *testing.T) {
 	b.AddFanOut("fan", intItemsExpander(n), branch).WithResults("r", "out").WithCollectPartial()
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-extcancel"
-	w.DAG = dag
+	w.dag = dag
 
 	go func() { <-started; cancel() }() // cancel the parent ctx once branches are in-flight
 	err = w.Execute(ctx)
@@ -205,7 +205,7 @@ func TestCollectPartial_PartialResume_F1Payoff(t *testing.T) {
 			// Pre-seed branch 0's child as Completed (so driveBranch's terminal-fast-path returns its result 0 → the
 			// SAME value already in baseKey[0] → the value-aware guard must ALLOW the re-write).
 			seedBranch := fanBranch(func(_ context.Context, idx int, _ interface{}) (interface{}, error) { return int64(idx * 10), nil })
-			child0 := &Workflow{DAG: seedBranch(0, 0), WorkflowID: subFanOutChildID(parentID, "fan", 0), Store: store}
+			child0 := &Workflow{dag: seedBranch(0, 0), WorkflowID: FanOutChildID(parentID, "fan", 0), Store: store}
 			require.NoError(t, child0.Execute(context.Background()))
 
 			// Resume: drive the CollectPartial fan-out. Branch 0 re-writes baseKey[0]=0 (SAME) → allowed; branches
@@ -226,9 +226,9 @@ func TestCollectPartial_PartialResume_F1Payoff(t *testing.T) {
 			})).WithResults("r", "out").WithCollectPartial()
 			dag, err := b.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(store)
+			w := newWorkflowForTest(store)
 			w.WorkflowID = parentID
-			w.DAG = dag
+			w.dag = dag
 			require.NoError(t, w.Execute(context.Background()), "F1 PAYOFF: the re-written baseKey[0]=same value is allowed, no false collision")
 
 			d, lerr := store.Load(parentID)
@@ -256,9 +256,9 @@ func TestCollectPartial_SagaContainment(t *testing.T) {
 		WithResults("r", "out").WithCollectPartial().DependsOn("pre")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(NewInMemoryStore())
+	w := newWorkflowForTest(NewInMemoryStore())
 	w.WorkflowID = "wf-saga"
-	w.DAG = dag
+	w.dag = dag
 	require.NoError(t, w.Execute(context.Background()), "CollectPartial with failures: the run COMPLETES")
 	require.Zero(t, compensated, "CONTAINMENT (b): a partial branch failure does NOT trigger the parent's M12 compensation")
 }

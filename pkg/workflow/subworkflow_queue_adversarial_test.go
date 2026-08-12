@@ -68,7 +68,7 @@ func TestQueueAdversarial_InputBLOBCannotForgeCompletionTarget(t *testing.T) {
 
 	const realParent = "real-parent-A"
 	const victim = "victim-parent-B"
-	childID := subWorkflowChildID(realParent, "sub")
+	childID := SubWorkflowChildID(realParent, "sub")
 
 	// The attacker-controlled input BLOB tries to redirect the completion to the victim via every
 	// plausible key name. seedInput will Set these as CHILD data keys — they must NOT reach the columns.
@@ -120,10 +120,10 @@ func TestQueueAdversarial_CompletionForChildOfA_CannotWakeParentB(t *testing.T) 
 		pb.AddSubWorkflowQueued("sub", "childType").WithResult("result", "result")
 		pdag, err := pb.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(s)
+		w := newWorkflowForTest(s)
 		w.WorkflowID = id
-		w.DAG = pdag
-		w.Registry = reg
+		w.dag = pdag
+		w.registry = reg
 		return w
 	}
 	pa, pb := mkParent("parent-A"), mkParent("parent-B")
@@ -136,7 +136,7 @@ func TestQueueAdversarial_CompletionForChildOfA_CannotWakeParentB(t *testing.T) 
 	ran, err := RunNext(context.Background(), s, reg, "worker")
 	require.NoError(t, err)
 	require.True(t, ran)
-	aChild := subWorkflowChildID("parent-A", "sub")
+	aChild := SubWorkflowChildID("parent-A", "sub")
 	require.Equal(t, wqDone, wqState(t, s, aChild), "A's child ran to done")
 
 	// Layer 1: the completion is addressed to A only.
@@ -169,17 +169,17 @@ func TestQueueAdversarial_ForgedCompletionWhileChildParked_ReParks(t *testing.T)
 	pb.AddSubWorkflowQueued("sub", "approvalChild").WithResult("result", "result")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "parent enqueues + parks")
 
 	// The worker runs the child → it parks on its own approval (NOT terminal → no real completion yet).
 	ran, err := RunNext(context.Background(), s, reg, "worker")
 	require.NoError(t, err)
 	require.True(t, ran)
-	childID := subWorkflowChildID("parent", "sub")
+	childID := SubWorkflowChildID("parent", "sub")
 	require.Equal(t, wqClaimed, wqState(t, s, childID), "the parked child stays claimed (a park is not a disposition)")
 
 	// A premature/duplicate completion arrives at the parent while the child is still parked.
@@ -217,12 +217,12 @@ func TestQueueAdversarial_RepeatedlyParkedChild_NotDeadLettered_ResumesOnce(t *t
 	pb.AddSubWorkflowQueued("sub", "approvalChild").WithResult("result", "result")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended)
-	childID := subWorkflowChildID("parent", "sub")
+	childID := SubWorkflowChildID("parent", "sub")
 
 	// Drive #1 (fresh claim): the child parks on its approval. attempts -> 1.
 	ran, err := RunNext(context.Background(), s, reg, "worker")
@@ -244,7 +244,7 @@ func TestQueueAdversarial_RepeatedlyParkedChild_NotDeadLettered_ResumesOnce(t *t
 	require.EqualValues(t, 0, produceN.Load(), "still parked at the gate — never produced")
 
 	// Now deliver the approval; one more reclaim resumes the child to done — EXACTLY once.
-	require.NoError(t, s.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "appr")))
+	require.NoError(t, s.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "appr", childApprovalNonce(t, reg, childID, "approvalChild", "gate"))))
 	clk.Advance(ttl + time.Millisecond)
 	ran, err = RunNext(context.Background(), s, reg, "worker")
 	require.NoError(t, err)
@@ -284,12 +284,12 @@ func TestQueueAdversarial_ParkReclaim_PreservesRetryBudget(t *testing.T) {
 	pb.AddSubWorkflowQueued("sub", "approvalChild")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended)
-	childID := subWorkflowChildID("parent", "sub")
+	childID := SubWorkflowChildID("parent", "sub")
 
 	// Fresh claim + (maxAttempts-1) reclaims — each a benign PARK. FIXED (F-P94-01): a park RESETS
 	// attempts (a park is durable progress, not a failed attempt), so attempts does NOT accumulate —
@@ -352,18 +352,18 @@ func TestQueueAdversarial_TwoWorkersReclaimParkedChild_ExactlyOneResumes(t *test
 	pb.AddSubWorkflowQueued("sub", "approvalChild")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended)
-	childID := subWorkflowChildID("parent", "sub")
+	childID := SubWorkflowChildID("parent", "sub")
 
 	// Drive #1: the child parks on its approval. Deliver the approval NOW so a reclaim resumes it fully.
 	ran, err := RunNext(context.Background(), s, reg, "worker-0")
 	require.NoError(t, err)
 	require.True(t, ran)
-	require.NoError(t, s.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "appr")))
+	require.NoError(t, s.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "appr", childApprovalNonce(t, reg, childID, "approvalChild", "gate"))))
 
 	// Let the parked child's lease lapse, then TWO workers race a single reclaim each.
 	time.Sleep(ttl + 20*time.Millisecond)
@@ -409,12 +409,12 @@ func TestQueueAdversarial_CompletionHookIdempotent_NoDoubleWake(t *testing.T) {
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(&afterN))
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended)
-	childID := subWorkflowChildID("parent", "sub")
+	childID := SubWorkflowChildID("parent", "sub")
 
 	// Run the child to done → the completion hook delivers ONE signal.
 	ran, err := RunNext(context.Background(), s, reg, "worker")
@@ -461,10 +461,10 @@ func TestQueueAdversarial_UnregisteredType_LoudAtProducer(t *testing.T) {
 	pb.AddSubWorkflowQueued("sub", "nope")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 
 	err = pw.Execute(context.Background())
 	require.ErrorIs(t, err, ErrValidation, "an unregistered child type fails LOUD at the producer, not a forever-park")
@@ -492,7 +492,7 @@ func TestQueueAdversarial_StaleFencedWorker_CompletionDoesNotClobberReclaimer(t 
 	storeA, storeB := open(), open()
 
 	const parent = "P"
-	childID := subWorkflowChildID(parent, "sub")
+	childID := SubWorkflowChildID(parent, "sub")
 	_, err := storeA.EnqueueSubWorkflow(childID, "T", nil, parent, completionSignalName("sub"), 1)
 	require.NoError(t, err)
 
@@ -552,12 +552,12 @@ func TestQueueAdversarial_ReclaimCancelledChild_FailsFastNotDeadlock(t *testing.
 	pb.AddSubWorkflowQueued("sub", "approvalChild").WithResult("result", "result")
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	pw := NewWorkflow(s)
+	pw := newWorkflowForTest(s)
 	pw.WorkflowID = "parent"
-	pw.DAG = pdag
-	pw.Registry = reg
+	pw.dag = pdag
+	pw.registry = reg
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "parent enqueues its child + parks")
-	childID := subWorkflowChildID("parent", "sub")
+	childID := SubWorkflowChildID("parent", "sub")
 
 	// A worker claims + runs the child; it parks on its approval gate (claimed, not terminal).
 	ran, err := RunNext(context.Background(), s, reg, "worker")

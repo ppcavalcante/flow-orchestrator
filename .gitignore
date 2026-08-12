@@ -4,6 +4,20 @@ notes
 flm.sh
 docs/gw.md
 
+# Generated coverage artifacts (AUD-049): regenerated on demand by
+# `make test-coverage-focused` / `make coverage-report`; never a source of truth,
+# so it must not be tracked (a committed copy only drifts stale — it was last
+# regenerated at M21 while the code moved on).
+coverage-focused.txt
+coverage-focused.tmp.txt
+coverage-focused.html
+
+# Formal-verification run artifacts (AUD-046): the pinned tools jar is fetched
+# on demand (SHA-256-verified) and the state-count summary is regenerated each
+# run by scripts/formal/run_tlc.sh — neither is a source of truth to track.
+.tlacache/
+tlc-summary.txt
+
 # Compiled example binaries
 api_workflow
 comprehensive
@@ -43,3 +57,15 @@ specs/states/
 
 # Local dogfood harness (dev-only, never shipped)
 _local/
+
+# Runtime store artifacts produced by RUNNING an example or a probe. JSONFileStore's
+# baseDir is a DIRECTORY named for the path the caller passes, so `go run
+# ./examples/new_simple` creates ./workflow_data.json/ next to the module root and fills
+# it with live run state — a __timestamp, node statuses, outputs.
+#
+# It was committed once (2fea479) by a `git add -A`, which is exactly why that command is
+# the wrong instrument in a shared tree. Ignored here rather than only deleted, because
+# deleting it fixes today and ignoring it fixes every future example run.
+workflow_data.json/
+*_workflow_data/
+audit/*

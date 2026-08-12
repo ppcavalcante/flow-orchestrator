@@ -110,8 +110,8 @@ func TestPool_StorePerWorker_FencingSafety(t *testing.T) {
 			aDone <- fmt.Errorf("A expected token 1, got %d", itemA.Token)
 			return
 		}
-		d := NewDAG("chain")
-		if e := d.AddNode(NewNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+		d := newDAGForTest("chain")
+		if e := d.addNode(newNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 			data.Set("aWrote", "A") // A's side-effect — its checkpoint must be fenced (rejected)
 			close(aInN0)            // parked: A holds token 1 and has NOT yet checkpointed level 0
 			<-releaseA
@@ -120,15 +120,15 @@ func TestPool_StorePerWorker_FencingSafety(t *testing.T) {
 			aDone <- e
 			return
 		}
-		if e := d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))); e != nil {
+		if e := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))); e != nil {
 			aDone <- e
 			return
 		}
-		if e := d.AddDependency("n0", "n1"); e != nil {
+		if e := d.addDependency("n0", "n1"); e != nil {
 			aDone <- e
 			return
 		}
-		wA := &Workflow{DAG: d, WorkflowID: "wf", Store: sA}
+		wA := &Workflow{dag: d, WorkflowID: "wf", Store: sA}
 		aDone <- wA.Execute(context.Background())
 	}()
 
@@ -165,14 +165,14 @@ func TestPool_StorePerWorker_FencingSafety(t *testing.T) {
 	// Exactly-once capstone (reached only when the fencing above HELD): B, the current-token owner,
 	// drives "wf" to completion on its OWN store and terminalizes the row once. A has returned, so the
 	// process-wide in-process drive lock for "wf" is free.
-	dB := NewDAG("chain")
-	require.NoError(t, dB.AddNode(NewNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+	dB := newDAGForTest("chain")
+	require.NoError(t, dB.addNode(newNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 		data.Set("winner", "B")
 		return nil
 	}))))
-	require.NoError(t, dB.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))))
-	require.NoError(t, dB.AddDependency("n0", "n1"))
-	wB := &Workflow{DAG: dB, WorkflowID: "wf", Store: sB}
+	require.NoError(t, dB.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))))
+	require.NoError(t, dB.addDependency("n0", "n1"))
+	wB := &Workflow{dag: dB, WorkflowID: "wf", Store: sB}
 	require.NoError(t, wB.Execute(context.Background()), "B (current token) drives to completion, unfenced")
 	flipped, err := sB.MarkDone("wf")
 	require.NoError(t, err)
@@ -194,8 +194,8 @@ func TestPool_HappyPath_DrainsQueue(t *testing.T) {
 	var ran atomic.Int64
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("job", func() (*DAG, error) {
-		d := NewDAG("job")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
+		d := newDAGForTest("job")
+		return d, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error {
 			ran.Add(1)
 			return nil
 		})))
@@ -242,8 +242,8 @@ func TestPool_EmptyQueue_NoHotSpin(t *testing.T) {
 	// the scan and would count zero, hiding a hot-spin).
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("job", func() (*DAG, error) {
-		d := NewDAG("job")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+		d := newDAGForTest("job")
+		return d, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
 	}))
 
 	factory := func() (*SQLiteStore, error) {
@@ -290,8 +290,8 @@ func TestPool_GracefulDrain_PromptReturn(t *testing.T) {
 	const items = 6
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("job", func() (*DAG, error) {
-		d := NewDAG("job")
-		return d, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+		d := newDAGForTest("job")
+		return d, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
 	}))
 	enq, err := factory()
 	require.NoError(t, err)

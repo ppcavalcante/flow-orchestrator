@@ -43,7 +43,7 @@ func TestWorkflowProperties(t *testing.T) {
 			for i := 0; i < nodeCount; i++ {
 				nodeName := fmt.Sprintf("node-%d", i)
 				nodeIndex := i // Capture for closure
-				nodes[i] = builder.AddNode(nodeName).WithAction(func(ctx context.Context, data *WorkflowData) error {
+				nodes[i] = builder.AddNode(nodeName).WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 					executionOrderMu.Lock()
 					executionOrder = append(executionOrder, fmt.Sprintf("node-%d", nodeIndex))
 					executionOrderMu.Unlock()
@@ -143,7 +143,7 @@ func TestWorkflowProperties(t *testing.T) {
 			for i := 0; i < nodeCount; i++ {
 				nodeName := fmt.Sprintf("node-%d", i)
 				nodeIndex := i // Capture for closure
-				builder.AddNode(nodeName).WithAction(func(ctx context.Context, data *WorkflowData) error {
+				builder.AddNode(nodeName).WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 					// Deterministic "random" output based on node name
 					output := (nodeIndex * 17) + (int(seed) % 100)
 					if output < 0 {
@@ -224,7 +224,7 @@ func TestWorkflowProperties(t *testing.T) {
 
 			// Create nodes with a small delay to ensure cancellation has time to propagate
 			for i := 0; i < nodeCount; i++ {
-				builder.AddNode(fmt.Sprintf("node-%d", i)).WithAction(func(ctx context.Context, data *WorkflowData) error {
+				builder.AddNode(fmt.Sprintf("node-%d", i)).WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 					// Small delay to allow cancellation to propagate
 					select {
 					case <-ctx.Done():
@@ -349,7 +349,7 @@ func TestWorkflowProperties(t *testing.T) {
 				builder.AddNode("retry-node").
 					WithRetries(retryCount).
 					WithTimeout(500 * time.Millisecond). // Add timeout to prevent hanging
-					WithAction(func(ctx context.Context, data *WorkflowData) error {
+					WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 						// Increment attempt count atomically
 						currentAttempt := atomic.AddInt32(&attemptCount, 1)
 
@@ -473,7 +473,7 @@ func TestWorkflowProperties(t *testing.T) {
 			// Create nodes that record their status transitions
 			for i := 0; i < nodeCount; i++ {
 				nodeName := fmt.Sprintf("node-%d", i)
-				builder.AddNode(nodeName).WithAction(func(ctx context.Context, data *WorkflowData) error {
+				builder.AddNode(nodeName).WithActionFunc(func(ctx context.Context, data *WorkflowData) error {
 					// Get current status
 					status, _ := data.GetNodeStatus(nodeName)
 

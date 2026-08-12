@@ -65,8 +65,20 @@ func (rcv *Signal) Payload() []byte {
 	return nil
 }
 
+func (rcv *Signal) EnqueuedAt() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *Signal) MutateEnqueuedAt(n int64) bool {
+	return rcv._tab.MutateInt64Slot(10, n)
+}
+
 func SignalStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func SignalAddId(builder *flatbuffers.Builder, id flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(id), 0)
@@ -76,6 +88,9 @@ func SignalAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
 }
 func SignalAddPayload(builder *flatbuffers.Builder, payload flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(payload), 0)
+}
+func SignalAddEnqueuedAt(builder *flatbuffers.Builder, enqueuedAt int64) {
+	builder.PrependInt64Slot(3, enqueuedAt, 0)
 }
 func SignalEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -28,15 +28,15 @@ func buildFailingSaga(t *testing.T, id string, compFail string) *Workflow {
 		}
 		return comp
 	}
-	b.AddStartNode("a").WithAction(func(_ context.Context, d *WorkflowData) error {
+	b.AddStartNode("a").WithActionFunc(func(_ context.Context, d *WorkflowData) error {
 		d.SetOutput("a", "ok")
 		return nil
-	}).WithCompensation(pick("a"))
-	b.AddNode("b").WithAction(func(_ context.Context, d *WorkflowData) error {
+	}).WithCompensationFunc(pick("a"))
+	b.AddNode("b").WithActionFunc(func(_ context.Context, d *WorkflowData) error {
 		d.SetOutput("b", "ok")
 		return nil
-	}).WithCompensation(pick("b")).DependsOn("a")
-	b.AddNode("fail").WithAction(func(_ context.Context, _ *WorkflowData) error {
+	}).WithCompensationFunc(pick("b")).DependsOn("a")
+	b.AddNode("fail").WithActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return errors.New("hard failure")
 	}).DependsOn("a")
 	w, err := FromBuilder(b)
@@ -81,7 +81,7 @@ func TestREM03_PlainFailure_NotErrRolledBack(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("plain")
 	// A single failing node with NO compensation anywhere → a plain failure, no saga
 	// rollback (nothing compensable completed).
-	b.AddStartNode("x").WithAction(func(_ context.Context, _ *WorkflowData) error {
+	b.AddStartNode("x").WithActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return errors.New("plain boom")
 	})
 	w, err := FromBuilder(b)
@@ -103,7 +103,7 @@ func TestREM03_PlainFailure_NotErrRolledBack(t *testing.T) {
 func TestREM04_WithStoreBuild_Errors(t *testing.T) {
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder().WithWorkflowID("g").WithStore(store)
-	b.AddStartNode("n").WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+	b.AddStartNode("n").WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 	dag, err := b.Build()
 	require.Error(t, err, "WithStore(s).Build() must error (a DAG can't carry a store) — no silent non-durable run")
 	require.Nil(t, dag, "no DAG is returned on the guard error")
@@ -113,7 +113,7 @@ func TestREM04_WithStoreBuild_Errors(t *testing.T) {
 // Bite — the store-less Build() path is UNCHANGED (no WithStore → builds fine).
 func TestREM04_StorelessBuild_Unchanged(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("plain")
-	b.AddStartNode("n").WithAction(func(_ context.Context, _ *WorkflowData) error { return nil })
+	b.AddStartNode("n").WithActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil })
 	dag, err := b.Build()
 	require.NoError(t, err, "Build() with no store is unchanged")
 	require.NotNil(t, dag)
@@ -126,7 +126,7 @@ func TestREM04_FromBuilderWithStore_StillDurable(t *testing.T) {
 	store, err := NewFlatBuffersStore(dir)
 	require.NoError(t, err)
 	b := NewWorkflowBuilder().WithWorkflowID("dur").WithStore(store)
-	b.AddStartNode("n").WithAction(func(_ context.Context, d *WorkflowData) error { d.SetOutput("n", "ok"); return nil })
+	b.AddStartNode("n").WithActionFunc(func(_ context.Context, d *WorkflowData) error { d.SetOutput("n", "ok"); return nil })
 	w, err := FromBuilder(b)
 	require.NoError(t, err, "FromBuilder still builds with a store (uses the guard-free build())")
 	require.Same(t, WorkflowStore(store), w.Store, "the store propagated onto the Workflow")

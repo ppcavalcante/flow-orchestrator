@@ -29,8 +29,8 @@ func TestSignalConsume_CrashBeforeCheckpoint_ReAppliesIdempotent(t *testing.T) {
 	require.NoError(t, store.DeliverSignal(wf, Signal{ID: "g1", Name: "go", Payload: "V"}))
 
 	build := func() *DAG {
-		d := NewDAG(wf)
-		require.NoError(t, d.AddNode(NewWaitForSignalNode("wait", "go")))
+		d := newDAGForTest(wf)
+		require.NoError(t, d.addNode(newWaitForSignalNode("wait", "go")))
 		return d
 	}
 
@@ -77,8 +77,8 @@ func TestSignalConsume_IdempotentApplyStableKey(t *testing.T) {
 	require.NoError(t, store.DeliverSignal(wf, Signal{ID: "s1", Name: "go", Payload: int64(42)}))
 
 	build := func() *DAG {
-		d := NewDAG(wf)
-		require.NoError(t, d.AddNode(NewWaitForSignalNode("wait", "go")))
+		d := newDAGForTest(wf)
+		require.NoError(t, d.addNode(newWaitForSignalNode("wait", "go")))
 		return d
 	}
 	cp := func(d *WorkflowData) error { return store.SaveCheckpoint(d) }

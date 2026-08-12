@@ -1,0 +1,4 @@
+# author: independent-reviewer
+# planted against 118-D2. Not written by the author of the fix.
+the doer's effect reaches the sink only after the verifier has run,
+so no doer's effect reaches S unverified.

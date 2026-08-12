@@ -19,7 +19,7 @@ import (
 // defaultMaxFileSize var seam (so we never materialize a 64 MiB file, the same
 // technique the FB sec01 test uses) and asserts an over-cap file on disk surfaces
 // as errors.Is(ErrCorruptData) from BOTH JSONFileStore.Load and
-// WorkflowData.LoadFromJSON (which share readBoundedFile / the inline LimitReader).
+// WorkflowData.LoadFromJSON (which share readBoundedFileCapped / the inline LimitReader).
 func TestJSONLoad_SizeCap_Symmetric(t *testing.T) {
 	origCap := defaultMaxFileSize
 	defaultMaxFileSize = 1024 // 1 KiB — tiny so a small file trips the cap

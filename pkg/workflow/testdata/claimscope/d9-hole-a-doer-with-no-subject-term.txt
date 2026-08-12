@@ -1,0 +1,5 @@
+# author: t8-seat
+# SELF-TEST: written by the author of the fix (118-D9 HOLE-A form 1) to a shape the reviewer described; the reviewer sentence was not available.
+# Confirmed to ESCAPE the rule before the change, so it is a real regression case -- but weaker in independence than the d2 and d6 witnesses.
+Nothing the doer produced reaches S until it has been verified, so the doer's
+effect is never observed unverified.

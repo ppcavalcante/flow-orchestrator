@@ -5,6 +5,148 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0-alpha] — 2026-08-12
+
+**M23 — Sealed Graph + Complete Mediation.** The graph surface is **sealed** (a validated `Node`/
+`DAG`/`Workflow` can no longer be mutated through a leaked handle), runtime **mediation is completed**
+(a consumer action can neither overwrite engine-reserved state nor resume against a drifted graph
+definition), plus a full **independent-audit remediation** pass and a **dogfood/hardening** pass over
+the surrounding contracts. For a **valid** graph the static-DAG executor is **0-diff / behavior-
+compatible** — the seal and the new guards only refuse invalid or drifted inputs earlier and louder.
+See [ADR-0022](docs/architecture/adr/0022-sealed-graph-complete-mediation.md).
+
+**This release takes a deliberate pre-1.0 API cut** while the surface is still `-alpha` — see
+**Changed (BREAKING)** below. Every break has a mechanical migration; taking them now keeps the 1.0
+frozen surface honest.
+
+**Changed (BREAKING):**
+- **The `Node` / `DAG` / `Workflow` graph surface is sealed** (SEAL-01/02/06, enforced by
+  `pkg/workflow/surface_census_test.go` so it cannot silently regress):
+  - **Post-`Build` graph mutators are removed** from the public surface — the per-`Node` setters
+    (`AddDependency`, `WithRetries`, `WithTimeout`, …) and `(*DAG).AddDependency` /
+    `(*Workflow).AddDependency`. A validated graph can no longer be edited from outside the package.
+    *Migration:* express all topology/policy through the builder before `Build`.
+  - **Graph fields are unexported; reads move to accessors** — `Node`: `Name()`,
+    `GetDependencies()`, `HasDependency(name)`; `DAG`: `Name()` (now a method), `GetNode`,
+    `GetLevels`, `DefinitionDigest`, `Validate`, `Execute` (`StartNodes`/`EndNodes` deleted). The
+    `Workflow.DAG` field becomes the `w.DAG()` accessor; the exported **config** fields remain
+    (`WorkflowID`, `Store`, `MaxSubWorkflowDepth`, `Clock`, `Locker`, `RollbackTimeout`,
+    `MetricsConfig`). *(SEAL-01/02/06)*
+  - **Constructors are unexported** — `NewNode`, `NewTimerNode` (and the other node constructors),
+    `NewDAG`/`NewDAGWithCapacity`, and **`NewWorkflow(store)`** are no longer on the public surface.
+    *Migration:* build via the builder; for a **store-backed** run use `workflow.FromBuilder(builder)`
+    (a bare `NewWorkflow`/`&Workflow{DAG: …}` cannot carry a store). *(SEAL)*
+- **Typed `WithAction(Action)` / `WithActionFunc(func)` split (AUD-041).** `WithAction` now takes a
+  typed `Action`; a bare `func(ctx, *WorkflowData) error` goes through `WithActionFunc` (or
+  `workflow.ActionFunc`). A bare func no longer silently satisfies `WithAction`.
+- **The legacy action adapter is removed (AUD-030).** `WithAction` previously adapted a
+  `func(ctx, interface{}) (interface{}, interface{})` by **dropping both return values** — a failed
+  step was reported `Completed` (silent data/error loss). That signature is now rejected at `Build`.
+  *Migration:* use `func(ctx, *WorkflowData) error` (or an `Action`).
+- **`ClaimStore.Claim` is context-aware (AUD-034)** — it now takes a `context.Context` (`Renew` /
+  `Release` stay ctx-free).
+- **`ApproveSignal` / `RejectSignal` gain a trailing correlation-nonce argument (AUD-025)** —
+  `ApproveSignal(node, approver, comment, sigID, nonce)`; a decision without the matching nonce is
+  inert (see **Added**).
+- **`DAG.TopologicalSort()` returns `[]*Node`, not `[][]*Node` (AUD-039).** It was always one linear
+  dependency-respecting order wrapped in a one-element outer slice that read as if it returned parallel
+  levels. *Migration:* for the level-wise structure call `GetLevels`.
+- **`ChoiceBuilder` / `MergeBuilder` / `FanOutExpander` are now exported types (AUD-040)** — the
+  previously unexported choice/merge builders and the fan-out expander are named on the public surface.
+- **Typed definition-mismatch + migration hook (AUD-070)** — a resume against a drifted graph now
+  returns a typed `*DefinitionMismatchError`, and a `DefinitionMigration` hook lets a host reconcile a
+  known migration rather than hard-failing.
+
+**Added:**
+- **`DAG.DefinitionDigest()`** — a structural digest of the graph definition (topology, dependency
+  edges, per-node retry/timeout/continue-on-error policy, compensation, boundary, action **kind**,
+  suspendability). Resume now rejects a **changed graph definition**, not only a removed node
+  (backward-compatible: a pre-digest checkpoint falls back to the node-identity check). The digest is
+  *structural* — it cannot observe an `ActionFunc`'s runtime behaviour. *(AUD-010)*
+- **Complete per-node action mediation via a sealed action view (AUD-018/019).** Each node's action
+  runs against a **sealed view** of `WorkflowData`; a consumer `Set` on an engine-reserved
+  (`__`-prefixed) key is refused and recorded as a seal violation, so a consumer cannot corrupt the
+  executor's own journals / dispositions / correlation state. The engine writes reserved keys through a
+  private `setReserved` path the consumer cannot reach.
+- **Build-time boundary verifier-dominance — `WithBoundary(doer, verifier, sink)`.** Declares
+  `Precedence(verifier, sink)` scoped to control flow: `Build` **refuses** any topology that can reach
+  the sink on some route without first passing the verifier — caught at build, not discovered at run.
+  *(M23 / VB-08)*
+- **Approval correlation nonce — `ApprovalNonce` + `ApprovalNonceFromStore` (AUD-025).** A pure,
+  recomputable function of `(workflowID, node, DefinitionDigest)` a host attaches to an approval
+  decision; the engine consumes the decision **only if the attached nonce matches**, binding it to a
+  specific workflow, node, and graph definition. `(*Workflow).ApprovalNonce(node)` for a live workflow;
+  `ApprovalNonceFromStore(store, workflowID, node)` for a dispatcher / signal pump that holds only
+  `(store, workflowID)` and reads the digest the executor stamped into the parked state. It is a
+  **freshness/correlation token, not an authentication secret** — it defeats a stale or misrouted
+  decision, not a party that controls the store (consistent with the M9 store-as-TCB trust model; see
+  AUD-069).
+- **`WithDefinitionBudget(budget)` (AUD-068)** — an explicit size ceiling on the definition
+  (`MaxNodes` / `MaxEdges` / `MaxWidth`; 0 = unlimited), refused at `Build`.
+- **Canonical cross-store value fidelity (AUD-026)** — `Save` canonicalizes values so a round-trip is
+  value-identical across the InMem / FlatBuffers / JSON / SQLite stores.
+
+**Fixed (runtime safety):**
+- **`WorkflowData.Clone` deep-copies the canonical value algebra** — scalars,
+  `map[string]interface{}`, and `[]interface{}` (including **nested slices**, cycle-safe). A prior
+  round descended into maps but still aliased a nested `[]interface{}` and non-canonical values by
+  reference, contradicting the deep-copy claim; `InMemoryStore.Save`/`Load` snapshots are now
+  isolated for all canonical values. Cycle-safety keys the visited set on `{ptr, len}` — a genuine
+  cycle re-encounters an identical `(ptr,len)`, while two overlapping reslices of different lengths
+  stay distinct clones (pointer-only keying collapsed them, corrupting the short view). Non-canonical
+  values (typed maps `map[string]T`, pointers, custom structs) are **retained by reference** and
+  documented as such — they are outside the store's canonical algebra and cannot cross the durable
+  boundary anyway (`Save` canonicalizes; AUD-026). *(AUD-013/014, CUR-003)*
+- **Level execution is goroutine-bounded.** The executor now acquires the concurrency slot before
+  spawning, so a wide level uses `MaxConcurrency` goroutines, not one per node. *(AUD-017)*
+- **Nil / typed-nil / nil-operand built-in actions are rejected at `Build`** (`NewCompositeAction(nil)`,
+  `NewRetryableAction(nil, …)`, `NewMapAction(…, nil)`, `NewValidationAction(…, nil, …)`,
+  `ActionFunc(nil)`, typed-nil actions) instead of panicking the host at run time. *(AUD-001)*
+- **A compiled `*DAG` passed to `WithAction` is rejected at `Build`** (it bypassed `AddSubWorkflow`'s
+  depth/cycle/suspendable-child guards). Use `AddSubWorkflow` to nest a child graph. *(AUD-011)*
+- **Empty multi-process `ownerID` is rejected** in `Claim`/`WithMultiProcessLocker` (an empty owner
+  collapsed distinct processes onto one lease/token). *(AUD-003)*
+- **FlatBuffers signals preserve `EnqueuedAt`.** A signal round-tripped through the FlatBuffers store
+  previously lost its delivery timestamp. *(CUR-001)*
+- **A nil `*WorkflowData` passed to `DAG.Execute`, and a typed-nil `WorkflowStore`, are rejected**
+  with `ErrValidation` (via `FromBuilder`/`RunNext`) instead of panicking downstream. *(CUR-002,
+  AUD-031)*
+- **DAG config setters are synchronized against `Execute`** — a concurrent config mutation and drive
+  no longer race the snapshot. *(AUD-032)*
+- **The in-process `Locker` honors context cancellation while blocked** — a wake/deliver waiting on the
+  single-writer lease returns on ctx cancel, and only honors ctx **while the lease is contended**.
+  *(AUD-033)*
+
+**Docs:**
+- **Rebuilt `examples/` into a capability progression** — twelve numbered stages
+  (`01-hello-dag` → `12-observability`) plus a `capstone-document-pipeline`, each **actually runnable
+  and exercised in CI** (the prior examples were compile-only, and four exited 0 no matter how badly
+  they failed; the "Run examples" CI step now runs them).
+- **Added [ADR-0021](docs/architecture/adr/0021-production-hardening.md) (M22)** and
+  **[ADR-0022](docs/architecture/adr/0022-sealed-graph-complete-mediation.md) (M23)**.
+- **Corrected public-doc drift vs the code** — the API reference / architecture / README were brought
+  back into agreement with HEAD (`TopologicalSort`'s honest return type, the platform-support & store
+  capability matrix, the sealed-struct signatures, typed `WithAction`, and the durable-builder example
+  now using `FromBuilder`). Added explicit `EXPERIMENTAL:`/`RESERVED:` surface markers (AUD-044),
+  corrected over-strong assurance wording to "TLA+-model-checked" / "machine-checked algorithm"
+  (AUD-047), and reframed Approval as an **orchestration** gate, not an authorization boundary
+  (AUD-069). *(CUR-005, AUD-024/027/038/039/042/044/047/054/069)*
+
+**CI / tests:**
+- Every `-race` Make target carries an explicit `-timeout`; coverage profiles are written atomically
+  (temp → rename on success). *(AUD-006)*
+- Two timing-dependent package tests are made deterministic / opt-in, so a single package green is no
+  longer a sample. *(AUD-005)*
+- **The TLA+ capstones are model-checked in CI** against a pinned TLC jar. *(AUD-046)*
+- **A doctest gate catches stale package-qualified API** in documentation samples. *(AUD-048)*
+- **The mutation-test job is timeout-capped and scheduled off the PR path** so a runaway run cannot
+  block a PR. *(AUD-050)*
+- **The build toolchain is pinned for contributors** (patched standard library). *(AUD-051)*
+- **A release preflight binds tag / version / changelog / ancestry to one SHA** so a tag cannot ship
+  with a mismatched version constant or changelog. *(CUR-007)*
+- **The VB-09 terminal-writer census golden** enforces the set of un-mediated terminal writers against
+  a checked-in golden (the deleted `new_simple` writer sites were dropped from it — CUR-006).
+
 ## [0.21.0-alpha] — 2026-07-24
 
 **M22 — Production Hardening.** Envelope + ergonomics hardening off a whole-surface proving-ground

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -138,22 +138,66 @@ func TestTimeoutMiddleware(t *testing.T) {
 		}
 	})
 
-	// Skip the timeout test because it's flaky in automated environments
-	t.Run("Action times out (skipped)", func(t *testing.T) {
-		t.Skip("Skipping timeout test as it can be flaky in CI environments")
+	// 116-AF10. This arm was `t.Skip("Skipping timeout test as it can be flaky in CI
+	// environments")` with ~12 lines of dead assertion under it, and its passing sibling
+	// made the parent report PASS — so TimeoutMiddleware's timeout path, which has no
+	// non-test caller anywhere in the repository, was exercised by nothing at all.
+	//
+	// 🔴 IT NEVER FLAKED. The skip dates from 57c071a, 2025-03-28, the repository's FIRST
+	// commit, and was never touched again. At that commit the timeout branch read
+	// `if ctx.Err() == context.DeadlineExceeded` — the PARENT context, not timeoutCtx —
+	// and the parent here is context.Background(), whose Err() is always nil. So on
+	// timeout the middleware returned nil and this arm failed. MEASURED, init-commit
+	// semantics vs head, 20 iterations each under -race:
+	//
+	//	at 57c071a  20/20 FAIL, err = <nil>                          total 0.24s
+	//	at head     20/20 pass, err = "action timed out after 10ms:
+	//	                              context deadline exceeded"     total 20.04s
+	//
+	// A real product bug, mislabelled as flakiness and skipped instead of fixed. It has
+	// since been fixed twice over: the branch now reads timeoutCtx.Err(), and it waits on
+	// resultChan before returning — which is the 0.24s vs 20.04s split above, the init
+	// version returning while a 1-second goroutine kept running against shared
+	// WorkflowData. That leak is the likelier source of whatever "flaky" impression there
+	// was, and it is gone.
+	//
+	// The arm is rewritten rather than merely un-skipped, because as written it was weak
+	// in three ways:
+	//   - the action IGNORED ctx, so what it really tested was the middleware returning
+	//     regardless of cancellation, not cancellation being propagated;
+	//   - it asserted strings.Contains(err.Error(), "deadline exceeded") where the
+	//     contract is errors.Is(err, context.DeadlineExceeded);
+	//   - it cost a full second of wall clock to do it.
+	//
+	// NOTHING HERE ASSERTS A WALL-CLOCK MARGIN. The action blocks until cancellation, so
+	// the deadline is the only thing that can release it and the PASS has no timing
+	// dependence whatever.
+	t.Run("Action times out", func(t *testing.T) {
+		var finished atomic.Bool
 
-		// This would be the test if we weren't skipping it
 		middleware := TimeoutMiddleware(10 * time.Millisecond)
 		action := ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			time.Sleep(1 * time.Second) // Much longer than the timeout
-			return nil
+			<-ctx.Done() // deterministic: only the deadline can release this
+			// The settle delay exists ONLY so that a middleware which fails to wait for
+			// this goroutine is caught by the finished.Load() assertion below. It is not
+			// on the pass path — a middleware that waits simply waits for it.
+			time.Sleep(50 * time.Millisecond)
+			finished.Store(true)
+			return ctx.Err()
 		})
 
 		wrapped := middleware(action)
 		err := wrapped.Execute(context.Background(), NewWorkflowData("test-timeout"))
 
-		if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
-			t.Errorf("Expected timeout error, got: %v", err)
+		// The contract, not the string. TimeoutMiddleware wraps with %w precisely so
+		// callers can branch on this.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected an error satisfying errors.Is(err, context.DeadlineExceeded), got: %v", err)
+		}
+		// The action must have received the cancellation, not merely been abandoned.
+		if !finished.Load() {
+			t.Fatal("middleware returned before the action goroutine finished — it must wait, " +
+				"or the action keeps mutating shared WorkflowData after Execute returns")
 		}
 	})
 }
@@ -569,28 +613,27 @@ func TestNoDelayRetryMiddleware(t *testing.T) {
 	})
 
 	t.Run("Context cancellation", func(t *testing.T) {
-		callCount := 0
-		action := ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			callCount++
-			// Simulate some work and check context
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				time.Sleep(10 * time.Millisecond) // Add a small delay
-				return fmt.Errorf("error")
-			}
-		})
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		// AUD-005: the prior version raced a 5ms context timeout against a 10ms action
+		// sleep to make the SECOND attempt observe a cancelled context — a wall-clock
+		// race that false-reds under load. Replace it with SYNCHRONIZED cancellation: the
+		// action cancels the context on its (only) call, so the retry middleware
+		// deterministically sees ctx.Err() before the next attempt and aborts. No timing.
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+
+		callCount := 0
+		action := ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+			callCount++
+			cancel() // cancel synchronously; the middleware aborts before retrying
+			return fmt.Errorf("error")
+		})
 
 		middleware := NoDelayRetryMiddleware(3)
 		wrappedAction := middleware(action)
 
 		err := wrappedAction.Execute(ctx, NewWorkflowData("test"))
 		assert.Error(t, err)
-		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, 1, callCount, "Action should be called only once due to cancelled context")
 	})
 

@@ -11,8 +11,8 @@ import (
 // compNode builds a Completed-capable node that records its compensation into rec.
 func compNode(t *testing.T, name string, rec *compRecorder) *Node {
 	t.Helper()
-	n := NewNode(name, benchNoopAction())
-	n.Compensation = ActionFunc(func(context.Context, *WorkflowData) error { rec.record(name); return nil })
+	n := newNode(name, benchNoopAction())
+	n.compensation = ActionFunc(func(context.Context, *WorkflowData) error { rec.record(name); return nil })
 	return n
 }
 
@@ -28,14 +28,14 @@ func TestSagaNeg_ErrSuspended_NoRollback(t *testing.T) {
 	rec := &compRecorder{}
 	store := NewInMemoryStore() // a Checkpointer, so the park flushes + returns ErrSuspended
 	const id = "saga-neg-suspend"
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	gate := newParkGate()
 	mustAddNode(t, d, compNode(t, "a", rec))
 	park := newSuspendingNode("park", gate)
 	mustAddNode(t, d, park)
-	require.NoError(t, d.AddDependency("a", "park"))
+	require.NoError(t, d.addDependency("a", "park"))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 	require.ErrorIs(t, err, ErrSuspended, "the run parks (intends to resume), not fails")
 
@@ -52,13 +52,13 @@ func TestSagaNeg_FlushError_NoRollback(t *testing.T) {
 	rec := &compRecorder{}
 	store := &flushErrorCheckpointer{InMemoryStore: NewInMemoryStore()}
 	const id = "saga-neg-flush"
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	gate := newParkGate()
 	mustAddNode(t, d, compNode(t, "a", rec))
 	mustAddNode(t, d, newSuspendingNode("park", gate))
-	require.NoError(t, d.AddDependency("a", "park"))
+	require.NoError(t, d.addDependency("a", "park"))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 	require.Error(t, err)
 	require.False(t, errors.Is(err, ErrSuspended), "a failed flush did not suspend")
@@ -75,11 +75,11 @@ func TestSagaNeg_FlushError_NoRollback(t *testing.T) {
 func TestSagaNeg_CorruptLoad_NoRollback(t *testing.T) {
 	store := &errLoadStore{loadErr: ErrCorruptData}
 	const id = "saga-neg-corrupt"
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	rec := &compRecorder{}
 	mustAddNode(t, d, compNode(t, "a", rec))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 	require.ErrorIs(t, err, ErrCorruptData, "a corrupt load surfaces, not a rollback")
 	require.Empty(t, rec.snapshot(), "no compensation runs on a corrupt load")

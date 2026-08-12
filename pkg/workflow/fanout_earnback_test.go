@@ -29,9 +29,9 @@ func seedJournalAndDrive(t *testing.T, journalValue interface{}) error {
 	b.AddFanOut("fan", intItemsExpander(3), branch).WithResults("r", "out")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = id
-	w.DAG = dag
+	w.dag = dag
 	return w.Execute(context.Background())
 }
 
@@ -40,8 +40,12 @@ func seedJournalAndDrive(t *testing.T, journalValue interface{}) error {
 // (fanout.go:451 non-string, :455 malformed-JSON, :460 count≠len). Resume-integrity + a tracked security LOW: a
 // store an attacker/bit-rot can tamper must not let a corrupt journal drive an arbitrary branch count.
 func TestFanOut_JournalTamper(t *testing.T) {
-	// (a) non-string journal value (a slice snuck in where the string journal belongs).
-	err := seedJournalAndDrive(t, []interface{}{1, 2, 3})
+	// (a) non-string journal value. AUD-026: a COMPLEX value (a slice) now canonicalizes to
+	// a JSON string on the store round-trip, so it would reach the malformed-JSON guard (b)
+	// rather than the non-string guard. A non-string SCALAR (int64) stays typed through the
+	// canonical contract, so it still exercises the non-string guard (fanout.go:451) — the
+	// corrupt journal is refused, never fanned out at a wrong width.
+	err := seedJournalAndDrive(t, int64(3))
 	require.ErrorIs(t, err, ErrValidation, "a non-string journal is refused")
 	require.ErrorContains(t, err, "not a string")
 
@@ -69,9 +73,9 @@ func TestFanOut_ExpanderError(t *testing.T) {
 	}, boom).WithResults("r", "out")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-experr"
-	w.DAG = dag
+	w.dag = dag
 	err = w.Execute(context.Background())
 	require.Error(t, err, "an expander error fails the fan-out node")
 	require.ErrorContains(t, err, "expander")
@@ -135,9 +139,9 @@ func TestFanOut_CountKeyForeignCollision(t *testing.T) {
 		})).WithResults("r", "out").DependsOn("seed")
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(store)
+		w := newWorkflowForTest(store)
 		w.WorkflowID = "wf-cc"
-		w.DAG = dag
+		w.dag = dag
 		require.ErrorIs(t, w.Execute(context.Background()), ErrFanOutResultKeyCollision, "a foreign count value is a loud collision")
 	})
 	// (b) an EQUAL count (== N) is the idempotent re-apply → allowed (the resume case).
@@ -154,9 +158,9 @@ func TestFanOut_CountKeyForeignCollision(t *testing.T) {
 		})).WithResults("r", "out").DependsOn("seed")
 		dag, err := b.Build()
 		require.NoError(t, err)
-		w := NewWorkflow(store)
+		w := newWorkflowForTest(store)
 		w.WorkflowID = "wf-cc2"
-		w.DAG = dag
+		w.dag = dag
 		require.NoError(t, w.Execute(context.Background()), "an equal (==N) pre-existing count is an idempotent re-apply, allowed")
 	})
 }

@@ -1,4 +1,13 @@
-.PHONY: all build test lint clean examples benchmark generate-fb check-flatbuffers test-core coverage-report test-coverage-focused check-coverage coverage-improvement verify-slsa codecov-coverage property-tests
+.PHONY: all build test bar-oracle lint clean examples benchmark generate-fb check-flatbuffers test-core coverage-report test-coverage-focused check-coverage coverage-improvement verify-slsa codecov-coverage property-tests
+
+# Central timeout for EVERY -race target (AUD-006/AUD-052). The full -race suite
+# is heavy and a rare full run has approached go's default 600s aggregate timeout
+# (F-VERIFY-P112-FLAKE — suite weight, not a data race). Sized ONCE here so a
+# growing suite is a one-line bump rather than a per-target hunt, and so no race
+# target can silently ship without a ceiling on a genuine hang. A KILLED `go test`
+# exits non-zero with zero `--- FAIL`, which looks exactly like a green — every
+# race target below therefore carries this explicit ceiling.
+TEST_TIMEOUT ?= 30m
 
 # Default target
 all: generate-fb lint test build
@@ -13,7 +22,25 @@ build: generate-fb
 # suite weight). The explicit 30m headroom keeps the release gate from stranding
 # on the aggregate timeout while staying a hard ceiling on a genuine hang.
 test: generate-fb
-	go test -race -timeout 30m ./...
+	go test -race -timeout $(TEST_TIMEOUT) ./...
+
+# The BAR-M23 oracle's verdict WITH ITS BOUNDS (M23 118B-9). `make test` above shows
+# neither: `go test` DISCARDS a passing package's entire binary output — measured on
+# go1.25.1 with controls, and it is not only t.Logf but fmt.Println, os.Stdout, os.Stderr
+# and TestMain too — so on a green the oracle's population bound and arm-availability
+# table print ZERO times, and a phase citing "oracle green" never meets them.
+#
+# THIS is the invocation that prints them. -v is load-bearing rather than decoration, and
+# TestBARM23_BoundsHaveAnInvocationThatPrintsThem reds if this target loses it or loses
+# its selection.
+bar-oracle: generate-fb
+	go test -timeout 30m -count=1 -v -run 'TestBARM23_' ./pkg/workflow/
+
+# AUD-002 retired the `adversarial_copyclass` tag, its script and the `test-tagged` target. The tag
+# existed ONLY to quarantine `go vet`'s copylocks diagnostic on `cp := *dag` — the first half of the
+# copied-mutex-wedge finding. The fix makes DAG.mu a *sync.RWMutex, so a value copy no longer trips
+# copylocks AND no longer inherits a locked mutex; the copy-class tests moved into the default build
+# (seal_adversarial_117_copyclass_test.go) and run under `make test` / the -race gate like any other.
 
 # Run property-based tests
 property-tests: generate-fb
@@ -21,21 +48,28 @@ property-tests: generate-fb
 
 # Run tests with coverage
 test-coverage: generate-fb
-	go test -race -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./...
+	go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage.tmp.txt -covermode=atomic ./...
+	mv coverage.tmp.txt coverage.txt
 	go tool cover -html=coverage.txt -o coverage.html
 
 # Run tests with coverage for core packages only (excluding examples, benchmarks, and generated code)
+# NOTE: CI's coverage job calls this target. It MUST carry -timeout (AUD-006): a
+# killed race run writes a PARTIAL profile and exits non-zero with zero --- FAIL,
+# which a coverage gate reads as a truncated-but-"green" result. The profile is
+# written to a temp file and renamed only on success, so a killed run cannot leave
+# a truncated coverage-focused.txt standing in for a complete one.
 test-coverage-focused: generate-fb
-	go test -race -coverprofile=coverage-focused.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
+	go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage-focused.tmp.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
+	mv coverage-focused.tmp.txt coverage-focused.txt
 	go tool cover -html=coverage-focused.txt -o coverage-focused.html
 
 # Generate coverage report specifically for codecov
 codecov-coverage: generate-fb
 	@echo "Generating coverage report for codecov..."
 	@# Run tests for all packages
-	@go test -race -timeout 30m ./...
-	@# Generate coverage report for relevant packages only
-	@go test -race -coverprofile=coverage.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
+	@go test -race -timeout $(TEST_TIMEOUT) ./...
+	@# Generate coverage report for relevant packages only (temp → rename on success)
+	@go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage.tmp.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"` && mv coverage.tmp.txt coverage.txt
 	@echo "Coverage report generated at coverage.txt"
 	@echo "Coverage by priority level:"
 	@echo "Critical (pkg/workflow): $(shell go tool cover -func=coverage.txt | grep "pkg/workflow" | grep -v "internal/workflow/fb" | grep total | awk '{print $$3}')"
@@ -44,7 +78,8 @@ codecov-coverage: generate-fb
 
 # Run tests for core functionality only
 test-core: generate-fb
-	go test -race -coverprofile=coverage-core.txt -covermode=atomic ./pkg/workflow ./internal/workflow/arena ./internal/workflow/memory
+	go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage-core.tmp.txt -covermode=atomic ./pkg/workflow ./internal/workflow/arena ./internal/workflow/memory
+	mv coverage-core.tmp.txt coverage-core.txt
 	go tool cover -func=coverage-core.txt
 	go tool cover -html=coverage-core.txt -o coverage-core.html
 
@@ -110,11 +145,20 @@ generate-fb: check-flatbuffers
 	flatc --go -o internal/workflow/fb pkg/workflow/schema/workflow_data.fbs
 
 # Run examples
+# Run the examples. This target said "Running example:" and ran `go build` for nine
+# milestones; CI carried the same lie. See the comment on the CI step.
+#
+# The durable state is cleared first, and that is not tidiness: these examples persist
+# their journals under their own directories, so a SECOND run resumes a completed
+# workflow and skips every node — it finishes in milliseconds having executed nothing.
+# A target that silently no-ops on re-run is the same class of lie this target is being
+# fixed to remove. CI gets a fresh checkout and never sees it; a developer would.
 examples:
 	@for example in $$(find examples -name "main.go" -not -path "*/\.*" | sort); do \
 		dir=$$(dirname $$example); \
 		echo "Running example: $$dir"; \
-		(cd $$dir && go build -v && cd -); \
+		rm -rf $$dir/workflow_data.json $$dir/workflow_data.fb $$dir/api_workflow_state; \
+		(cd $$dir && go run .) || exit 1; \
 	done
 
 # Run benchmarks

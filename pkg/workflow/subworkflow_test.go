@@ -37,9 +37,9 @@ func parentWithSub(t *testing.T, store WorkflowStore, wf string, childDAG *DAG, 
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(afterCounter))
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = wf
-	w.DAG = dag
+	w.dag = dag
 	return w
 }
 
@@ -65,7 +65,7 @@ func TestSubWorkflow_InlineSpawnAwaitResult(t *testing.T) {
 	assert.Equal(t, "child-output", result)
 
 	// The child persisted under its OWN deterministic ID (distinct journal).
-	childID := subWorkflowChildID("wf-parent", "sub")
+	childID := SubWorkflowChildID("wf-parent", "sub")
 	childData, err := store.Load(childID)
 	require.NoError(t, err, "the child persisted under a distinct workflow ID")
 	assertNodeStatus(t, childData, "produce", Completed)
@@ -97,7 +97,7 @@ func TestSubWorkflow_IdempotentSpawn_ParentReDrive(t *testing.T) {
 // SEED-BREAK: the load-bearing guard is the DETERMINISTIC child ID (+ the child's own
 // resume-idempotency: child.Execute on a terminal child journal re-runs nothing). Make the
 // child ID non-deterministic (a fresh ID each spawn) → the re-drive spawns a NEW child →
-// spawn-count 2 → this reddens. (Verified: mutating subWorkflowChildID to append a timestamp
+// spawn-count 2 → this reddens. (Verified: mutating SubWorkflowChildID to append a timestamp
 // breaks exactly this assertion.) The PIN-2 terminal-fast-path is an optimization, not the
 // guarantee — removing it leaves the count at 1 because child.Execute is itself idempotent.
 func TestSubWorkflow_IdempotentSpawn_CrashMidChild(t *testing.T) {
@@ -108,8 +108,8 @@ func TestSubWorkflow_IdempotentSpawn_CrashMidChild(t *testing.T) {
 
 	// Pre-seed a COMPLETED child journal under the deterministic child ID (as if a prior
 	// run's child finished), WITHOUT the parent having recorded "sub" terminal.
-	childID := subWorkflowChildID("wf-crash", "sub")
-	seeded := &Workflow{DAG: childDAG, WorkflowID: childID, Store: store}
+	childID := SubWorkflowChildID("wf-crash", "sub")
+	seeded := &Workflow{dag: childDAG, WorkflowID: childID, Store: store}
 	require.NoError(t, seeded.Execute(context.Background()))
 	require.EqualValues(t, 1, spawnN.Load(), "the pre-crash child ran once")
 
@@ -132,8 +132,8 @@ func TestSubWorkflow_IdempotentSpawn_CrashMidChild(t *testing.T) {
 // Store in scope (bare DAG.Execute, no injection) fails loudly, never a silent spawn.
 func TestSubWorkflow_RequiresStore(t *testing.T) {
 	child := childProducing(t, "x", nil)
-	d := NewDAG("wf-nostore")
-	require.NoError(t, d.AddNode(NewNode("sub", &subWorkflowAction{nodeName: "sub", child: child})))
+	d := newDAGForTest("wf-nostore")
+	require.NoError(t, d.addNode(newNode("sub", &subWorkflowAction{nodeName: "sub", child: child})))
 	// Drive DAG.Execute directly with no withParentStore injection.
 	err := d.Execute(context.Background(), NewWorkflowData("wf-nostore"))
 	require.ErrorIs(t, err, ErrSubWorkflowRequiresStore, "no parent store → loud failure, never a silent spawn")
@@ -207,8 +207,8 @@ func TestSubWorkflow_CoeChild_CrashResumeConsistent(t *testing.T) {
 	// Completed) under the deterministic ID, with a FRESH parent whose "sub" is Pending, and
 	// re-drive. The fast-path must NOT mistake the Failed coe node for a child failure.
 	store2 := NewInMemoryStore()
-	childID := subWorkflowChildID("wf-coe2", "sub")
-	seeded := &Workflow{DAG: buildCoeChild(), WorkflowID: childID, Store: store2}
+	childID := SubWorkflowChildID("wf-coe2", "sub")
+	seeded := &Workflow{dag: buildCoeChild(), WorkflowID: childID, Store: store2}
 	require.NoError(t, seeded.Execute(context.Background()), "the pre-crash coe child succeeded")
 
 	var afterN2 atomic.Int32

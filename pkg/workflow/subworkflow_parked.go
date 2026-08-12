@@ -64,7 +64,7 @@ func (a *parkedSubWorkflowAction) Execute(ctx context.Context, parentData *Workf
 		// A parked await cannot read the child journal without the parent store. Loud, not a park.
 		return ErrSubWorkflowRequiresStore
 	}
-	childID := subWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
+	childID := SubWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
 
 	child, err := store.Load(childID)
 	if err != nil {
@@ -109,7 +109,15 @@ func (a *parkedSubWorkflowAction) Execute(ctx context.Context, parentData *Workf
 	}
 
 	// Child is terminal — render the coe-aware verdict from (journal + DAG), the SHARED rule.
-	if failed, firstFailed := childRunFailed(a.child, child); failed {
+	failed, firstFailed, verdictErr := childRunFailed(a.child, child)
+	if verdictErr != nil {
+		// M23 SEAL-06: the child DAG never passed build(), so its continueOnError flags
+		// cannot be trusted to render a verdict. Fail the parent node loudly rather than
+		// resolve the child on unvalidated data — a wrong verdict here silently reports a
+		// failed child as a success. Terminal, like every other failure arm below.
+		return fmt.Errorf("parked sub-workflow %q: %w", a.nodeName, verdictErr)
+	}
+	if failed {
 		// Fail the parent node (INV-01, terminal contract). We do NOT ack the completion signal
 		// here: the failure path never drains the consumed collector (executeLocked's fail/rollback
 		// arms leave it INERT — the ph90 reject-no-ack shape), so an add() would be a silent no-op.

@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -17,12 +16,13 @@ func TestNode(t *testing.T) {
 			return nil
 		})
 
-		node := NewNode("test", action).WithRetries(3)
-		if node.Name != "test" {
-			t.Errorf("Expected node name 'test', got '%s'", node.Name)
+		node := newNode("test", action)
+		node.retryCount = 3
+		if node.name != "test" {
+			t.Errorf("Expected node name 'test', got '%s'", node.name)
 		}
-		if node.RetryCount != 3 {
-			t.Errorf("Expected retry count 3, got %d", node.RetryCount)
+		if node.retryCount != 3 {
+			t.Errorf("Expected retry count 3, got %d", node.retryCount)
 		}
 	})
 
@@ -33,10 +33,10 @@ func TestNode(t *testing.T) {
 			return nil
 		})
 
-		node := NewNode("test", action)
+		node := newNode("test", action)
 		data := NewWorkflowData("test-workflow")
 
-		err := node.Execute(context.Background(), data)
+		err := node.execute(context.Background(), data)
 		if err != nil {
 			t.Errorf("Node execution failed: %v", err)
 		}
@@ -60,10 +60,10 @@ func TestNode(t *testing.T) {
 			return expectedErr
 		})
 
-		node := NewNode("test", action)
+		node := newNode("test", action)
 		data := NewWorkflowData("test-workflow")
 
-		err := node.Execute(context.Background(), data)
+		err := node.execute(context.Background(), data)
 		if err == nil {
 			t.Error("Expected an error, got nil")
 		}
@@ -101,7 +101,7 @@ func TestNode(t *testing.T) {
 			}
 		})
 
-		node := NewNode("test", action)
+		node := newNode("test", action)
 		data := NewWorkflowData("test-workflow")
 
 		// Create a context we can cancel
@@ -114,7 +114,7 @@ func TestNode(t *testing.T) {
 			cancel()                           // Cancel the context
 		}()
 
-		err := node.Execute(ctx, data)
+		err := node.execute(ctx, data)
 
 		// Wait for cancellation to be detected or timeout
 		select {
@@ -148,10 +148,11 @@ func TestNode(t *testing.T) {
 			}
 		})
 
-		node := NewNode("test", action).WithTimeout(100 * time.Millisecond)
+		node := newNode("test", action)
+		node.timeout = 100 * time.Millisecond
 		data := NewWorkflowData("test-workflow")
 
-		err := node.Execute(context.Background(), data)
+		err := node.execute(context.Background(), data)
 		if err == nil {
 			t.Error("Expected a timeout error, got nil")
 		}
@@ -176,10 +177,11 @@ func TestNode(t *testing.T) {
 			return nil
 		})
 
-		node := NewNode("test", action).WithRetries(3)
+		node := newNode("test", action)
+		node.retryCount = 3
 		data := NewWorkflowData("test-workflow")
 
-		err := node.Execute(context.Background(), data)
+		err := node.execute(context.Background(), data)
 		if err != nil {
 			t.Errorf("Node execution failed after retries: %v", err)
 		}
@@ -204,10 +206,11 @@ func TestNode(t *testing.T) {
 			return errors.New("persistent failure")
 		})
 
-		node := NewNode("test", action).WithRetries(2)
+		node := newNode("test", action)
+		node.retryCount = 2
 		data := NewWorkflowData("test-workflow")
 
-		err := node.Execute(context.Background(), data)
+		err := node.execute(context.Background(), data)
 		if err == nil {
 			t.Error("Expected an error after max retries, got nil")
 		}
@@ -238,11 +241,12 @@ func TestNode(t *testing.T) {
 			return nil
 		})
 
-		node1 := NewNode("node1", action1)
-		node2 := NewNode("node2", action2).WithDependencies(node1)
+		node1 := newNode("node1", action1)
+		node2 := newNode("node2", action2)
+		node2.dependsOn = []*Node{node1}
 
 		// Create and setup a DAG
-		dag := NewDAG("test-dependencies")
+		dag := newDAGForTest("test-dependencies")
 
 		// Add nodes to the DAG
 		mustAddNode(t, dag, node1)
@@ -270,362 +274,98 @@ func TestNode(t *testing.T) {
 	})
 }
 
+// TestNodeDependencies covers the two live read accessors on Node.
+//
+// Its former subject — (*Node).AddDependency and AddDependencies — was deleted by M23
+// SEAL-01, so the fixture builds the edge set directly in-package. That is deliberate:
+// the subject here is ACCESSOR behaviour, and how the fixture is constructed is not
+// what is being asserted. The sanctioned external path (the builder's DependsOn, wired
+// by build()) is covered in the builder tests.
 func TestNodeDependencies(t *testing.T) {
-	// Create test nodes
-	node1 := NewNode("node1", nil)
-	dep1 := NewNode("dep1", nil)
-	dep2 := NewNode("dep2", nil)
-	dep3 := NewNode("dep3", nil)
+	newFixture := func() (*Node, *Node) {
+		node := newNode("node1", nil)
+		dep1 := newNode("dep1", nil)
+		node.dependsOn = append(node.dependsOn, dep1, newNode("dep2", nil), newNode("dep3", nil))
+		return node, dep1
+	}
 
-	// Test AddDependency
-	node1.AddDependency(dep1)
-	assert.True(t, node1.HasDependency("dep1"))
-	assert.False(t, node1.HasDependency("dep2"))
+	t.Run("HasDependency matches by name", func(t *testing.T) {
+		node, _ := newFixture()
+		assert.True(t, node.HasDependency("dep1"))
+		assert.True(t, node.HasDependency("dep3"))
+		assert.False(t, node.HasDependency("absent"))
+	})
 
-	// Test AddDependencies
-	node1.AddDependencies(dep2, dep3)
-	assert.True(t, node1.HasDependency("dep2"))
-	assert.True(t, node1.HasDependency("dep3"))
+	t.Run("GetDependencies returns every edge, in order", func(t *testing.T) {
+		node, _ := newFixture()
+		deps := node.GetDependencies()
+		if len(deps) != 3 {
+			t.Fatalf("expected 3 dependencies, got %d", len(deps))
+		}
+		assert.Equal(t, "dep1", deps[0].name)
+		assert.Equal(t, "dep2", deps[1].name)
+		assert.Equal(t, "dep3", deps[2].name)
+	})
 
-	// Test GetDependencies
-	deps := node1.GetDependencies()
-	assert.Len(t, deps, 3)
-	assert.Equal(t, "dep1", deps[0].Name)
-	assert.Equal(t, "dep2", deps[1].Name)
-	assert.Equal(t, "dep3", deps[2].Name)
+	t.Run("a node with no dependencies", func(t *testing.T) {
+		node := newNode("node2", nil)
+		assert.Empty(t, node.GetDependencies())
+		assert.False(t, node.HasDependency("any"))
+	})
 
-	// Test empty dependencies
-	node2 := NewNode("node2", nil)
-	assert.Empty(t, node2.GetDependencies())
-	assert.False(t, node2.HasDependency("any"))
+	// M23 BYPASS-05, and this guard did not exist before: GetDependencies used to
+	// return the LIVE slice header, so a caller could re-parent a node by writing
+	// through a READ accessor. The copy is the entire fix — and it looks exactly like a
+	// wasteful allocation, which is what makes it pre-armed for silent removal by a
+	// later performance pass (SEAL-05's det-tax work is precisely such a pass).
+	//
+	// WHICH ARM ACTUALLY BITES: the element overwrite. Reslicing or truncating the
+	// returned value could never reach the node — a slice header is a value, so the
+	// caller only ever truncates its own copy — so that is NOT evidence of the fix and
+	// is not asserted as though it were.
+	t.Run("the returned slice is a copy, so a caller cannot re-parent through it", func(t *testing.T) {
+		node, dep1 := newFixture()
+
+		deps := node.GetDependencies()
+		if len(deps) != 3 {
+			t.Fatalf("expected 3 dependencies, got %d", len(deps))
+		}
+		deps[0] = newNode("attacker", nil)
+
+		assert.Same(t, dep1, node.dependsOn[0],
+			"overwriting an element of the returned slice must not re-parent the node (BYPASS-05)")
+		assert.True(t, node.HasDependency("dep1"))
+		assert.False(t, node.HasDependency("attacker"))
+	})
 }
 
 func TestNodeWithCapacity(t *testing.T) {
-	node := NewNodeWithCapacity("test", nil, 5)
+	node := newNodeWithCapacity("test", nil, 5)
 	assert.NotNil(t, node)
-	assert.Equal(t, "test", node.Name)
+	assert.Equal(t, "test", node.name)
 
-	// Add dependencies up to capacity
-	deps := make([]*Node, 5)
-	for i := 0; i < 5; i++ {
-		deps[i] = NewNode(fmt.Sprintf("dep%d", i), nil)
-		node.AddDependency(deps[i])
-	}
-
-	nodeDeps := node.GetDependencies()
-	assert.Len(t, nodeDeps, 5)
-	for i := 0; i < 5; i++ {
-		assert.Equal(t, fmt.Sprintf("dep%d", i), nodeDeps[i].Name)
-	}
+	// The capacity hint is this constructor's whole reason to exist, so assert it
+	// rather than only that appends land.
+	assert.GreaterOrEqual(t, cap(node.dependsOn), 5, "the dependency capacity hint must be honored")
+	assert.Empty(t, node.GetDependencies(), "a capacity hint must not create edges")
 }
 
-func TestNodeConfiguration(t *testing.T) {
-	node := NewNode("test", nil)
+// TestNodeConfiguration was DELETED by M23 SEAL-01. It exercised WithRetries/
+// WithTimeout/WithDependencies — three of the six post-build mutators the seal
+// removes. Rewriting it against the unexported fields would assert that Go struct
+// assignment works, not that any engine contract holds. Node construction is now
+// covered where it belongs: build() (builder_test.go) and the SEAL-09 mint
+// chokepoint (suspendable_capability_test.go).
 
-	// Test WithRetries
-	retryNode := node.WithRetries(3)
-	assert.Equal(t, node, retryNode)
-	assert.Equal(t, 3, node.RetryCount)
-
-	// Test WithTimeout
-	timeout := 5 * time.Second
-	timeoutNode := node.WithTimeout(timeout)
-	assert.Equal(t, node, timeoutNode)
-	assert.Equal(t, timeout, node.Timeout)
-
-	// Test WithDependencies
-	dep1 := NewNode("dep1", nil)
-	dep2 := NewNode("dep2", nil)
-	depsNode := node.WithDependencies(dep1, dep2)
-	assert.Equal(t, node, depsNode)
-	assert.True(t, node.HasDependency("dep1"))
-	assert.True(t, node.HasDependency("dep2"))
-}
-
-func TestAddDependencies(t *testing.T) {
-	t.Run("Add multiple dependencies", func(t *testing.T) {
-		// Create test nodes
-		node := NewNode("main", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			return nil
-		}))
-		dep1 := NewNode("dep1", nil)
-		dep2 := NewNode("dep2", nil)
-		dep3 := NewNode("dep3", nil)
-
-		// Add multiple dependencies at once
-		node.AddDependencies(dep1, dep2, dep3)
-
-		// Verify all dependencies were added
-		if len(node.DependsOn) != 3 {
-			t.Errorf("Expected 3 dependencies, got %d", len(node.DependsOn))
-		}
-
-		// Verify each dependency
-		expectedDeps := map[string]bool{
-			"dep1": false,
-			"dep2": false,
-			"dep3": false,
-		}
-
-		for _, dep := range node.DependsOn {
-			if _, exists := expectedDeps[dep.Name]; !exists {
-				t.Errorf("Unexpected dependency: %s", dep.Name)
-			}
-			expectedDeps[dep.Name] = true
-		}
-
-		// Verify all expected dependencies were found
-		for name, found := range expectedDeps {
-			if !found {
-				t.Errorf("Dependency %s was not added", name)
-			}
-		}
-	})
-
-	t.Run("Add empty dependencies", func(t *testing.T) {
-		// Create test node
-		node := NewNode("main", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			return nil
-		}))
-
-		// Initial state
-		initialCap := cap(node.DependsOn)
-
-		// Add empty dependencies
-		node.AddDependencies()
-
-		// Verify nothing changed
-		if len(node.DependsOn) != 0 {
-			t.Error("Expected no dependencies to be added")
-		}
-		if cap(node.DependsOn) != initialCap {
-			t.Error("Capacity should not change when adding no dependencies")
-		}
-	})
-
-	t.Run("Add dependencies incrementally", func(t *testing.T) {
-		// Create test nodes
-		node := NewNode("main", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			return nil
-		}))
-		dep1 := NewNode("dep1", nil)
-		dep2 := NewNode("dep2", nil)
-
-		// Add first dependency
-		node.AddDependencies(dep1)
-		if len(node.DependsOn) != 1 {
-			t.Errorf("Expected 1 dependency, got %d", len(node.DependsOn))
-		}
-
-		// Record capacity after first add
-		firstCap := cap(node.DependsOn)
-
-		// Add second dependency
-		node.AddDependencies(dep2)
-		if len(node.DependsOn) != 2 {
-			t.Errorf("Expected 2 dependencies, got %d", len(node.DependsOn))
-		}
-
-		// Verify capacity was optimized
-		if cap(node.DependsOn) < 2 {
-			t.Error("Capacity should be at least 2")
-		}
-		if cap(node.DependsOn) < firstCap {
-			t.Error("Capacity should not decrease")
-		}
-	})
-
-	t.Run("Add duplicate dependencies", func(t *testing.T) {
-		// Create test nodes
-		node := NewNode("main", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			return nil
-		}))
-		dep1 := NewNode("dep1", nil)
-
-		// Add same dependency twice
-		node.AddDependencies(dep1)
-		node.AddDependencies(dep1)
-
-		// Verify dependency was added twice (current behavior)
-		if len(node.DependsOn) != 2 {
-			t.Errorf("Expected 2 dependencies (duplicate allowed), got %d", len(node.DependsOn))
-		}
-
-		// Verify both entries point to the same node
-		if node.DependsOn[0] != dep1 || node.DependsOn[1] != dep1 {
-			t.Error("Dependencies should point to the same node")
-		}
-	})
-
-	t.Run("Add nil dependencies", func(t *testing.T) {
-		// Create test node
-		node := NewNode("main", ActionFunc(func(ctx context.Context, data *WorkflowData) error {
-			return nil
-		}))
-		dep1 := NewNode("dep1", nil)
-
-		// Add mix of nil and valid dependencies
-		node.AddDependencies(dep1, nil, dep1)
-
-		// Verify nil dependencies are added (current behavior)
-		if len(node.DependsOn) != 3 {
-			t.Errorf("Expected 3 dependencies (including nil), got %d", len(node.DependsOn))
-		}
-
-		// Count nil dependencies
-		nilCount := 0
-		for _, dep := range node.DependsOn {
-			if dep == nil {
-				nilCount++
-			}
-		}
-		if nilCount != 1 {
-			t.Errorf("Expected 1 nil dependency, got %d", nilCount)
-		}
-	})
-
-	t.Run("Add dependencies with pre-allocated capacity", func(t *testing.T) {
-		// Create test node with pre-allocated capacity
-		node := NewNodeWithCapacity("main", nil, 5)
-		initialCap := cap(node.DependsOn)
-
-		// Create test dependencies
-		deps := make([]*Node, 3)
-		for i := range deps {
-			deps[i] = NewNode(fmt.Sprintf("dep%d", i), nil)
-		}
-
-		// Add dependencies
-		node.AddDependencies(deps...)
-
-		// Verify capacity was preserved
-		if cap(node.DependsOn) != initialCap {
-			t.Errorf("Expected capacity to remain %d, got %d", initialCap, cap(node.DependsOn))
-		}
-
-		// Verify all dependencies were added
-		if len(node.DependsOn) != 3 {
-			t.Errorf("Expected 3 dependencies, got %d", len(node.DependsOn))
-		}
-	})
-
-	t.Run("Add dependencies exceeding pre-allocated capacity", func(t *testing.T) {
-		// Create test node with small pre-allocated capacity
-		node := NewNodeWithCapacity("main", nil, 2)
-		initialCap := cap(node.DependsOn)
-
-		// Create more dependencies than initial capacity
-		deps := make([]*Node, 4)
-		for i := range deps {
-			deps[i] = NewNode(fmt.Sprintf("dep%d", i), nil)
-		}
-
-		// Add dependencies
-		node.AddDependencies(deps...)
-
-		// Verify capacity was increased
-		if cap(node.DependsOn) <= initialCap {
-			t.Error("Expected capacity to increase")
-		}
-
-		// Verify all dependencies were added
-		if len(node.DependsOn) != 4 {
-			t.Errorf("Expected 4 dependencies, got %d", len(node.DependsOn))
-		}
-	})
-
-	t.Run("Add dependencies with zero initial capacity", func(t *testing.T) {
-		// Create test node with zero capacity
-		node := NewNodeWithCapacity("main", nil, 0)
-
-		// Create test dependencies
-		deps := make([]*Node, 3)
-		for i := range deps {
-			deps[i] = NewNode(fmt.Sprintf("dep%d", i), nil)
-		}
-
-		// Add dependencies
-		node.AddDependencies(deps...)
-
-		// Verify capacity was allocated
-		if cap(node.DependsOn) < len(deps) {
-			t.Errorf("Expected capacity of at least %d, got %d", len(deps), cap(node.DependsOn))
-		}
-
-		// Verify all dependencies were added
-		if len(node.DependsOn) != 3 {
-			t.Errorf("Expected 3 dependencies, got %d", len(node.DependsOn))
-		}
-	})
-
-	t.Run("Add dependencies in multiple batches", func(t *testing.T) {
-		// Create test node
-		node := NewNode("main", nil)
-
-		// Create test dependencies
-		batch1 := []*Node{
-			NewNode("dep1", nil),
-			NewNode("dep2", nil),
-		}
-		batch2 := []*Node{
-			NewNode("dep3", nil),
-			NewNode("dep4", nil),
-		}
-
-		// Add first batch
-		node.AddDependencies(batch1...)
-		firstBatchCap := cap(node.DependsOn)
-
-		// Add second batch
-		node.AddDependencies(batch2...)
-
-		// Verify final state
-		if len(node.DependsOn) != 4 {
-			t.Errorf("Expected 4 dependencies, got %d", len(node.DependsOn))
-		}
-
-		// Verify capacity growth
-		if cap(node.DependsOn) < firstBatchCap {
-			t.Error("Capacity should not decrease")
-		}
-
-		// Verify order of dependencies
-		expectedNames := []string{"dep1", "dep2", "dep3", "dep4"}
-		for i, name := range expectedNames {
-			if node.DependsOn[i].Name != name {
-				t.Errorf("Expected dependency %d to be %s, got %s", i, name, node.DependsOn[i].Name)
-			}
-		}
-	})
-
-	t.Run("Add dependencies with mixed node states", func(t *testing.T) {
-		// Create test node
-		node := NewNode("main", nil)
-
-		// Create dependencies with different states
-		dep1 := NewNode("dep1", nil).WithRetries(3)
-		dep2 := NewNode("dep2", nil).WithTimeout(time.Second)
-		dep3 := NewNode("dep3", nil).WithRetries(1).WithTimeout(time.Minute)
-
-		// Add dependencies
-		node.AddDependencies(dep1, dep2, dep3)
-
-		// Verify dependencies were added with their states intact
-		if node.DependsOn[0].RetryCount != 3 {
-			t.Error("Retry count not preserved for dep1")
-		}
-		if node.DependsOn[1].Timeout != time.Second {
-			t.Error("Timeout not preserved for dep2")
-		}
-		if node.DependsOn[2].RetryCount != 1 || node.DependsOn[2].Timeout != time.Minute {
-			t.Error("Configuration not preserved for dep3")
-		}
-
-		// Verify dependency references are correct
-		for _, dep := range node.DependsOn {
-			if dep == nil {
-				t.Error("Unexpected nil dependency")
-			}
-		}
-	})
-}
+// TestAddDependencies was DELETED by M23 SEAL-01, on the same standard and after the
+// same check. Its subject was (*Node).AddDependencies, one of the six deleted mutators.
+// Migrated mechanically, all ten of its subtests became assertions about Go's built-in
+// append and about slice capacity growth — "appending nothing changes nothing",
+// "capacity does not decrease", "duplicate and nil elements are both appended" — and
+// its last subtest asserted that struct fields retain the values just assigned to them.
+// None of that is an engine contract; it is the runtime's slice implementation, and
+// `go vet` flagged one rewritten line as `append with no values`.
+//
+// What was worth keeping was moved rather than dropped: the accessor behaviour it
+// incidentally covered is now asserted directly in TestNodeDependencies above,
+// including the BYPASS-05 defensive-copy guard that no test covered at all.

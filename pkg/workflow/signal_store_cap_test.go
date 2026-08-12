@@ -51,7 +51,23 @@ func TestSignalStore_MailboxEntryCountCap(t *testing.T) {
 		for name, store := range signalStores(t) {
 			t.Run(name, func(t *testing.T) {
 				const wf = "wf-over-cap"
+				// Reaching the over-cap state now requires stepping AROUND the write
+				// guard (F1): DeliverSignal refuses the delivery that would exceed the
+				// cap, so delivering cap+1 in a row no longer produces this state — it
+				// produces an ErrValidation, which is the fix. This subtest previously
+				// did exactly that under require.NoError, i.e. it encoded the wedge as
+				// expected behavior.
+				//
+				// Deliver above the bound with the cap raised, then lower it. That is
+				// not a contrivance: it is the shape of the two ways an over-cap mailbox
+				// can still exist — state written before the guard landed, and an
+				// external writer to the mailbox dir or signals table (the channel is
+				// external-writable by design, M9 threat model). The READ guard this
+				// subtest exists to prove is exactly what defends those.
+				signalMailboxCap = orig
 				deliver(t, store, wf, cap+1)
+				signalMailboxCap = cap
+
 				_, err := store.TakeSignals(wf)
 				require.Error(t, err)
 				require.True(t, errors.Is(err, ErrCorruptData),

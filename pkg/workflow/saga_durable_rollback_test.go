@@ -64,16 +64,16 @@ func buildDurableSaga(t *testing.T, store WorkflowStore, id string, effect map[s
 	b := NewWorkflowBuilder()
 	b.AddNode("a").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { effectMu.Lock(); *forward++; effectMu.Unlock(); return nil })).
-		WithCompensation(comp("a", false))
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(comp("b", bFails)).DependsOn("a")
-	b.AddNode("c").WithAction(benchNoopAction()).WithCompensation(comp("c", false)).DependsOn("a")
+		WithCompensationFunc(comp("a", false))
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(comp("b", bFails)).DependsOn("a")
+	b.AddNode("c").WithAction(benchNoopAction()).WithCompensationFunc(comp("c", false)).DependsOn("a")
 	b.AddNode("d").WithAction(benchNoopAction()).DependsOn("b", "c") // no comp -> skipped
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("d")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store}
 }
 
 // TestSagaDurable_CrashMidRollback_ResumesAndFinishes — the DUR-01 crux: a crash mid-

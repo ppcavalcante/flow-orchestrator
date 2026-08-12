@@ -43,8 +43,8 @@ func buildWideCompLevel(n int, counter *int64, perNode []int64) []*Node {
 	level := make([]*Node, n)
 	for i := 0; i < n; i++ {
 		i := i
-		nd := NewNode(fmt.Sprintf("w%d", i), benchNoopAction())
-		nd.Compensation = ActionFunc(func(context.Context, *WorkflowData) error {
+		nd := newNode(fmt.Sprintf("w%d", i), benchNoopAction())
+		nd.compensation = ActionFunc(func(context.Context, *WorkflowData) error {
 			atomic.AddInt64(counter, 1)
 			atomic.AddInt64(&perNode[i], 1)
 			return nil
@@ -57,7 +57,7 @@ func buildWideCompLevel(n int, counter *int64, perNode []int64) []*Node {
 func freshCompletedData(id string, level []*Node) *WorkflowData {
 	data := NewWorkflowData(id)
 	for _, nd := range level {
-		data.SetNodeStatus(nd.Name, Completed)
+		data.SetNodeStatus(nd.name, Completed)
 	}
 	return data
 }
@@ -104,10 +104,10 @@ func TestSagaAdv_WideFan_FullExecute_RaceClean(t *testing.T) {
 			store := NewInMemoryStore()
 			b := NewWorkflowBuilder().WithWorkflowID("wide-fan")
 			b.AddNode("root").WithAction(benchNoopAction()).
-				WithCompensation(func(context.Context, *WorkflowData) error { atomic.AddInt64(&compCount, 1); return nil })
+				WithCompensationFunc(func(context.Context, *WorkflowData) error { atomic.AddInt64(&compCount, 1); return nil })
 			for i := 0; i < width; i++ {
 				b.AddNode(fmt.Sprintf("mid%d", i)).WithAction(benchNoopAction()).
-					WithCompensation(func(context.Context, *WorkflowData) error { atomic.AddInt64(&compCount, 1); return nil }).
+					WithCompensationFunc(func(context.Context, *WorkflowData) error { atomic.AddInt64(&compCount, 1); return nil }).
 					DependsOn("root")
 			}
 			deps := make([]string, width)
@@ -120,7 +120,7 @@ func TestSagaAdv_WideFan_FullExecute_RaceClean(t *testing.T) {
 			dag, err := b.Build()
 			require.NoError(t, err)
 			dag.WithExecutionConfig(ExecutionConfig{MaxConcurrency: maxConc})
-			w := &Workflow{DAG: dag, WorkflowID: "wide-fan", Store: store}
+			w := &Workflow{dag: dag, WorkflowID: "wide-fan", Store: store}
 
 			require.Error(t, w.Execute(context.Background()))
 			// root + width mids all Completed compensable => width+1 compensations.
@@ -164,7 +164,7 @@ func buildLayeredSaga(seed int64, layers, maxWidth int, tick *tickRecorder) *Wor
 			name := fmt.Sprintf("L%d_%d", l, i)
 			cur[i] = name
 			nb := b.AddNode(name).WithAction(benchNoopAction()).
-				WithCompensation(tick.comp(name))
+				WithCompensationFunc(tick.comp(name))
 			if l > 0 {
 				// pick a non-empty random subset of prev as dependencies
 				var chosen []string
@@ -192,7 +192,7 @@ func buildLayeredSaga(seed int64, layers, maxWidth int, tick *tickRecorder) *Wor
 	}
 	// vary concurrency by seed to exercise the bound alongside the ordering.
 	dag.WithExecutionConfig(ExecutionConfig{MaxConcurrency: 1 + int(seed%8)})
-	return &Workflow{DAG: dag, WorkflowID: "layered", Store: NewInMemoryStore()}
+	return &Workflow{dag: dag, WorkflowID: "layered", Store: NewInMemoryStore()}
 }
 
 // tickRecorder assigns a monotonically increasing tick to each compensation as it
@@ -218,9 +218,9 @@ func (r *tickRecorder) comp(name string) func(context.Context, *WorkflowData) er
 // edgesOf returns the dependency edges (dep -> node) of the DAG's compensable nodes.
 func edgesOf(w *Workflow) [][2]string {
 	var edges [][2]string
-	for _, n := range w.DAG.Nodes {
-		for _, dep := range n.DependsOn {
-			edges = append(edges, [2]string{dep.Name, n.Name})
+	for _, n := range w.dag.nodes {
+		for _, dep := range n.dependsOn {
+			edges = append(edges, [2]string{dep.name, n.name})
 		}
 	}
 	return edges
@@ -240,11 +240,11 @@ func TestSagaAdv_ReverseTopo_Property(t *testing.T) {
 			}
 			// Totality: every compensable node (all but the non-compensating "fail"
 			// terminal) must have been compensated exactly once.
-			for _, n := range w.DAG.Nodes {
-				if n.Name == "fail" {
+			for _, n := range w.dag.nodes {
+				if n.name == "fail" {
 					continue // the failing terminal declares no compensation
 				}
-				if _, ok := rec.at[n.Name]; !ok {
+				if _, ok := rec.at[n.name]; !ok {
 					return false
 				}
 			}
@@ -283,8 +283,8 @@ func TestSagaAdv_ReverseTopo_ExactlyOnce(t *testing.T) {
 
 		// count declared compensable nodes (all but "fail")
 		want := 0
-		for _, n := range w.DAG.Nodes {
-			if n.Name != "fail" {
+		for _, n := range w.dag.nodes {
+			if n.name != "fail" {
 				want++
 			}
 		}
@@ -304,7 +304,7 @@ func TestSagaAdv_MultiNodeFailFast_Triggers(t *testing.T) {
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder().WithWorkflowID("multi-fail")
 	b.AddNode("root").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("root"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("root"); return nil })
 	// three concurrent hard failures + two compensable survivors, all in one level.
 	for _, f := range []string{"f0", "f1", "f2"} {
 		b.AddNode(f).
@@ -314,12 +314,12 @@ func TestSagaAdv_MultiNodeFailFast_Triggers(t *testing.T) {
 	for _, s := range []string{"s0", "s1"} {
 		s := s
 		b.AddNode(s).WithAction(benchNoopAction()).
-			WithCompensation(func(context.Context, *WorkflowData) error { rec.record(s); return nil }).
+			WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record(s); return nil }).
 			DependsOn("root")
 	}
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "multi-fail", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "multi-fail", Store: store}
 
 	require.Error(t, w.Execute(context.Background()))
 	got, err := store.Load("multi-fail")
@@ -349,16 +349,16 @@ func TestSagaAdv_CoeFailsAlongsideHardFail(t *testing.T) {
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder().WithWorkflowID("coe-plus-hard")
 	b.AddNode("root").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("root"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("root"); return nil })
 	// coe node fails softly but declares a compensation
 	b.AddNode("coe").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("soft") })).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("coe"); return nil }).
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("coe"); return nil }).
 		WithContinueOnError().
 		DependsOn("root")
 	// a Completed compensable node in the same level as the eventual hard fail's parent
 	b.AddNode("ok").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("ok"); return nil }).
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("ok"); return nil }).
 		DependsOn("root")
 	// hard failure downstream of the coe node (so the run still fails hard)
 	b.AddNode("hard").
@@ -366,7 +366,7 @@ func TestSagaAdv_CoeFailsAlongsideHardFail(t *testing.T) {
 		DependsOn("coe", "ok")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "coe-plus-hard", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "coe-plus-hard", Store: store}
 
 	require.Error(t, w.Execute(context.Background()))
 	got, err := store.Load("coe-plus-hard")
@@ -393,7 +393,7 @@ func TestSagaAdv_CallerCancel_Triggers(t *testing.T) {
 	b := NewWorkflowBuilder().WithWorkflowID("caller-cancel")
 	b.AddNode("a").
 		WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
 	b.AddNode("cancel").
 		WithAction(ActionFunc(func(c context.Context, _ *WorkflowData) error {
 			cancel()
@@ -402,7 +402,7 @@ func TestSagaAdv_CallerCancel_Triggers(t *testing.T) {
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "caller-cancel", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "caller-cancel", Store: store}
 
 	err = w.Execute(ctx)
 	require.Error(t, err)
@@ -427,13 +427,13 @@ func TestSagaAdv_SuccessfulRun_NoRollback(t *testing.T) {
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder().WithWorkflowID("clean")
 	b.AddNode("a").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
 	b.AddNode("b").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("b"); return nil }).
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("b"); return nil }).
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "clean", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "clean", Store: store}
 
 	require.NoError(t, w.Execute(context.Background()), "a fully successful saga run does not fail")
 	got, err := store.Load("clean")
@@ -468,15 +468,15 @@ func TestSagaAdv_IdempotencyKey_PresentAndStable(t *testing.T) {
 			return nil
 		}
 	}
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(mk("a"))
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(mk("b")).DependsOn("a")
-	b.AddNode("c").WithAction(benchNoopAction()).WithCompensation(mk("c")).DependsOn("b")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(mk("a"))
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(mk("b")).DependsOn("a")
+	b.AddNode("c").WithAction(benchNoopAction()).WithCompensationFunc(mk("c")).DependsOn("b")
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("c")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "idem", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "idem", Store: store}
 
 	require.Error(t, w.Execute(context.Background()))
 
@@ -506,15 +506,15 @@ func TestSagaAdv_IdempotencyKey_PresentAndStable(t *testing.T) {
 			return nil
 		}
 	}
-	b2.AddNode("a").WithAction(benchNoopAction()).WithCompensation(mk2("a"))
-	b2.AddNode("b").WithAction(benchNoopAction()).WithCompensation(mk2("b")).DependsOn("a")
-	b2.AddNode("c").WithAction(benchNoopAction()).WithCompensation(mk2("c")).DependsOn("b")
+	b2.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(mk2("a"))
+	b2.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(mk2("b")).DependsOn("a")
+	b2.AddNode("c").WithAction(benchNoopAction()).WithCompensationFunc(mk2("c")).DependsOn("b")
 	b2.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("c")
 	dag2, err := b2.Build()
 	require.NoError(t, err)
-	w2 := &Workflow{DAG: dag2, WorkflowID: "idem", Store: NewInMemoryStore()}
+	w2 := &Workflow{dag: dag2, WorkflowID: "idem", Store: NewInMemoryStore()}
 	require.Error(t, w2.Execute(context.Background()))
 	require.Equal(t, seen, seen2, "compensation idempotency handles must be stable across identical runs")
 }
@@ -631,14 +631,14 @@ func TestSagaAdv_StoreParity_HugeNodeSet(t *testing.T) {
 func TestSagaAdv_StoreParity_FullExecute(t *testing.T) {
 	build := func(id string, store WorkflowStore) *Workflow {
 		b := NewWorkflowBuilder().WithWorkflowID(id)
-		b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(func(context.Context, *WorkflowData) error { return nil })
-		b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(func(context.Context, *WorkflowData) error { return nil }).DependsOn("a")
+		b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(func(context.Context, *WorkflowData) error { return nil })
+		b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(func(context.Context, *WorkflowData) error { return nil }).DependsOn("a")
 		b.AddNode("fail").
 			WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 			DependsOn("b")
 		dag, err := b.Build()
 		require.NoError(t, err)
-		return &Workflow{DAG: dag, WorkflowID: id, Store: store}
+		return &Workflow{dag: dag, WorkflowID: id, Store: store}
 	}
 
 	type outcome struct {

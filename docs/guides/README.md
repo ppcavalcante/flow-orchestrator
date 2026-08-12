@@ -56,11 +56,12 @@ if err != nil {
     log.Fatalf("Failed to create store: %v", err)
 }
 
-// Create workflow with the store
-wf := &workflow.Workflow{
-    DAG:        dag,
-    WorkflowID: "my-workflow",
-    Store:      store,
+// Put the store on the builder; FromBuilder carries it onto the *Workflow.
+builder.WithWorkflowID("my-workflow").WithStore(store)
+
+wf, err := workflow.FromBuilder(builder)
+if err != nil {
+    log.Fatalf("Failed to build workflow: %v", err)
 }
 
 // Execute with persistence

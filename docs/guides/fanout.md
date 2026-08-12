@@ -16,7 +16,9 @@ attempt": a branch interrupted mid-flight by a crash **re-executes** on resume �
 b := workflow.NewWorkflowBuilder()
 
 b.AddFanOut("process-rows",
-    // expander: resolves the N items at run time. Runs EXACTLY ONCE across a crash+resume.
+    // expander: resolves the N items at run time. Its RESULT is journaled exactly once; its
+    // EXECUTION is at-least-once (a crash before the journal flush re-runs it) — keep it
+    // side-effect-free or idempotent. See "Crash-resume" below.
     func(ctx context.Context, parent *workflow.WorkflowData) ([]interface{}, error) {
         return []interface{}{101, 102, 103}, nil // e.g. IDs a query returned
     },
@@ -35,9 +37,12 @@ b.AddFanOut("process-rows",
 ).WithResults("row-results", "branch-result").
   WithMaxWidth(500)
 
-dag, _ := b.Build()
-wf := &workflow.Workflow{DAG: dag, WorkflowID: "run-1", Store: store} // store MUST be a Checkpointer
-err := wf.Execute(ctx)
+b.WithWorkflowID("run-1").WithStore(store) // store MUST be a Checkpointer
+wf, err := workflow.FromBuilder(b)
+if err != nil {
+    log.Fatal(err)
+}
+err = wf.Execute(ctx)
 ```
 
 ## Load-bearing contracts
@@ -67,7 +72,7 @@ b.AddFanOut("rows", expander, branchAction).
 
 Each branch's `branchKey` DATA value (a scalar the branch action `Set`s) is written into parent data under
 `baseKey[i]` in **discovery order** (the journaled item order, NOT completion order), **typed** — an int64
-reloads as an int64 on all three stores. Plus a count key `baseKey.__count__` = N. Without `WithResults` the
+reloads as an int64 on all four stores. Plus a count key `baseKey.__count__` = N. Without `WithResults` the
 branches run for effect only (no indexed keys).
 
 ```go
@@ -159,11 +164,17 @@ an ordinary node's action — see the [API reference](../reference/api-reference
 
 ### Crash-resume — expansion-once
 
-The expander runs **exactly once**. `{N + items}` is journaled durably **before** branch 1; on resume the
-node reads that journal and **never re-runs the expander** (a different N would break resume). This requires a
-`Checkpointer` store — a non-Checkpointer store fails loudly with `ErrFanOutRequiresCheckpointer` at run
-time. Each branch is a child workflow under a deterministic ID `(parentID, nodeName, index)`, so a branch
-already **durably complete** is a no-op on resume (crash-after-branch-k idempotency, N-wide).
+The expander's **result** (`{N + items}`) is journaled **exactly once** and, once journaled, is never
+recomputed: it is flushed durably **before** branch 1, and on resume the node reads that journal and
+**never re-runs the expander** (a different N would break resume). But the expander's **execution** is
+**at-least-once**, not exactly-once: if a crash lands in the window *after* the expander returns and *before*
+the journal flush completes, resume finds no journal and **re-runs the expander**. So a side-effecting
+expander (a query that mutates, a counter increment) can run more than once across a crash — keep the
+expander **side-effect-free or idempotent** (this is the same at-least-once-EXECUTION + exactly-once-PERSISTENCE
+contract as the branches, below — it applies to the expander too, F-PG-13). This requires a `Checkpointer`
+store — a non-Checkpointer store fails loudly with `ErrFanOutRequiresCheckpointer` at run time. Each branch
+is a child workflow under a deterministic ID `(parentID, nodeName, index)`, so a branch already **durably
+complete** is a no-op on resume (crash-after-branch-k idempotency, N-wide).
 
 **The execution contract — at-least-once EXECUTION + exactly-once PERSISTENCE.** This is the general
 durable-execution theorem (the same contract as a plain checkpointed node — it is **not** fan-out-specific).

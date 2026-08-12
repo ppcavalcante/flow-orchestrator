@@ -67,11 +67,11 @@ func TestWithLeaseTTL_PublicKnobDrivesExpiry(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1000, 0))
 	_, open := openWith(clk, 2*time.Second)
 	sA, sB := open(), open()
-	tokA, err := sA.Claim("wf", "A")
+	tokA, err := sA.Claim(context.Background(), "wf", "A")
 	require.NoError(t, err)
 	require.Equal(t, FencingToken(1), tokA)
 	clk.Advance(3 * time.Second) // > the PUBLIC 2s TTL → A's lease lapses
-	tokB, err := sB.Claim("wf", "B")
+	tokB, err := sB.Claim(context.Background(), "wf", "B")
 	require.NoError(t, err, "the public WithLeaseTTL made the lease re-claimable after its TTL")
 	require.Equal(t, FencingToken(2), tokB, "re-claim bumped the token → WithLeaseTTL(2s) drove the lapse")
 
@@ -79,10 +79,10 @@ func TestWithLeaseTTL_PublicKnobDrivesExpiry(t *testing.T) {
 	clk2 := NewFakeClock(time.Unix(1000, 0))
 	_, open2 := openWith(clk2, 60*time.Second)
 	sC, sD := open2(), open2()
-	_, err = sC.Claim("wf", "C")
+	_, err = sC.Claim(context.Background(), "wf", "C")
 	require.NoError(t, err)
 	clk2.Advance(3 * time.Second) // < the 60s TTL → still live
-	_, err = sD.Claim("wf", "D")
+	_, err = sD.Claim(context.Background(), "wf", "D")
 	require.ErrorIs(t, err, ErrClaimLost, "a 60s WithLeaseTTL is still live after 3s → D cannot re-claim (proves the knob sets the TTL, not a default)")
 }
 
@@ -97,7 +97,7 @@ func TestClaim_z1_FencingBite_RealClaimPath(t *testing.T) {
 	const wf = "z1"
 
 	// A claims → token 1 (in sA's tokenState), writes level 0 legitimately.
-	tokA, err := sA.Claim(wf, "procA")
+	tokA, err := sA.Claim(context.Background(), wf, "procA")
 	require.NoError(t, err)
 	require.Equal(t, FencingToken(1), tokA)
 	dA := NewWorkflowData(wf)
@@ -108,7 +108,7 @@ func TestClaim_z1_FencingBite_RealClaimPath(t *testing.T) {
 	clk.Advance(6 * time.Second)
 
 	// B claims → re-claim → token 2 (in sB's tokenState), writes level 1.
-	tokB, err := sB.Claim(wf, "procB")
+	tokB, err := sB.Claim(context.Background(), wf, "procB")
 	require.NoError(t, err)
 	require.Equal(t, FencingToken(2), tokB, "re-claim of a lapsed lease bumps the token")
 	dB := NewWorkflowData(wf)
@@ -136,7 +136,7 @@ func TestClaim_z1_SeedBreak(t *testing.T) {
 	dbPath, sA, _ := mkClaimStoresOn(t, clk, 5*time.Second)
 	const wf = "z1sb"
 
-	tokA, err := sA.Claim(wf, "procA")
+	tokA, err := sA.Claim(context.Background(), wf, "procA")
 	require.NoError(t, err)
 	dA := NewWorkflowData(wf)
 	dA.SetNodeStatus("n0", Completed)
@@ -190,7 +190,7 @@ func TestClaim_z4_InitialClaimRace(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start // release all goroutines together to maximize the race
-			toks[i], errs[i] = s.Claim(wf, "p"+itoaClaim(i))
+			toks[i], errs[i] = s.Claim(context.Background(), wf, "p"+itoaClaim(i))
 		}(i)
 	}
 	close(start)
@@ -270,9 +270,9 @@ func TestClaim_ReEntrant(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1000, 0))
 	s := mkClaimStore(t, clk, 60*time.Second)
 	const wf = "reentrant"
-	t1, err := s.Claim(wf, "same")
+	t1, err := s.Claim(context.Background(), wf, "same")
 	require.NoError(t, err)
-	t2, err := s.Claim(wf, "same") // same owner, live lease
+	t2, err := s.Claim(context.Background(), wf, "same") // same owner, live lease
 	require.NoError(t, err)
 	require.Equal(t, t1, t2, "a re-entrant claim returns the held token, does not bump")
 }
@@ -283,7 +283,7 @@ func TestRenew_And_Release(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1000, 0))
 	s := mkClaimStore(t, clk, 5*time.Second)
 	const wf = "renew"
-	tok, err := s.Claim(wf, "o")
+	tok, err := s.Claim(context.Background(), wf, "o")
 	require.NoError(t, err)
 
 	// Renew under the held token succeeds.
@@ -306,17 +306,17 @@ func TestMinor6_ErrFencedOut_ReachableAtExecuteReturn(t *testing.T) {
 	const wf = "minor6"
 
 	// A claims token 1. Then B re-claims (token 2) after a lapse — A is now stale BEFORE it drives.
-	_, err := sA.Claim(wf, "procA")
+	_, err := sA.Claim(context.Background(), wf, "procA")
 	require.NoError(t, err)
 	clk.Advance(6 * time.Second)
-	_, err = sB.Claim(wf, "procB")
+	_, err = sB.Claim(context.Background(), wf, "procB")
 	require.NoError(t, err)
 
 	// A drives a real Workflow whose Store is sA (stale token 1). The forward drive's final Save
 	// (via sA) is fenced → the error must reach Execute's return as errors.Is ErrFencedOut.
-	d := NewDAG(wf)
-	require.NoError(t, d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))))
-	w := &Workflow{DAG: d, WorkflowID: wf, Store: sA}
+	d := newDAGForTest(wf)
+	require.NoError(t, d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { return nil }))))
+	w := &Workflow{dag: d, WorkflowID: wf, Store: sA}
 	execErr := w.Execute(context.Background())
 
 	require.Error(t, execErr, "a fenced-out drive must return an error")
@@ -351,7 +351,7 @@ func TestClaimWorkerEntry(t *testing.T) {
 	if os.Getenv("M16_CLAIM_NONATOMIC") == "1" {
 		tok, err = nonAtomicClaim(s, wf, owner) // seed-break: read-then-write in separate txns
 	} else {
-		tok, err = s.Claim(wf, owner) // the PRODUCTION claim (one IMMEDIATE txn)
+		tok, err = s.Claim(context.Background(), wf, owner) // the PRODUCTION claim (one IMMEDIATE txn)
 	}
 	switch {
 	case err == nil && tok > 0:
@@ -419,4 +419,23 @@ func TestClaim_z4_TwoProc_RealClaim(t *testing.T) {
 	// SEED-BREAK: the non-atomic claim lets MORE THAN ONE OS proc win → the two-winner bug.
 	require.Greater(t, race(true, "z4break", 3), 1,
 		"seed-break: a non-atomic (separate-txn) claim lets >1 OS process win — the single IMMEDIATE txn is the cross-process arbiter")
+}
+
+// TestClaim_HonorsContextCancellation — AUD-034 / P-10. Claim serializes every worker on the one
+// BEGIN IMMEDIATE write lock and can wait out busy_timeout inside a single call, so it must honor
+// the caller's request context rather than run on context.Background. A pre-cancelled context
+// returns promptly with the context error (database/sql's conn acquisition refuses a done ctx
+// before touching the DB) and never grants a token. Renew/Release stay ctx-free by design
+// (background lifecycle + best-effort cleanup that must complete even past a drive's cancellation).
+func TestClaim_HonorsContextCancellation(t *testing.T) {
+	s, err := NewSQLiteStore(t.TempDir()+"/wf.db", WithMultiProcess())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the claim
+
+	tok, err := s.Claim(ctx, "wf", "owner")
+	require.Error(t, err, "a cancelled context must abort the claim, not run it on context.Background")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, FencingToken(0), tok, "no token is granted on a cancelled claim")
 }

@@ -6,7 +6,6 @@ package workflow
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -39,34 +38,43 @@ func unixNanoNow() int64 { return time.Now().UnixNano() }
 //	bool → kvBool                        string + complex → kvString (JSON/string)
 //
 // Only the column for the chosen kind is non-nil; the rest are nil (SQLite NULL).
-func encodeKV(value interface{}) (kind int, iv *int64, fv *float64, sv *string) {
+//
+// THE ERROR RETURN IS THE (iii-c) WIRING for the default arm's marshal. It takes `key`
+// solely so the refusal can name the value it rejected: all three callers walk data with
+// a ForEach whose callback returns nothing, so a bare depth error arriving at Save would
+// tell a host that some value is too deep and not which. The error is captured beside the
+// encode and surfaced at each caller's own fallible frame — see encodeHostValue for why
+// the check cannot be hoisted into a pre-pass over data.
+func encodeKV(key string, value interface{}) (kind int, iv *int64, fv *float64, sv *string, err error) {
 	switch v := value.(type) {
 	case int:
 		x := int64(v)
-		return kvInt, &x, nil, nil
+		return kvInt, &x, nil, nil, nil
 	case int32:
 		x := int64(v)
-		return kvInt, &x, nil, nil
+		return kvInt, &x, nil, nil, nil
 	case int64:
-		return kvInt, &v, nil, nil
+		return kvInt, &v, nil, nil, nil
 	case bool:
-		return kvBool, ptrInt(boolToInt(v)), nil, nil
+		return kvBool, ptrInt(boolToInt(v)), nil, nil, nil
 	case float64:
-		return kvFloat, nil, &v, nil
+		return kvFloat, nil, &v, nil, nil
 	case float32:
 		x := float64(v)
-		return kvFloat, nil, &x, nil
+		return kvFloat, nil, &x, nil, nil
 	case string:
-		return kvString, nil, nil, &v
+		return kvString, nil, nil, &v, nil
 	default:
-		// complex → JSON string (fmt fallback on marshal error), matching FB Save.
-		var s string
-		if b, err := json.Marshal(v); err == nil {
-			s = string(b)
-		} else {
-			s = fmt.Sprintf("%v", v)
+		// complex → JSON string (fmt fallback on marshal error), matching FB Save —
+		// including, now, the same two depth guards around the same marshal. The two
+		// stores encode the SAME value into the SAME string and are asserted
+		// byte-identical, so a guard on one and not the other would be a divergence
+		// this store's fidelity tests would report as corruption.
+		s, derr := encodeHostValue(v, fmt.Sprintf("data key %q", key))
+		if derr != nil {
+			return 0, nil, nil, nil, derr
 		}
-		return kvString, nil, nil, &s
+		return kvString, nil, nil, &s, nil
 	}
 }
 
@@ -152,15 +160,17 @@ func isKnownStatus(s NodeStatus) bool {
 
 // encodeOutput mirrors the FB store's output serialization: a string passes through;
 // anything else is JSON-marshalled (fmt fallback on error). So a decomposed output is
-// byte-identical to the full-snapshot output.
-func encodeOutput(output interface{}) string {
+// byte-identical to the full-snapshot output — including, now, the two depth guards,
+// which must be identical for the same reason the encoding is.
+//
+// The error return is the (iii-c) wiring; `node` names the refused value. A string output
+// passes through unchecked exactly as before: it is stored verbatim and returned verbatim
+// by decodeOutput, so it never passes a JSON decoder and has no nesting one could refuse.
+func encodeOutput(node string, output interface{}) (string, error) {
 	if v, ok := output.(string); ok {
-		return v
+		return v, nil
 	}
-	if b, err := json.Marshal(output); err == nil {
-		return string(b)
-	}
-	return fmt.Sprintf("%v", output)
+	return encodeHostValue(output, fmt.Sprintf("output of node %q", node))
 }
 
 // decodeOutput mirrors the FB/JSON Load: the stored output is kept as the raw string,

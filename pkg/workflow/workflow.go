@@ -13,8 +13,21 @@ import (
 // Workflow represents a workflow execution.
 // It combines a DAG with execution context like ID and persistence.
 type Workflow struct {
-	// DAG is the directed acyclic graph representing the workflow structure
-	DAG *DAG
+	// dag is the directed acyclic graph representing the workflow structure. SEALED by
+	// M23 SEAL-06 (BYPASS-10); read it with the DAG() accessor.
+	//
+	// UNEXPORTING THIS DID NOT CLOSE BYPASS-10, AND NOBODY SHOULD READ IT THAT WAY.
+	// workflow_dispatch.go is IN THIS PACKAGE and still fills this field from a
+	// consumer-supplied DAGFactory result (the `&Workflow{dag: dag, …}` literal in
+	// runNext) — the rename is invisible to it. What
+	// actually refuses an unvalidated graph on the M17 dispatch path is the BUILDER
+	// TOKEN checked at drive time; the seal only stops an out-of-package caller from
+	// assigning the field, which is a smaller and different property.
+	//
+	// The accessor alone would not have sufficed either: there are in-package WRITES to
+	// this field, so exposing a read-only DAG() while leaving the field exported would
+	// have left the write path open and merely looked closed.
+	dag *DAG
 
 	// WorkflowID uniquely identifies this workflow
 	WorkflowID string
@@ -29,7 +42,13 @@ type Workflow struct {
 	// ErrSubWorkflowRequiresRegistry. It is the EXECUTION-ENVIRONMENT's Registry (carries CODE),
 	// injected at Execute — the DAG references only the type STRING (keeping the workflow pure DATA),
 	// exactly as RunNext takes the Registry as a parameter, not baked into the workflow.
-	Registry *Registry
+	//
+	// SEALED by M23 SEAL-06. The census had this filed among the sanctioned config knobs;
+	// the architect ruled it INTO the seal (R-03) and the doc comment above is the
+	// argument: it CARRIES CODE and is read at execute time to resolve a child type to a
+	// DAG. That makes it the same class as dag — a consumer re-points what code runs —
+	// rather than a value knob like Clock or RollbackTimeout. Read it with Registry().
+	registry *Registry
 
 	// MaxSubWorkflowDepth bounds sub-workflow nesting (M19 ph95, the COMP-CLOSE DoS ceiling).
 	// A sub-workflow spawn reached at nesting depth d >= this ceiling is refused with
@@ -72,8 +91,9 @@ type Workflow struct {
 	// — the frozen zero-tax hot path is unchanged. When set (e.g.
 	// metrics.ProductionConfig() or metrics.NewConfig().WithEnabled(true)), the
 	// WorkflowData created by Execute collects operation stats, readable after the
-	// run via GetMetrics() and exportable through metrics.OTelBridge. Set via
-	// WithMetrics on the builder or directly on the struct.
+	// run via GetMetrics() and exportable through metrics.OTelBridge. Set this field
+	// DIRECTLY on the *Workflow before Execute — there is no builder setter (AUD-042:
+	// an earlier comment named a WithMetrics builder method that does not exist).
 	MetricsConfig *metrics.Config
 
 	// metrics retains the last run's collector so a caller reaching only the
@@ -81,12 +101,97 @@ type Workflow struct {
 	// once per drive at data construction; a nil MetricsConfig leaves it holding a
 	// disabled collector (GetMetrics still returns non-nil, stats simply zero).
 	metrics *metrics.MetricsCollector
+
+	// migration, when set (via WithDefinitionMigration, AUD-070), is consulted on a
+	// definition-digest mismatch on resume instead of the default hard reject: the
+	// handler may accept the changed graph, transform the loaded state, or reject.
+	migration DefinitionMigration
 }
 
-// NewWorkflow creates a new workflow with the given workflow store
-func NewWorkflow(store WorkflowStore) *Workflow {
+// ErrWorkflowNoDAG is returned when a *Workflow is driven with no graph at all.
+// M23 SEAL-06 — but it guards the PARTIAL SEAL, not the token.
+//
+// T6 seals Workflow's graph handle; the seven config knobs beside it stay exported by
+// deliberate disposition, so `&workflow.Workflow{WorkflowID: "x", Store: s}` remains
+// legal from outside the package and yields a Workflow with a nil graph. Before this
+// guard EVERY public drive entry panicked on that value with a nil pointer
+// dereference — measured on all four, not argued. Sealing the graph handle without
+// this would have removed the WORKING idiom and left the BROKEN one legal, which is
+// the inverse of what the phase claims to do.
+//
+// Deliberately distinct from ErrDAGNotBuilt: "there is no graph" and "this graph did
+// not come from Build" are different consumer mistakes, and a reader who gets the
+// wrong one looks in the wrong place. The remedy happens to be the same — build with
+// WorkflowBuilder and drive it via FromBuilder — so both messages say so.
+var ErrWorkflowNoDAG = errors.New("workflow has no DAG (M23 SEAL-06: build one with WorkflowBuilder.Build and drive it via FromBuilder, rather than assembling a Workflow value directly)")
+
+// DAG returns the graph this workflow drives, or nil if it has none. It replaces the
+// exported field sealed by M23 SEAL-06 (BYPASS-10) and restores the only capability the
+// field genuinely offered a consumer: inspecting the graph a Workflow was built from.
+//
+// "READ-ONLY" IS THE INTENT AND IT IS ALMOST TRUE — the exact residual, stated rather
+// than glossed. What comes back is the live *DAG, not a copy, so the caller can reach
+// every exported DAG method. After T6 those are Execute, GetLevels, GetNode, Name,
+// TopologicalSort, Validate and the With* config setters. NONE of them writes topology
+// — nodes, dependsOn and action have no exported writer left, and GetDependencies
+// returns a defensive copy (BYPASS-05) — so the graph's SHAPE is not reachable through
+// this. The With* setters do mutate execution CONFIG, and Execute drives the graph.
+// Neither is new: both were already reachable by any holder of a *DAG, which is what
+// Build() hands every consumer.
+//
+// So the honest claim is: an external caller cannot change what this workflow's graph
+// IS. It is not that the returned pointer is inert.
+//
+// # F117-T6-03 — adding this method SILENTLY VOIDED an existing nil check
+//
+// Sealing a field while keeping an exported method of the SAME NAME does not break the
+// old expression; it RETARGETS it. `w.DAG == nil` stopped comparing a pointer and began
+// comparing a METHOD VALUE, which is never nil — always false, compiling clean. A test
+// asserting "this Workflow has a graph" would have passed forever, on any Workflow, with
+// or without one. The compiler had no objection; `go vet` is the only thing that caught
+// it ("comparison of function DAG == nil is always false"), so vet is load-bearing for
+// this class and not optional hygiene.
+//
+// THE HAZARD IS CONFINED TO NIL-COMPARABLE RETURNS, and that bound is measured, not
+// assumed — an external probe compiled both shapes:
+//
+//	d.Name == ""   COMPILER ERROR: mismatched types func() string and untyped string
+//	n.Name == ""   COMPILER ERROR: same
+//	w.DAG == nil   COMPILES; vet-only
+//
+// So T1c's DAG.Name and T3's Node.Name accessors are the SAFE shape — a string
+// comparison against a method value is a type error, loud and immediate. This one is not,
+// because *DAG is nil-comparable. Every field-to-accessor seal that keeps the exported
+// name owes the same audit, and only the pointer/interface/map/slice/func/chan returns
+// need worry about it.
+func (w *Workflow) DAG() *DAG { return w.dag }
+
+// checkGraph refuses a drive on a Workflow whose graph is absent, so the public drive
+// entries return a named error where they previously dereferenced nil.
+//
+// PLACEMENT IS AN ENUMERATION, NOT AN INSTINCT, and the obvious reading is wrong
+// twice. "Guard the three public drive entries" (Execute, Tick, DeliverAndResume)
+// misses that DueTimers is a FOURTH public entry which reaches the graph on its own
+// via runHasHardFailure; and Tick reaches THAT deref BEFORE executeLocked, so a guard
+// sited in the single funnel — the natural home, since every drive passes through it —
+// leaves Tick panicking anyway. Both were established by driving the panic and reading
+// the stack, not by reading the call graph.
+//
+// So the guard sits at the two sites that actually dereference — executeLocked and
+// DueTimers — which is two statements covering all four public entries with no path
+// left open. Guarding the entries as named would have been three statements covering
+// three of four.
+func (w *Workflow) checkGraph() error {
+	if w.dag == nil {
+		return fmt.Errorf("%w: workflow %q", ErrWorkflowNoDAG, w.WorkflowID)
+	}
+	return nil
+}
+
+// newWorkflow creates a new workflow with the given workflow store
+func newWorkflow(store WorkflowStore) *Workflow {
 	return &Workflow{
-		DAG:        NewDAG("workflow"),
+		dag:        newDAG("workflow"),
 		WorkflowID: fmt.Sprintf("workflow-%d", time.Now().UnixNano()),
 		Store:      store,
 	}
@@ -94,14 +199,15 @@ func NewWorkflow(store WorkflowStore) *Workflow {
 
 // AddNode adds a node to the workflow.
 // Returns an error if a node with the same name already exists.
-func (w *Workflow) AddNode(node *Node) error {
-	return w.DAG.AddNode(node)
+func (w *Workflow) addNode(node *Node) error {
+	return w.dag.addNode(node)
 }
 
-// AddDependency adds a dependency between nodes.
+// addDependency adds a dependency between nodes. It was exported until SEAL-06
+// unexported it; `go doc Workflow` reports no AddDependency.
 // Returns an error if either node doesn't exist or if adding the dependency would create a cycle.
-func (w *Workflow) AddDependency(from, to string) error {
-	return w.DAG.AddDependency(from, to)
+func (w *Workflow) addDependency(from, to string) error {
+	return w.dag.addDependency(from, to)
 }
 
 // WithWorkflowID sets the workflow ID.
@@ -165,7 +271,7 @@ func (w *Workflow) finishRollback(data *WorkflowData, cause error) error {
 	out := w.reconstructOutcome(data, fresh)
 	effectiveCause := cause
 	if effectiveCause == nil {
-		effectiveCause = reconstructCause(data, w.DAG) // resume path: cause was a prior run
+		effectiveCause = reconstructCause(data, w.dag) // resume path: cause was a prior run
 	}
 	// Never-nil floor (review ph48-F1): a rolled-back run whose trigger cause is not
 	// reconstructable (a caller-cancel/deadline leaves no Failed node, and the trigger
@@ -277,6 +383,24 @@ func (w *Workflow) GetMetrics() *metrics.MetricsCollector {
 // per-WorkflowID lease for its duration. It is the single funnel so the lease is
 // acquired exactly once per drive (no reentrancy).
 func (w *Workflow) executeLocked(ctx context.Context) error {
+	// FIRST statement of the drive body, and the position is load-bearing. Three
+	// separate sites below dereference the graph — checkGraphIdentity on the resume
+	// path, Validate, and the `built` token check — and the token check is the LAST of
+	// the three, so it could never have served as the nil guard: a nil graph panicked
+	// ~60 lines before reaching it. Anything added ahead of this line must not touch
+	// the graph.
+	if err := w.checkGraph(); err != nil {
+		return err
+	}
+
+	// CUR-002/AUD-031: a typed-nil Store (a non-nil interface wrapping a nil concrete pointer)
+	// passes every `w.Store != nil` guard below but panics on the first call through it. Reject it
+	// at the drive boundary with a typed error instead of crashing the host goroutine. A genuinely
+	// nil Store is legitimate (a non-durable run), so ONLY the typed-nil case is rejected.
+	if w.Store != nil && interfaceHoldsNil(w.Store) {
+		return fmt.Errorf("%w: Workflow.Store holds a typed-nil store value", ErrValidation)
+	}
+
 	// Inject the durable-timer clock so TimerNode actions read "now" through it
 	// (never time.Now() directly — the no-determinism-tax discipline, D36-07). A
 	// clock already present in ctx (Tick pins one to the host-supplied now) is
@@ -305,8 +429,8 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	// STRING (data); the Registry (CODE) is the execution environment's. Nil is not injected (the
 	// queue action then returns ErrSubWorkflowRequiresRegistry). Left intact if already present (a
 	// nested child drive re-entering executeLocked shares the SAME root Registry).
-	if w.Registry != nil && registryFrom(ctx) == nil {
-		ctx = withRegistry(ctx, w.Registry)
+	if w.registry != nil && registryFrom(ctx) == nil {
+		ctx = withRegistry(ctx, w.registry)
 	}
 
 	// Inject the sub-workflow nesting ceiling (M19 ph95). Threaded on ctx like the Registry so both
@@ -341,26 +465,61 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 		existingData, err := w.Store.Load(w.WorkflowID)
 		switch {
 		case err == nil:
-			if existingData != nil {
-				data = existingData
-				// Graph-identity guard (M9 crash-resume): the persisted state was
-				// produced by SOME DAG under this WorkflowID; on resume it must be
-				// consistent with the CURRENT DAG, or we would rehydrate node
-				// statuses/outputs that no longer correspond to the graph and
-				// silently mis-resume. Validate that every persisted node name
-				// still exists in this DAG; reject loudly on a mismatch rather than
-				// guessing. This is the tractable, node-identity analog of
-				// Temporal's workflow-versioning problem (we check graph identity,
-				// not code shape). (DEC-M9, chunk 2.)
-				if err := w.checkGraphIdentity(data); err != nil {
-					return err
-				}
+			// AUD-037 / P-06: a store must signal "no prior state" with ErrNotFound, never a
+			// (nil, nil) return. Treating nil/nil as fresh would start the run over and
+			// overwrite the real persisted state on the next Save. Reject it as a typed
+			// store-contract violation rather than silently guessing it means "fresh".
+			if existingData == nil {
+				return fmt.Errorf("%w: store returned (nil, nil) loading workflow %q — a store must return "+
+					"ErrNotFound to signal fresh state, never a nil payload with a nil error", ErrCorruptData, w.WorkflowID)
+			}
+			data = existingData
+			// Graph-identity guard (M9 crash-resume): the persisted state was
+			// produced by SOME DAG under this WorkflowID; on resume it must be
+			// consistent with the CURRENT DAG, or we would rehydrate node
+			// statuses/outputs that no longer correspond to the graph and
+			// silently mis-resume. Validate that every persisted node name
+			// still exists in this DAG; reject loudly on a mismatch rather than
+			// guessing. This is the tractable, node-identity analog of
+			// Temporal's workflow-versioning problem (we check graph identity,
+			// not code shape). (DEC-M9, chunk 2.)
+			if err := w.checkGraphIdentity(data); err != nil {
+				return err
 			}
 		case errors.Is(err, ErrNotFound):
 			// No prior state — start fresh with the new data.
 		default:
 			return fmt.Errorf("failed to load workflow state: %w", err)
 		}
+
+		// AUD-010 / C-07: definition-digest guard. The node-name check above rejects
+		// a REMOVED node; the digest additionally rejects a resume onto a graph whose
+		// topology, per-node retry/timeout/continue-on-error policy, compensation,
+		// boundary, action KIND, or suspendability changed — any of which would
+		// rehydrate state that no longer matches the graph. Additive and backward-
+		// compatible: an old checkpoint carries no digest and keeps the node-name-only
+		// behaviour. The current digest is stamped into the data so a future resume can
+		// compare it (engine metadata under a reserved key, interim — AUD-018).
+		currentDigest := w.dag.DefinitionDigest()
+		if persisted, ok := data.Get(defDigestKey); ok {
+			if ps, isStr := persisted.(string); isStr && ps != "" && ps != currentDigest {
+				// AUD-070: a TYPED mismatch a host can classify, plus an opt-in migration
+				// hook. With no handler the default is the same hard reject as before (now
+				// carrying the digests); a handler may accept the change or transform the
+				// loaded state in place before the drive begins.
+				mm := DefinitionMismatch{WorkflowID: w.WorkflowID, PersistedDigest: ps, CurrentDigest: currentDigest}
+				if w.migration != nil {
+					if merr := w.migration(mm, data); merr != nil {
+						return merr // host rejected, or the transform failed
+					}
+					// accepted: fall through and re-stamp currentDigest below so the NEXT
+					// resume matches the graph the state was just migrated onto.
+				} else {
+					return &DefinitionMismatchError{WorkflowID: w.WorkflowID, PersistedDigest: ps, CurrentDigest: currentDigest}
+				}
+			}
+		}
+		data.setReserved(defDigestKey, currentDigest)
 	}
 
 	// Retain the collector of the data actually driven this run (fresh OR loaded)
@@ -378,11 +537,18 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	// into metrics (in which case GetMetrics-after-Execute is the documented,
 	// non-concurrent contract). (M14 ph61: closes the ph60 F1 race on the default path.)
 	if w.MetricsConfig != nil {
+		// AUD-016 / P-05: re-attach the metrics collector from the Workflow's config.
+		// On a fresh run `data` already carries it; on RESUME the loaded data carries a
+		// DEFAULT (disabled) collector because JSON/FlatBuffers do not persist metrics
+		// config, so without this an enabled workflow silently resumes with metrics
+		// OFF. InMemory happened to preserve it through Clone; this makes every store
+		// consistent. Then retain the collector so GetMetrics() reads stats back (REM-02).
+		data.attachMetricsFromConfig(w.MetricsConfig)
 		w.metrics = data.GetMetrics()
 	}
 
 	// Validate DAG
-	if err := w.DAG.Validate(); err != nil {
+	if err := w.dag.Validate(); err != nil {
 		return fmt.Errorf("workflow validation failed: %w", err)
 	}
 
@@ -396,6 +562,51 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	// failed (nil cause — the original trigger failure was a prior run). Placed before
 	// the forward-only checkpointer/signal wiring (a rollback neither per-level
 	// checkpoints nor consumes signals).
+	// M23 SEAL-06 — THE SECOND REQUIRED EXECUTION CHECK, and it is not a duplicate of the
+	// one in (*DAG).Execute. The rollback arm below NEVER CALLS DAG.Execute: finishRollback
+	// walks w.dag.nodes / GetLevels() directly and invokes consumer compensations via
+	// n.compensation.Execute. So a token checked only at DAG.Execute is absent from exactly
+	// this path, and the path is live — resume-into-rollback, i.e. a crash after the
+	// rolling_back marker is durable but before the final Save (the ph48 scenario),
+	// reachable through Tick, DeliverAndResume and dispatch reclaim alike.
+	//
+	// THE TRAP THIS DEFEATS, worth naming because the arm LOOKS guarded: w.dag.Validate()
+	// runs ~10 lines above. It is cycle-detection only — it does not call
+	// validateReconvergence, which runs from build() and nowhere else. Passing Validate
+	// says nothing about having been built.
+	//
+	// PLACEMENT IS AN ENUMERATION, NOT AN INFERENCE. All 17 return statements in
+	// executeLocked were enumerated: the `data.IsRollingBack()` arm just below this check is
+	// the ONLY exit that runs consumer code without DAG.Execute. The other finishRollback
+	// call sits INSIDE DAG.Execute's
+	// error handling — post-Execute, so the token is already verified there, and a second
+	// check at that site would be dead code that merely READS as thoroughness.
+	//
+	// M23 VB-01 — WHAT THE TOKEN CERTIFIES IS NOW TWO THINGS, AND THIS ARM COVERS BOTH.
+	// build() validates the consumer-declared boundaries (validateBoundaries, between
+	// validateReconvergence and the stamp), so a stamped graph is one whose declarations
+	// were checked against the graph they were declared on. The token is never persisted;
+	// a resume re-derives both by rebuilding, which is what keeps the validated set
+	// run-constant rather than reloaded.
+	//
+	// The coverage here is TRANSITIVE, not a second check, and that is the point: this
+	// one statement already refuses an unstamped graph, and an unstamped graph is exactly
+	// one whose boundaries nobody validated. So the rollback drive — which runs consumer
+	// COMPENSATIONS and never calls DAG.Execute — cannot run on a graph carrying an
+	// unvalidated declaration. Pinned by boundary_rollback_drive_test.go through Tick and
+	// DeliverAndResume, the two entries that reach here without passing public Execute,
+	// with a declaration build() is shown to refuse.
+	//
+	// STATED NARROWLY ON PURPOSE (DEC-M23-NAMING): "the boundaries were validated at
+	// build()" is NOT "the boundaries hold over this rollback". Compensations run from
+	// saga_rollback.go, outside (*Node).Execute and outside executeNodesInLevel, and
+	// whether compensation edges are inside the path universe the predicate quantifies
+	// over is an OPEN DECISION (OB-118-MEDIATION-ARMS) — not one this comment may settle
+	// by wording.
+	if !w.dag.built {
+		return fmt.Errorf("%w: workflow %q", ErrDAGNotBuilt, w.WorkflowID)
+	}
+
 	if data.IsRollingBack() {
 		return w.finishRollback(data, nil)
 	}
@@ -406,7 +617,7 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	// zero overhead, save-at-boundaries only). (DEC-M9, chunk 2.)
 	//
 	// M10-P37 T1 (MH37-5a): the callback is carried on the per-Execute ctx, NOT
-	// written to the shared w.DAG.config field. This makes two concurrent Execute
+	// written to the shared w.dag.config field. This makes two concurrent Execute
 	// on one *Workflow memory-safe — each call has its own ctx-scoped callback, so
 	// there is no shared-field write to race and no `defer …=nil` that one run
 	// could use to nil out another run's callback. (DEC-M10-P37-LEASE(a).)
@@ -422,6 +633,18 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	if inc, ok := w.Store.(IncrementalCheckpointer); ok {
 		data.beginDeltaCapture()
 		defer data.endDeltaCapture()
+		// AUD-025/AF1: re-stamp the definition digest INSIDE the delta-capture window.
+		// It was stamped above (for the AUD-010 changed-graph guard) BEFORE capture was
+		// armed, so recordDelta no-op'd it — on this incremental store a delta-only PARK
+		// checkpoint (SaveDeltaCheckpoint persists only captured keys) would not carry the
+		// digest. A parked SQLite workflow then resumed onto a CHANGED graph silently
+		// re-parked instead of ErrValidation (the guard reads an absent digest), and a host
+		// recomputing the approval nonce from a raw store.Load read an empty digest — an
+		// engine/host nonce drift (AUD-025/AF2). Re-stamping here lands the digest in every
+		// delta checkpoint too. Idempotent (identical value) and once per drive, off the
+		// per-node hot path; only the incremental (durable) path pays it, so the det-tax
+		// benchmark (store-less, no capture) is unaffected.
+		data.setReserved(defDigestKey, w.dag.DefinitionDigest())
 		cp, isCp := w.Store.(Checkpointer) // an IncrementalCheckpointer is expected to also be a Checkpointer (the fallback)
 		ctx = withCheckpoint(ctx, func(d *WorkflowData) error {
 			changed, active := d.drainDeltaCapture()
@@ -487,7 +710,7 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 	}
 
 	// Execute DAG
-	if err := w.DAG.Execute(ctx, data); err != nil {
+	if err := w.dag.Execute(ctx, data); err != nil {
 		// A park is a SUCCESS arm, not a failure: the executor has already
 		// durably flushed the checkpoint at the level barrier before returning
 		// ErrSuspended (MH-3, durable-flush-before-suspend), so there is no
@@ -586,8 +809,10 @@ func (w *Workflow) executeLocked(ctx context.Context) error {
 // versioning.) Only node IDENTITY is checked, not action/code shape.
 func (w *Workflow) checkGraphIdentity(data *WorkflowData) error {
 	var unknown []string
-	data.ForEachNodeStatus(func(nodeName string, _ NodeStatus) {
-		if _, exists := w.DAG.GetNode(nodeName); !exists {
+	// Trusted internal read-only scan (collect-then-report; GetNode touches the DAG, not
+	// this WorkflowData) — use the non-allocating locked iterator.
+	data.forEachNodeStatusLocked(func(nodeName string, _ NodeStatus) {
+		if _, exists := w.dag.GetNode(nodeName); !exists {
 			unknown = append(unknown, nodeName)
 		}
 	})
@@ -602,6 +827,11 @@ func (w *Workflow) checkGraphIdentity(data *WorkflowData) error {
 // FromBuilder creates a workflow from a builder.
 // Returns an error if the workflow definition is invalid.
 func FromBuilder(builder *WorkflowBuilder) (*Workflow, error) {
+	// AUD-031 / C-19: a nil builder must be a typed error, not a nil-deref panic inside
+	// build() that would take the host process down.
+	if builder == nil {
+		return nil, fmt.Errorf("%w: FromBuilder requires a non-nil builder", ErrValidation)
+	}
 	// Use the guard-free build(): FromBuilder carries builder.store forward onto the
 	// *Workflow below, so the store is NOT lost here — the public Build()'s
 	// store-set guard (REM-04) would be wrong on this path. (M14 ph62.)
@@ -611,7 +841,7 @@ func FromBuilder(builder *WorkflowBuilder) (*Workflow, error) {
 	}
 
 	return &Workflow{
-		DAG:        dag,
+		dag:        dag,
 		WorkflowID: builder.workflowID,
 		Store:      builder.store,
 		Clock:      builder.clock,

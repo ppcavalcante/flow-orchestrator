@@ -49,8 +49,8 @@ func TestSubWorkflow_TransitiveSuspendableGrandchild_Refused(t *testing.T) {
 	// child: assembled RAW (NewDAG+AddNode, bypassing the builder's per-AddSubWorkflow scan)
 	// so it carries an UN-scanned nested sub-workflow pointing at the suspendable grandchild.
 	// The child's own nodes are non-suspendable — a shallow scan of it passes.
-	childDAG := NewDAG("raw-child")
-	require.NoError(t, childDAG.AddNode(NewNode("spawn-grand", &subWorkflowAction{nodeName: "spawn-grand", child: grandDAG})))
+	childDAG := newDAGForTest("raw-child")
+	require.NoError(t, childDAG.addNode(newNode("spawn-grand", &subWorkflowAction{nodeName: "spawn-grand", child: grandDAG})))
 
 	// The PARENT declares the child inline — its recursive closure-scan must descend through
 	// the child's non-suspendable subWorkflowAction into the suspendable grandchild and refuse.
@@ -83,7 +83,7 @@ func TestSubWorkflow_SameAncestorID_RefusedBeforeLease(t *testing.T) {
 	parentData := NewWorkflowData("wf-cycle")
 
 	// The ID this action WILL compute for its child.
-	childID := subWorkflowChildID("wf-cycle", "sub")
+	childID := SubWorkflowChildID("wf-cycle", "sub")
 	// Simulate an ancestor already driving that exact ID: seed the drive-stack with it.
 	ctx := withParentStore(withDriveID(context.Background(), childID), store)
 

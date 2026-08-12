@@ -108,9 +108,9 @@ func TestParkedSubWorkflow_ResultKeyCollision(t *testing.T) {
 	pb.AddSubWorkflowParked("sub", childProducing(t, "child", nil)).DependsOn("before").WithResult("result", "result")
 	dag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-pcollide"
-	w.DAG = dag
+	w.dag = dag
 
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 	runChildOutOfBand(t, store, "wf-pcollide", "sub", childProducing(t, "child", nil))
@@ -135,8 +135,8 @@ func TestParkedSubWorkflow_ChildFailed_ParentFails(t *testing.T) {
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
 	// Run the child out-of-band (it fails), then wake.
-	childID := subWorkflowChildID("wf-pfail", "sub")
-	child := &Workflow{DAG: childDAG, WorkflowID: childID, Store: store}
+	childID := SubWorkflowChildID("wf-pfail", "sub")
+	child := &Workflow{dag: childDAG, WorkflowID: childID, Store: store}
 	require.Error(t, child.Execute(context.Background())) // the child fails
 	err = w.DeliverAndResume(context.Background(), SubWorkflowCompletionSignal("sub", "c1"))
 	require.Error(t, err, "a failed child fails the parent node on wake (INV-01)")
@@ -193,9 +193,9 @@ func TestSubWorkflow_InlineParkedVerdictParity(t *testing.T) {
 			ib.AddNode("after").DependsOn("sub").WithAction(countingAction(&inlineAfter))
 			idag, err := ib.Build()
 			require.NoError(t, err)
-			iw := NewWorkflow(inlineStore)
+			iw := newWorkflowForTest(inlineStore)
 			iw.WorkflowID = "wf-inline"
-			iw.DAG = idag
+			iw.dag = idag
 			inlineErr := iw.Execute(context.Background())
 
 			// PARKED (ph92): run the child out-of-band, then wake.
@@ -203,8 +203,8 @@ func TestSubWorkflow_InlineParkedVerdictParity(t *testing.T) {
 			var parkedAfter atomic.Int32
 			pw := parkedParent(t, parkedStore, "wf-parked", coeBearingChild(t, tc.toleratedOnly), &parkedAfter)
 			require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended)
-			childID := subWorkflowChildID("wf-parked", "sub")
-			child := &Workflow{DAG: coeBearingChild(t, tc.toleratedOnly), WorkflowID: childID, Store: parkedStore}
+			childID := SubWorkflowChildID("wf-parked", "sub")
+			child := &Workflow{dag: coeBearingChild(t, tc.toleratedOnly), WorkflowID: childID, Store: parkedStore}
 			_ = child.Execute(context.Background()) //nolint:errcheck // the child's own verdict is under test via the parent, not here
 			parkedErr := pw.DeliverAndResume(context.Background(), SubWorkflowCompletionSignal("sub", "c1"))
 
@@ -230,15 +230,16 @@ func TestSubWorkflow_InlineParkedVerdictParity(t *testing.T) {
 // diverging from the inline path (which returns the *SagaError). Directly exercises childRunFailed
 // over a synthetic rollback journal (the narrow shape a cancel/deadline rollback can leave).
 func TestChildRunFailed_RollbackNoFailedNode(t *testing.T) {
-	dag := NewDAG("saga-child")
-	require.NoError(t, dag.AddNode(NewNode("a", choiceNoop())))
-	require.NoError(t, dag.AddNode(NewNode("b", choiceNoop())))
+	dag := newDAGForTest("saga-child")
+	require.NoError(t, dag.addNode(newNode("a", choiceNoop())))
+	require.NoError(t, dag.addNode(newNode("b", choiceNoop())))
 
 	// Compensated-only (a clean rollback) → run failed.
 	cd := NewWorkflowData("saga-child")
 	cd.SetNodeStatus("a", Compensated)
 	cd.SetNodeStatus("b", Completed)
-	failed, first := childRunFailed(dag, cd)
+	failed, first, vErr := childRunFailed(dag, cd)
+	require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 	require.True(t, failed, "a Compensated node (rollback) → run failed, even with NO Failed node")
 	assert.Equal(t, "a", first)
 
@@ -246,14 +247,16 @@ func TestChildRunFailed_RollbackNoFailedNode(t *testing.T) {
 	cd2 := NewWorkflowData("saga-child")
 	cd2.SetNodeStatus("a", CompensationFailed)
 	cd2.SetNodeStatus("b", Completed)
-	failed2, _ := childRunFailed(dag, cd2)
+	failed2, _, vErr := childRunFailed(dag, cd2)
+	require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 	require.True(t, failed2, "a CompensationFailed node → run failed")
 
 	// All-Completed → NOT failed (the happy baseline, unchanged).
 	cd3 := NewWorkflowData("saga-child")
 	cd3.SetNodeStatus("a", Completed)
 	cd3.SetNodeStatus("b", Completed)
-	failed3, _ := childRunFailed(dag, cd3)
+	failed3, _, vErr := childRunFailed(dag, cd3)
+	require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 	require.False(t, failed3, "all-Completed → not failed")
 }
 
@@ -302,11 +305,12 @@ func TestChildRunFailed_TerminalStatusCompleteness(t *testing.T) {
 		if !row.isTerminal {
 			continue
 		}
-		dag := NewDAG("one")
-		require.NoError(t, dag.AddNode(NewNode("n", choiceNoop()))) // non-coe node "n"
+		dag := newDAGForTest("one")
+		require.NoError(t, dag.addNode(newNode("n", choiceNoop()))) // non-coe node "n"
 		cd := NewWorkflowData("one")
 		cd.SetNodeStatus("n", row.status)
-		failed, _ := childRunFailed(dag, cd)
+		failed, _, vErr := childRunFailed(dag, cd)
+		require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 		require.Equalf(t, row.runFails, failed,
 			"status %q: childRunFailed verdict must match the run-verdict contract (a new terminal status must decide its verdict here)", row.status)
 	}
@@ -330,7 +334,7 @@ func TestParkedSubWorkflow_ManualChildOnSQLite_JournalGateUnchanged(t *testing.T
 
 	// Parent parks (child not spawned). No work_queue row exists for the child ID.
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
-	childID := subWorkflowChildID("wf-manual", "sub")
+	childID := SubWorkflowChildID("wf-manual", "sub")
 	_, exists, qerr := store.queueTerminalState(childID)
 	require.NoError(t, qerr)
 	require.False(t, exists, "a MANUAL child has NO work_queue row → the queue-authority arm is skipped, journal-gate applies")

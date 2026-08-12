@@ -79,7 +79,12 @@ func (s *FlatBuffersStore) Sync(workflowID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pending := s.takePendingCheckpoint(workflowID)
+	// PEEK, do not take. Sync's postcondition is "nil implies fsync-durable", so the
+	// retained state must survive a FAILED write — otherwise a refused flush destroys
+	// the only copy and the NEXT Sync finds an empty map, returns nil, and tells the
+	// host the park is durable when nothing was ever written. writeFullSnapshotLocked
+	// clears the pending entry itself once the write succeeds.
+	pending := s.peekPendingCheckpoint(workflowID)
 	if pending == nil {
 		return nil // nothing deferred (Strict, or already flushed at a boundary)
 	}
@@ -90,7 +95,24 @@ func (s *FlatBuffersStore) Sync(workflowID string) error {
 // the canonical workflowID.fb, then clears any pending deferred checkpoint (this
 // write supersedes it). Caller holds s.mu.
 func (s *FlatBuffersStore) writeFullSnapshotLocked(data *WorkflowData, workflowID string) error {
-	buf := buildFullStateBuffer(data)
+	buf, maxVec, err := buildFullStateBuffer(data)
+	// The fallible dominator for the builder's two host-value encodes (AF2 + F2), in
+	// this path's own right for the same reason the two HYG-00 guards below are: this
+	// is the group-commit / Batched(K) / Sync() writer and it does NOT go through Save,
+	// so a check that lands only there leaves Batched(K) able to crash the process.
+	if err != nil {
+		return err
+	}
+	// Refuse to write bytes this store could never read back (HYG-00). This path
+	// does NOT go through Save — it is the group-commit / Batched(K) / Sync()
+	// writer — so it needs the guard in its own right, or Batched(K) would still
+	// be able to wedge a workflow.
+	if err := checkWriteSize(int64(len(buf)), s.maxFileSize, workflowID); err != nil {
+		return err
+	}
+	if err := checkWriteElements(maxVec, s.maxElements, workflowID); err != nil {
+		return err
+	}
 	filePath := filepath.Join(s.baseDir, workflowID+".fb")
 	if err := writeFileAtomic(filePath, buf, 0600); err != nil {
 		return newIOError("write", workflowID, err)
@@ -129,12 +151,11 @@ func (s *FlatBuffersStore) setPendingCheckpoint(workflowID string, data *Workflo
 	s.pending[workflowID] = data.Clone()
 }
 
-func (s *FlatBuffersStore) takePendingCheckpoint(workflowID string) *WorkflowData {
-	d := s.pending[workflowID]
-	if d != nil {
-		delete(s.pending, workflowID)
-	}
-	return d
+// peekPendingCheckpoint returns the deferred checkpoint WITHOUT removing it. The
+// entry is dropped only by clearPendingCheckpoint, on a write that actually
+// succeeded — so a failed flush leaves the state retained and retryable.
+func (s *FlatBuffersStore) peekPendingCheckpoint(workflowID string) *WorkflowData {
+	return s.pending[workflowID]
 }
 
 func (s *FlatBuffersStore) clearPendingCheckpoint(workflowID string) {

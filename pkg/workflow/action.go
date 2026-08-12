@@ -174,12 +174,36 @@ type RetryableAction struct {
 
 // NewRetryableAction creates a new retryable action.
 // action: the action to retry
-// maxRetries: maximum number of retry attempts
+// maxRetries: maximum number of retry attempts; NEGATIVE VALUES ARE CLAMPED TO ZERO,
+// so the wrapped action always runs at least once (see below)
 // delay: time to wait between retries
+//
+// F117-T6-01 — WHY maxRetries IS CLAMPED, and it is a correctness fix rather than
+// input tidying. Execute's loop is `for attempt := 0; attempt <= r.maxRetries` and the
+// function ends `return lastErr`. A negative maxRetries makes the loop body never run,
+// so lastErr stays nil and Execute RETURNS SUCCESS HAVING NEVER INVOKED THE ACTION.
+// Measured from outside the package before the clamp: maxRetries=0 -> 1 invocation,
+// -1 -> 0 invocations, -7 -> 0 invocations, err=<nil> in all three.
+//
+// In a durable-execution engine "reported success without acting" is the worst
+// available failure: the result is journaled, so the lie is persisted. This is blocker
+// 117-F1's exact shape one constructor over — there it was a compensation stamped
+// Compensated without running, here it is any wrapped action.
+//
+// Clamped at the BOUNDARY, not at the loop, because this constructor is EXPORTED and
+// maxRetries is caller-supplied: the invalid state is made unrepresentable rather than
+// tolerated at the reader. That is this phase's thesis. Both in-package callers already
+// guarded (node.go behind `retryCount > 0`, fanout.go's policy behind `count <= 0`), so
+// no production path reached this — the exposure was consumer-facing.
+//
+// Guarded by TestRetryableAction_NegativeMaxRetriesStillInvokesAction, which asserts the
+// INVOCATION COUNT. Note the returned error is nil on BOTH sides of the defect, so an
+// assertion on it is vacuous — the same trap as 117-F1, where the node status was
+// Compensated on both sides.
 func NewRetryableAction(action Action, maxRetries int, delay time.Duration) *RetryableAction {
 	return &RetryableAction{
 		action:     action,
-		maxRetries: maxRetries,
+		maxRetries: max(0, maxRetries),
 		delay:      delay,
 		backoff:    2.0,                              // Default exponential backoff
 		retryIf:    func(error) bool { return true }, // Retry all errors by default

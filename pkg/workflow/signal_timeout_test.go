@@ -25,9 +25,9 @@ import (
 // signal suites (a store-backed *Workflow, Execute to arm/resume, Tick to fire).
 func buildFirstOf(t *testing.T, store WorkflowStore, id, node, signal string, timeout time.Duration, clk Clock) *Workflow {
 	t.Helper()
-	d := NewDAG(id)
-	mustAddNode(t, d, NewWaitForSignalOrTimeoutNode(node, signal, timeout))
-	return &Workflow{DAG: d, WorkflowID: id, Store: store, Clock: clk}
+	d := newDAGForTest(id)
+	mustAddNode(t, d, newWaitForSignalOrTimeoutNode(node, signal, timeout))
+	return &Workflow{dag: d, WorkflowID: id, Store: store, Clock: clk}
 }
 
 // TestSignalTimeout_SignalBeforeTimeout (bite a): a long deadline is armed, the
@@ -133,7 +133,9 @@ func TestSignalTimeout_TimeoutThenLateSignalNoop(t *testing.T) {
 	assert.Equal(t, true, timedOut)
 	out, ok := mid.GetOutput("wait")
 	require.True(t, ok)
-	assert.Equal(t, true, out, "the node output is the timeout sentinel")
+	// AUD-026: a node output reloads in its canonical string form on every store (the
+	// bool sentinel `true` becomes "true"). The disposition DATA key above stays a bool.
+	assert.Equal(t, "true", out, "the node output is the timeout sentinel")
 	_, applied := appliedSignalPayload(t, store, id, "wait")
 	assert.False(t, applied, "no signal payload is applied on the timeout path")
 	_, stillArmed := mid.GetWait("wait")
@@ -148,7 +150,7 @@ func TestSignalTimeout_TimeoutThenLateSignalNoop(t *testing.T) {
 	timedOut2, _ := final.Get(timedOutKey("wait"))
 	assert.Equal(t, true, timedOut2, "the timeout disposition is unchanged by the late signal")
 	out2, _ := final.GetOutput("wait")
-	assert.Equal(t, true, out2, "the output is still the timeout sentinel, not the late payload")
+	assert.Equal(t, "true", out2, "the output is still the timeout sentinel, not the late payload")
 	_, applied2 := appliedSignalPayload(t, store, id, "wait")
 	assert.False(t, applied2, "the late signal payload is NOT applied — the node was terminal")
 }

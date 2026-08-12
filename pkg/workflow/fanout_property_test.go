@@ -89,9 +89,9 @@ func resumeReadsJournalNoReExpand(t *testing.T, n int) bool {
 	if err != nil {
 		return false
 	}
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-prop"
-	w.DAG = dag
+	w.dag = dag
 	if w.Execute(context.Background()) != nil {
 		return false
 	}
@@ -150,9 +150,9 @@ func nodeCompletesIffAllBranchesDone(t *testing.T, n int) bool {
 	if err != nil {
 		return false
 	}
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-fanin"
-	w.DAG = dag
+	w.dag = dag
 	if w.Execute(context.Background()) != nil {
 		return false
 	}
@@ -225,9 +225,9 @@ func TestM21Formal_NonVacuityDiscriminator(t *testing.T) {
 	b.AddFanOut("fan", expander, branch).WithResults("r", "out")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-disc"
-	w.DAG = dag
+	w.dag = dag
 	require.NoError(t, w.Execute(context.Background()))
 
 	final, err := store.Load("wf-disc")

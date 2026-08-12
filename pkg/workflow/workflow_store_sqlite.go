@@ -406,7 +406,12 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 		out, has := data.GetOutput(node)
 		enc := ""
 		if has {
-			enc = encodeOutput(out)
+			e, eerr := encodeOutput(node, out)
+			if eerr != nil {
+				saveErr = eerr // (iii-c): captured beside the encode, checked below.
+				return
+			}
+			enc = e
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO nodes (workflow_id, node_name, status, output, has_output) VALUES (?,?,?,?,?)`,
@@ -429,10 +434,15 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 		if saveErr != nil {
 			return
 		}
+		enc, eerr := encodeOutput(node, out)
+		if eerr != nil {
+			saveErr = eerr // (iii-c): captured beside the encode, checked below.
+			return
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO nodes (workflow_id, node_name, status, output, has_output) VALUES (?,?,'',?,1)
 			 ON CONFLICT(workflow_id, node_name) DO UPDATE SET output=excluded.output, has_output=1`,
-			id, node, encodeOutput(out),
+			id, node, enc,
 		); err != nil {
 			saveErr = fmt.Errorf("%w: insert output %q: %w", ErrIO, node, err)
 		}
@@ -447,7 +457,11 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 		if saveErr != nil {
 			return
 		}
-		kind, iv, fv, sv := encodeKV(value)
+		kind, iv, fv, sv, eerr := encodeKV(k, value)
+		if eerr != nil {
+			saveErr = eerr // (iii-c): captured beside the encode, checked below.
+			return
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO data_kv (workflow_id, key, kind, i_val, f_val, s_val) VALUES (?,?,?,?,?,?)`,
 			id, k, kind, iv, fv, sv,
@@ -482,7 +496,18 @@ func (s *SQLiteStore) Save(data *WorkflowData) error {
 	// A full Save is a clean overwrite → the shadow now equals the full written state,
 	// so a subsequent SaveCheckpoint diffs against it correctly. Advanced AFTER commit
 	// (crash-safety ordering); s.mu is held for the whole method (see ph67-F1 note).
-	s.shadow[id] = shadowFromData(data)
+	//
+	// This re-encode cannot refuse: every value here already passed the same guards on
+	// the way into the committed rows above. It is checked anyway rather than discarded,
+	// because the alternative is an ignored error whose safety rests on a claim about the
+	// caller. If it ever DOES fire the commit has already happened, so the shadow is left
+	// unadvanced and the next checkpoint hydrates it from the DB's committed frontier —
+	// the same recovery path a fresh process takes (ph67-AF1).
+	sh, serr := shadowFromData(data)
+	if serr != nil {
+		return serr
+	}
+	s.shadow[id] = sh
 	return nil
 }
 
@@ -571,7 +596,15 @@ func (s *SQLiteStore) Load(workflowID string) (*WorkflowData, error) {
 	// baseline that would needlessly re-write every row (correct, but O(N)) NOR a stale
 	// one that would miss/over-write a row. The shadow mirrors what Load reconstructed.
 	// (s.mu is already held for the whole Load — see the AF2 note above; no re-lock.)
-	s.shadow[workflowID] = shadowFromData(data)
+	//
+	// This re-encode cannot refuse either: scanNodes/scanDataKV reconstruct every complex
+	// value as the raw STRING it was stored as (decodeOutput is the identity), and a
+	// string is not walked. Propagated for the same reason as the post-commit advance.
+	sh, serr := shadowFromData(data)
+	if serr != nil {
+		return nil, serr
+	}
+	s.shadow[workflowID] = sh
 
 	return data, nil
 }

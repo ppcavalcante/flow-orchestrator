@@ -129,7 +129,10 @@ func (s *SQLiteStore) SaveDeltaCheckpoint(changed ChangeSet, d *WorkflowData) er
 	// (a node UPSERTs, then a later data row aborts). Reordering would weaken that guard — keep
 	// nodes first (also the F2 DB-rollback assertion backstops it).
 	for _, node := range changed.Nodes {
-		row, present := encNodeFromData(d, node)
+		row, present, eerr := encNodeFromData(d, node)
+		if eerr != nil {
+			return eerr
+		}
 		if !present {
 			if _, err := tx.ExecContext(ctx,
 				`DELETE FROM nodes WHERE workflow_id=? AND node_name=?`, id, node); err != nil {
@@ -159,7 +162,10 @@ func (s *SQLiteStore) SaveDeltaCheckpoint(changed ChangeSet, d *WorkflowData) er
 			pending = append(pending, shadowEdit{dom: deltaData, key: key, del: true})
 			continue
 		}
-		kind, iv, fv, sv := encodeKV(value)
+		kind, iv, fv, sv, eerr := encodeKV(key, value)
+		if eerr != nil {
+			return eerr
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO data_kv (workflow_id, key, kind, i_val, f_val, s_val) VALUES (?,?,?,?,?,?)
 			 ON CONFLICT(workflow_id, key) DO UPDATE SET kind=excluded.kind, i_val=excluded.i_val, f_val=excluded.f_val, s_val=excluded.s_val`,
@@ -226,19 +232,23 @@ func (s *SQLiteStore) SaveDeltaCheckpoint(changed ChangeSet, d *WorkflowData) er
 // shadowFromData/saveIncremental would (so a delta row is byte-identical to a full-write
 // row). present is false when the node has NEITHER a status entry NOR an output (gone).
 // The ” sentinel (ph66-F1): a node with an output but no status → status "".
-func encNodeFromData(d *WorkflowData, node string) (encNodeRow, bool) {
+func encNodeFromData(d *WorkflowData, node string) (encNodeRow, bool, error) {
 	status, hasStatus := d.GetNodeStatus(node)
 	out, hasOut := d.GetOutput(node)
 	if !hasStatus && !hasOut {
-		return encNodeRow{}, false
+		return encNodeRow{}, false, nil
 	}
 	enc := ""
 	if hasOut {
-		enc = encodeOutput(out)
+		e, err := encodeOutput(node, out)
+		if err != nil {
+			return encNodeRow{}, false, err
+		}
+		enc = e
 	}
 	st := ""
 	if hasStatus {
 		st = string(status)
 	}
-	return encNodeRow{status: st, output: enc, hasOutput: hasOut}, true
+	return encNodeRow{status: st, output: enc, hasOutput: hasOut}, true, nil
 }

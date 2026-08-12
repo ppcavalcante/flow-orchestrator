@@ -2,13 +2,19 @@
 
 ## Supported Versions
 
-We currently support the following versions with security updates:
+Flow Orchestrator is **pre-1.0 alpha**: every published tag is a pre-release, and there is no
+long-term-support line. **Only the latest published pre-release receives security updates.** Older
+alphas are not backported — upgrade to the latest tag.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.0-alpha | :white_check_mark: |
+| Version | Supported |
+| ------- | --------- |
+| `v0.21.0-alpha` (latest published tag) | :white_check_mark: |
+| all earlier `0.x` alphas | :x: |
 
-**Note**: Flow Orchestrator is currently in alpha stage.
+**Note**: this table names the latest tag at the time of writing. The authoritative list of published
+releases is [the tag list](https://github.com/ppcavalcante/flow-orchestrator/tags) and
+[CHANGELOG.md](CHANGELOG.md); if this table names a tag older than the highest published one, the
+policy above ("only the latest") governs and this table is stale.
 
 ## Reporting a Vulnerability
 

@@ -36,16 +36,16 @@ func buildChainSaga(t *testing.T, rec *compRecorder, failC bool, store WorkflowS
 	comp := func(name string) func(context.Context, *WorkflowData) error {
 		return func(context.Context, *WorkflowData) error { rec.record(name); return nil }
 	}
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(comp("a"))
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(comp("b")).DependsOn("a")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(comp("a"))
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(comp("b")).DependsOn("a")
 	cAction := benchNoopAction()
 	if failC {
 		cAction = ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })
 	}
-	b.AddNode("c").WithAction(cAction).WithCompensation(comp("c")).DependsOn("b")
+	b.AddNode("c").WithAction(cAction).WithCompensationFunc(comp("c")).DependsOn("b")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store}
 }
 
 // TestSaga_HardFailTriggersReverseRollback — §4/§5: a hard failure rolls back the
@@ -92,16 +92,16 @@ func TestSaga_ReverseTopologicalOrder_Diamond(t *testing.T) {
 	}
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder()
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(comp("a"))
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(comp("b")).DependsOn("a")
-	b.AddNode("c").WithAction(benchNoopAction()).WithCompensation(comp("c")).DependsOn("a")
-	b.AddNode("d").WithAction(benchNoopAction()).WithCompensation(comp("d")).DependsOn("b", "c")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(comp("a"))
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(comp("b")).DependsOn("a")
+	b.AddNode("c").WithAction(benchNoopAction()).WithCompensationFunc(comp("c")).DependsOn("a")
+	b.AddNode("d").WithAction(benchNoopAction()).WithCompensationFunc(comp("d")).DependsOn("b", "c")
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("d")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "saga-diamond", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "saga-diamond", Store: store}
 
 	require.Error(t, w.Execute(context.Background()))
 
@@ -126,10 +126,10 @@ func TestSaga_ReEntrySwitch_CompensatesNotForward(t *testing.T) {
 	b := NewWorkflowBuilder()
 	b.AddNode("a").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { forwardHits++; return nil })).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("a"); return nil })
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "saga-reentry", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "saga-reentry", Store: store}
 
 	// Persist a rolling_back snapshot where 'a' already Completed (its forward effect
 	// happened once, before the crash we are simulating).
@@ -162,7 +162,7 @@ func TestSaga_NonSagaFailure_Inert(t *testing.T) {
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "non-saga", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "non-saga", Store: store}
 
 	require.Error(t, w.Execute(context.Background()), "the run fails")
 	got, err := store.Load("non-saga")
@@ -180,11 +180,11 @@ func TestSaga_CoeOnly_NoRollback(t *testing.T) {
 	b := NewWorkflowBuilder()
 	b.AddNode("a").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("soft") })).
-		WithCompensation(func(context.Context, *WorkflowData) error { rec.record("a"); return nil }).
+		WithCompensationFunc(func(context.Context, *WorkflowData) error { rec.record("a"); return nil }).
 		WithContinueOnError()
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "saga-coe", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "saga-coe", Store: store}
 
 	require.NoError(t, w.Execute(context.Background()), "a coe-only run succeeds (returns nil)")
 	got, err := store.Load("saga-coe")

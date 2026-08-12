@@ -72,7 +72,7 @@ func TestMergeAdv_EmptyBranchFromChoiceRejected(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnstructuredMerge, "a merge tail that is a ChoiceNode is rejected")
 }
 
-// DEFECT2 — mergeBuilder.DependsOn (merge.go:114-120, "additional upstream
+// DEFECT2 — MergeBuilder.DependsOn (merge.go:114-120, "additional upstream
 // dependencies … kept for symmetry") on a SIBLING branch-tail of the same Choice
 // is miscounted as a taken OR-join tail. The merge joins only branches b and c
 // (From("b","c")) but also DependsOn("a"). When the Choice takes branch a — a
@@ -427,7 +427,7 @@ func TestMergeAdv_NestedMergeAcrossChoiceLevelsRejected(t *testing.T) {
 
 // The DEPMODEL edge the validator ADDS (merge -> source Choice) must not create a
 // double edge when the merge already lists that Choice via an explicit
-// mergeBuilder.DependsOn. Guards the dependsOn() idempotence guard in the validator.
+// MergeBuilder.DependsOn. Guards the dependsOn() idempotence guard in the validator.
 func TestMergeAdv_DepModelEdgeNoDoubleAdd(t *testing.T) {
 	wb := NewWorkflowBuilder().WithWorkflowID("nodouble")
 	wb.AddStartNode("seed").WithAction(choiceNoop())
@@ -443,8 +443,8 @@ func TestMergeAdv_DepModelEdgeNoDoubleAdd(t *testing.T) {
 	require.NoError(t, err)
 	done, _ := dag.GetNode("done")
 	routeCount := 0
-	for _, d := range done.DependsOn {
-		if d.Name == "route" {
+	for _, d := range done.dependsOn {
+		if d.name == "route" {
 			routeCount++
 		}
 	}

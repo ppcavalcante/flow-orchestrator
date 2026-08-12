@@ -111,10 +111,18 @@ func (t *TestAction) ToAction() workflow.Action {
 	})
 }
 
-// CreateTestNode creates a test node with the provided action
-func CreateTestNode(name string, action workflow.Action) *workflow.Node {
-	return workflow.NewNode(name, action)
-}
+// CreateTestNode was DELETED by M23 SEAL-06 (T6), and its removal is the seal reaching
+// the one place outside pkg/workflow that could still mint a graph node.
+//
+// It was a public re-export of workflow.NewNode from a public package, so unexporting
+// the constructor without removing this would have left the mint chokepoint open to
+// every external caller through a second door. It also could not have survived on its
+// own merits: T6 unexports every AddNode path, so after the seal it returned a *Node
+// that the caller has no way to attach to any DAG — the same dead-constructor shape
+// that decided the four park constructors, one package over.
+//
+// Compiler-derived, not grepped: ZERO callers repo-wide. Build a graph with
+// workflow.NewWorkflowBuilder() and assert over the result.
 
 // CreateTestAction creates a simple test action that doesn't fail
 func CreateTestAction(name string) workflow.Action {
@@ -153,7 +161,7 @@ type WorkflowAssertion struct {
 func NewWorkflowAssertion(dag *workflow.DAG) *WorkflowAssertion {
 	return &WorkflowAssertion{
 		DAG:  dag,
-		Data: workflow.NewWorkflowData(dag.Name),
+		Data: workflow.NewWorkflowData(dag.Name()),
 	}
 }
 

@@ -19,7 +19,7 @@ import (
 // the benchstat-ready command).
 func BenchmarkWorkflowExecutePreM12NonSaga(b *testing.B) {
 	d := benchDiamondDAG(b)
-	w := &Workflow{DAG: d, WorkflowID: "bench-presaga-nonsaga"}
+	w := &Workflow{dag: d, WorkflowID: "bench-presaga-nonsaga"}
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -78,11 +78,11 @@ func (o signalOutcome) equal(other signalOutcome) bool {
 // stays visible to node.Execute.
 func buildAwaitDAG(t *testing.T, spec dagSpec, awaitIdx int, c *execCounter) *DAG {
 	t.Helper()
-	d := NewDAG("await-dag")
+	d := newDAGForTest("await-dag")
 	for i := 0; i < spec.n; i++ {
 		name := invNodeName(i)
 		if i == awaitIdx {
-			mustAddNode(t, d, NewWaitForSignalNode(name, "go"))
+			mustAddNode(t, d, newWaitForSignalNode(name, "go"))
 		} else {
 			mustAddNode(t, d, countingNode(name, c))
 		}
@@ -357,8 +357,8 @@ func TestSigProp_Bite_AckBeforeDurableLosesSignal(t *testing.T) {
 	require.NoError(t, store.DeliverSignal(id, Signal{ID: "s1", Name: "go", Payload: "x"}))
 
 	build := func() *DAG {
-		d := NewDAG(id)
-		mustAddNode(t, d, NewWaitForSignalNode("wait", "go"))
+		d := newDAGForTest(id)
+		mustAddNode(t, d, newWaitForSignalNode("wait", "go"))
 		return d
 	}
 

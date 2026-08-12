@@ -1,178 +1,120 @@
 # Example Applications
 
-Flow Orchestrator includes several example applications to demonstrate its features and capabilities. This document provides an overview of these examples and how to use them.
+Flow Orchestrator ships a deliberate 13-example suite that progresses from a three-node graph to a
+crash-durable, multi-worker, human-in-the-loop pipeline. Every example is **runnable** and **tested**
+— each directory ships a smoke test that actually executes it and asserts the real durable effect, so
+an example cannot silently rot.
 
-## Available Examples
+The authoritative map is [`examples/README.md`](../../examples/README.md); this page mirrors it. The
+numbering is a learning order, not a dependency order — jump to whichever capability you need.
 
-### Simple Workflow
-
-**Location**: `examples/new_simple`
-
-A basic example demonstrating the core workflow concepts. It creates a simple workflow with a few dependent nodes and executes it.
-
-**Key Features Demonstrated**:
-- Basic workflow creation
-- Action implementation
-- Dependency definition
-- Workflow execution
-
-**How to Run**:
+**Run one:**
 ```bash
-cd examples/new_simple
-go run main.go
+GOTOOLCHAIN=local go run ./examples/01-hello-dag
 ```
 
-### API Workflow
-
-**Location**: `examples/api_workflow`
-
-A command-line example that models an **API-orchestration pipeline** as a
-workflow: fetch user data, process it, send it to an analytics endpoint, and save
-it to a database. The external services are **mock clients** (no real network
-calls, no HTTP server) so the example is self-contained and deterministic.
-Configuration flags let you simulate failures and slow responses to exercise the
-error-handling and retry paths.
-
-**Key Features Demonstrated**:
-- Modeling a multi-step service pipeline as a DAG
-- Passing data between nodes via `WorkflowData`
-- Error handling and failure-injection (the simulate-* flags)
-
-**How to Run**:
+**Run (test) them all** — each example's smoke test executes its core:
 ```bash
-cd examples/api_workflow
-go run main.go
+GOTOOLCHAIN=local go test ./examples/...
 ```
 
-### Error Handling
+> `12-observability` is a **separate Go module** (its own `go.mod`, because it pulls in the
+> OpenTelemetry SDK). Run it from inside its directory: `cd examples/12-observability && go run .`
 
-**Location**: `examples/error_handling`
+## Fundamentals
 
-Examples of different error handling strategies in workflows. It demonstrates how to handle errors at different levels, including node retries, error recovery, and workflow-level error handling.
+### 01 — Hello DAG
+- **Location**: `examples/01-hello-dag`
+- **Shows**: nodes, dependencies, `WorkflowData`, typed `Action` / `ActionFunc`.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/01-hello-dag`
 
-**Key Features Demonstrated**:
-- Node retry configuration
-- Error recovery strategies
-- Conditional execution based on errors
-- Custom error handling middleware
+### 02 — Errors and retries
+- **Location**: `examples/02-errors-and-retries`
+- **Shows**: `ContinueOnError`, `WithRetries`, capped backoff + jitter, the error taxonomy.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/02-errors-and-retries`
 
-**How to Run**:
-```bash
-cd examples/error_handling
-go run main.go
-```
+## The moat — durability
 
-### DAG Patterns
+### 03 — Durable crash-resume
+- **Location**: `examples/03-durable-crash-resume`
+- **Shows**: a SQLite-backed run where the process is **killed mid-run** and resumes exactly-once,
+  replaying no completed work — the core thesis, *workflow is data, not replay*. `main()` re-execs and
+  self-kills a child to stage the crash.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/03-durable-crash-resume`
 
-**Location**: `examples/dag_patterns`
+## Rich control flow
 
-Demonstrates different patterns for constructing DAGs (Directed Acyclic Graphs) for various workflow scenarios.
+### 04 — Choice and merge
+- **Location**: `examples/04-choice-and-merge`
+- **Shows**: conditional branching, the `Bypassed` status, re-converging paths via a merge.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/04-choice-and-merge`
 
-**Key Features Demonstrated**:
-- Sequential workflows
-- Parallel execution
-- Fan-out/fan-in patterns
-- Conditional branches
-- Dynamic DAG construction
+### 05 — Dynamic fan-out
+- **Location**: `examples/05-dynamic-fanout`
+- **Shows**: `AddFanOut` over `N` items discovered at runtime, `WithMaxWidth`, partial collection, and
+  crash-resume rebuilding the exact branches.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/05-dynamic-fanout`
 
-**How to Run**:
-```bash
-cd examples/dag_patterns
-go run main.go
-```
+### 06 — Saga compensation
+- **Location**: `examples/06-saga-compensation`
+- **Shows**: durable reverse-order rollback on failure, `Compensated` / `CompensationFailed`.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/06-saga-compensation`
 
-### Comprehensive Example
+## Coordination & humans-in-the-loop
 
-**Location**: `examples/comprehensive`
+### 07 — Signals, timers, approvals
+- **Location**: `examples/07-signals-timers-approvals`
+- **Shows**: `AddApproval` + `ApproveSignal` (with the correlation nonce), a durable
+  first-of(signal, timer).
+- **Run**: `GOTOOLCHAIN=local go run ./examples/07-signals-timers-approvals`
 
-A complete example showcasing all features of the workflow system. This is the most complete example that demonstrates the full capabilities of Flow Orchestrator.
+### 08 — Sub-workflows
+- **Location**: `examples/08-sub-workflows`
+- **Shows**: composing a child graph, parked children, depth bounds.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/08-sub-workflows`
 
-**Key Features Demonstrated**:
-- Complex workflow definition
-- Custom middleware
-- Persistence configuration
-- Advanced error handling
-- Performance optimization
-- Observability features
+## Distribution & governance
 
-**How to Run**:
-```bash
-cd examples/comprehensive
-go run main.go
-```
+### 09 — Competing consumers
+- **Location**: `examples/09-competing-consumers`
+- **Shows**: the dispatch model (`RunNext` / `RunWorker`), leases + fencing, several workers draining
+  one queue; at-least-once external effects vs the exactly-once journal.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/09-competing-consumers`
 
-### Observability (OpenTelemetry)
+### 10 — Scheduling and caps
+- **Location**: `examples/10-scheduling-and-caps`
+- **Shows**: durable cron / interval / one-shot schedules via a `DueTimers` / `Tick` poller, plus
+  cross-process concurrency caps.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/10-scheduling-and-caps`
 
-**Location**: `examples/observability`
+### 11 — Governance boundary
+- **Location**: `examples/11-governance-boundary`
+- **Shows**: the M23 `WithBoundary` verifier-dominance check — it **refuses at Build** any topology
+  reaching the sink without passing the verifier.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/11-governance-boundary`
 
-A runnable, self-contained example of wiring the engine's metrics to a real
-OpenTelemetry SDK via the API-only bridge. It is a **separate Go module** (its own
-`go.mod` with a `replace` directive back to the library) so the OTel SDK never
-enters the library's own dependency graph. It uses a deterministic, network-free
-pipeline (a `ManualReader` feeding a `stdoutmetric` exporter), so it is safe to
-run in CI. See the [Observability guide](../guides/observability.md) for the
-instrument inventory and the production (OTLP) wiring.
+## Ops & capstone
 
-**Key Features Demonstrated**:
-- Host-owned OTel SDK / `MeterProvider` (the library stays API-only)
-- Enabling the library's metrics via `WithMetricsConfig`
-- Bridging the collector with `metrics.NewOTelBridge`
-- Manual collection + export of the `flow_orchestrator.operation.*` instruments
+### 12 — Observability
+- **Location**: `examples/12-observability` (its own Go module)
+- **Shows**: exporting the in-memory metrics to OpenTelemetry via the API-only bridge. Metrics default
+  to **disabled** — the example calls `metrics.NewConfig().WithEnabled(true)`. See the
+  [Observability guide](../guides/observability.md) for the instrument inventory and OTLP wiring.
+- **Run**: `cd examples/12-observability && GOTOOLCHAIN=local go run .`
 
-**How to Run**:
-```bash
-cd examples/observability
-go run .
-```
+### ★ Capstone — document pipeline
+- **Location**: `examples/capstone-document-pipeline`
+- **Shows**: a realistic app combining fan-out, choice/merge, a sub-workflow, and an approval,
+  published on SQLite with durable multi-worker dispatch — the full capability set in one place.
+- **Run**: `GOTOOLCHAIN=local go run ./examples/capstone-document-pipeline`
 
-## Adapting Examples for Your Use Case
+## Adapting examples for your use case
 
-The examples are designed to be starting points for your own applications. Here's how you can adapt them:
+The examples are starting points: copy the closest one, extract a specific pattern, or combine
+capabilities from several. Each ships its own `README.md` with a focused walkthrough.
 
-1. **Copy and Modify**: Copy the relevant example to your project and modify it to suit your needs
-2. **Extract Patterns**: Extract specific patterns or techniques from the examples
-3. **Combine Features**: Combine features from different examples
+## Additional resources
 
-## Example Workflow Patterns
-
-The examples demonstrate several common workflow patterns:
-
-### Sequential Workflow
-
-Nodes execute in a strict sequence:
-```
-A → B → C → D
-```
-
-### Parallel Workflow
-
-Multiple branches execute in parallel:
-```
-    ┌→ B →┐
-A → ├→ C →┤ → E
-    └→ D →┘
-```
-
-### Conditional Workflow
-
-Execution path depends on conditions:
-```
-    ┌→ B1 →┐
-A → ├      ┤ → D
-    └→ B2 →┘
-```
-
-### Error Recovery Workflow
-
-Includes fallback paths for error recovery:
-```
-    ┌→ B → C →┐
-A →  │         ├→ E
-    └→ D[fallback] →┘
-```
-
-## Additional Resources
-
-- See the [Getting Started](../getting-started/) section for basic usage
-- Explore the [Guides](../guides/) section for more detailed information on specific features
-- Check the [API Reference](./api-reference.md) for detailed API documentation 
+- See the [Getting Started](../getting-started/) section for basic usage.
+- Explore the [Guides](../guides/) section for detailed feature docs.
+- Check the [API Reference](./api-reference.md) for the full API.

@@ -3,7 +3,6 @@ package benchmark
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/ppcavalcante/flow-orchestrator/pkg/workflow"
@@ -72,11 +71,14 @@ func NewExecutor() *StandardExecutor {
 
 // Execute executes a workflow
 func (e *StandardExecutor) Execute(ctx context.Context, dag *workflow.DAG, data *workflow.WorkflowData) (interface{}, error) {
-	// Simple sequential execution
-	for _, node := range dag.Nodes {
-		if err := node.Action.Execute(ctx, data); err != nil {
-			return nil, err
-		}
+	// M23 SEAL-01/02: this harness drove node actions directly off Node.Action and
+	// ranged over DAG.Nodes, so it re-implemented the executor instead of measuring
+	// it — no topological order (map iteration), no status writes, no retries, no
+	// timeouts. Both fields are sealed now, and the harness drives the real engine.
+	// NOTE: this changes what the benchmark measures; it is not comparable to a
+	// pre-M23 figure from this type.
+	if err := dag.Execute(ctx, data); err != nil {
+		return nil, err
 	}
 	return data, nil
 }
@@ -111,37 +113,15 @@ func NewExecutorWithConfig(config *Config) *OptimizedExecutor {
 
 // Execute executes a workflow respecting DAG dependency levels with parallel execution within each level
 func (e *OptimizedExecutor) Execute(ctx context.Context, dag *workflow.DAG, data *workflow.WorkflowData) (interface{}, error) {
-	// Get levels for dependency-respecting execution
-	levels := dag.GetLevels()
-	if len(levels) == 0 {
-		return data, nil
+	// M23 SEAL-01: this harness re-implemented level-wise parallel execution by
+	// driving n.Action directly — a second, divergent copy of the engine's own
+	// scheduler that silently skipped statuses, retries and timeouts. Node.Action
+	// is sealed, and the harness drives the real engine.
+	// NOTE: this changes what the benchmark measures; it is not comparable to a
+	// pre-M23 figure from this type.
+	if err := dag.Execute(ctx, data); err != nil {
+		return nil, err
 	}
-
-	for _, level := range levels {
-		var wg sync.WaitGroup
-		errChan := make(chan error, len(level))
-
-		for _, node := range level {
-			wg.Add(1)
-			go func(n *workflow.Node) {
-				defer wg.Done()
-				if err := n.Action.Execute(ctx, data); err != nil {
-					errChan <- err
-				}
-			}(node)
-		}
-
-		wg.Wait()
-		close(errChan)
-
-		// Check for errors in this level before proceeding
-		for err := range errChan {
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	return data, nil
 }
 

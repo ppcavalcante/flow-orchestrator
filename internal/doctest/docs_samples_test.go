@@ -471,7 +471,7 @@ func TestGateBites(t *testing.T) {
 	// (3) buildAndRun rejects a complete program that does not compile/run — the
 	// exact mechanism that guards the runnable-doc samples.
 	t.Run("build_and_run", func(t *testing.T) {
-		good := "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/ppcavalcante/flow-orchestrator/pkg/workflow\"\n)\n\nfunc main() {\n\tb := workflow.NewWorkflowBuilder().WithWorkflowID(\"x\")\n\tb.AddStartNode(\"n\").WithAction(func(ctx context.Context, d *workflow.WorkflowData) error { return nil })\n\tdag, err := b.Build()\n\tif err != nil { panic(err) }\n\t_ = dag.Execute(context.Background(), workflow.NewWorkflowData(\"x\"))\n}\n"
+		good := "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/ppcavalcante/flow-orchestrator/pkg/workflow\"\n)\n\nfunc main() {\n\tb := workflow.NewWorkflowBuilder().WithWorkflowID(\"x\")\n\tb.AddStartNode(\"n\").WithActionFunc(func(ctx context.Context, d *workflow.WorkflowData) error { return nil })\n\tdag, err := b.Build()\n\tif err != nil { panic(err) }\n\t_ = dag.Execute(context.Background(), workflow.NewWorkflowData(\"x\"))\n}\n"
 		if out, err := buildAndRun(root, good); err != nil {
 			t.Errorf("buildAndRun REJECTED a valid program: %v\n%s", err, out)
 		}

@@ -1,0 +1,6 @@
+# author: t8-seat
+# DERIVED: the property stated correctly, as the control a future banned-term addition must not red.
+A declared boundary (D, V, S) asserts precedence: on every route through the
+built graph, S does not occur before V. That is V dom S over control flow and
+nothing more. The doer may run after the verifier, and the sink is constrained
+only in when it occurs.

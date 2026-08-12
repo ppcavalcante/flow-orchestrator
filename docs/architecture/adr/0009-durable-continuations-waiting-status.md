@@ -19,7 +19,7 @@ data condition — for arbitrarily long, across process restarts, without holdin
 open.
 
 The constraint that shaped the design: preserve the project's moat — an **embeddable,
-no-server, no-DB** engine whose core is **formally verified**, delivering durability with
+no-server, no-DB** engine whose core is **TLA+-model-checked**, delivering durability with
 **no determinism tax** (the workflow is static DAG *data*, never replayed code). A naive
 "wait" implementation (a live `time.Timer`, a blocking receive, a background scheduler
 goroutine that must always be running) would import exactly the server/daemon dependency
@@ -113,7 +113,7 @@ persistence path and no mandatory background service.** Four locked elements:
   independent channel outside the snapshot.
 - **Ship `ChoiceNode` (data-driven routing) in M10.** Deferred to M11 — the common
   converge-after-choice pattern needs a real OR-join, a materially larger feature that
-  touches fail-fast interaction and the formally-verified core (`DEC-M10-P38-DEFER`).
+  touches fail-fast interaction and the TLA+-model-checked core (`DEC-M10-P38-DEFER`).
 
 ## References
 

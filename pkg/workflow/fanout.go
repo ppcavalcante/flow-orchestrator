@@ -6,7 +6,8 @@
 //       seam), under a cancellable sub-context so a FailFast failure cancels in-flight siblings;
 //   (3) aggregates node[i] in DISCOVERY order (index-addressed, assembled after the pool drains).
 // Crash-after-branch-k idempotency comes from the DETERMINISTIC child ID + child.Execute resume-idempotency
-// (subworkflow.go:285-310) — NOT the terminal-fast-path (which is an optimization; the 104 correction).
+// (subworkflow.go:274-278; the terminal-node skip that delivers it is parallel_execution.go:88) — NOT the
+// terminal-fast-path (which is an optimization; the 104 correction).
 //
 // ADDITIVE: the fan-out is one ordinary node; Execute/dag.go/parallel_execution.go public behavior is unchanged.
 // The ONLY executor change is the additive withMaxConcurrency set-site at dag.go (wraps the ctx handed to
@@ -69,9 +70,9 @@ func fanOutResultIndexKey(baseKey string, i int) string {
 	return baseKey + "[" + strconv.Itoa(i) + "]"
 }
 
-// fanOutExpander resolves the runtime fan-out width. Returns the ordered discovery list of per-branch inputs;
+// FanOutExpander resolves the runtime fan-out width. Returns the ordered discovery list of per-branch inputs;
 // len(items) == N. Runs EXACTLY ONCE across a crash+resume (its result is journaled).
-type fanOutExpander func(ctx context.Context, parentData *WorkflowData) ([]interface{}, error)
+type FanOutExpander func(ctx context.Context, parentData *WorkflowData) ([]interface{}, error)
 
 // fanOutBranch builds the single-node child DAG that processes item i. A factory (not a prebuilt DAG) so each
 // branch gets a distinct action closure without sharing action state across branches.
@@ -94,7 +95,7 @@ func branchDAGFromAction(branchAction Action, retry *branchRetryPolicy) fanOutBr
 	return func(_ int, item interface{}) *DAG {
 		b := NewWorkflowBuilder()
 		b.AddStartNode("branch").WithAction(ActionFunc(func(ctx context.Context, d *WorkflowData) error {
-			d.Set(FanOutItemKey, item) // the per-branch item, read by branchAction via data.Get(FanOutItemKey)
+			d.setReserved(FanOutItemKey, item) // the per-branch item (reserved key; setReserved bypasses the AUD-018 seal), read by branchAction via data.Get(FanOutItemKey)
 			return branchAction.Execute(ctx, d)
 		}))
 		dag, err := b.Build()
@@ -119,7 +120,20 @@ func branchDAGFromAction(branchAction Action, retry *branchRetryPolicy) fanOutBr
 // CORRUPTS an int64 item above 2^53 (a large ID / nanos timestamp), the [[first-ci-run-saga]] fidelity bug on the
 // item axis. (The branch's RESULT — what it Sets under the WithResults branchResultKey — is keyed
 // TYPED/value_long-faithful separately.)
-func (b *WorkflowBuilder) AddFanOut(name string, expander fanOutExpander, branchAction Action) *NodeBuilder {
+//
+// CRASH-RESUME IS AT-LEAST-ONCE EXECUTION + EXACTLY-ONCE PERSISTENCE. Do NOT build a durability claim on
+// "a branch that already completed is skipped on resume": the terminal-fast-path in driveBranch is an
+// OPTIMIZATION, not the contract. What actually holds the line is that a re-driven branch resolves to the
+// SAME child ID (deterministic f(parentID, nodeName, index)) and so re-uses the SAME journal, and
+// child.Execute's own resume-idempotency then skips that child's already-terminal nodes (the skip itself is
+// parallel_execution.go:88, and dag.go:618 for the cross-level sweep; prose at subworkflow.go:274-278) — so
+// bypassing the fast path costs a load, not a re-execution.
+//
+// The re-invocation that DOES happen is a branch IN FLIGHT at the crash: its node is not yet terminal, so
+// on resume branchAction runs again for that item, having possibly already half-run. Only the PERSISTED
+// per-branch result is exactly-once. Make a side-effecting branchAction idempotent (the executor passes it
+// a stable IdempotencyKey handle). Same contract as the expander (F-PG-13) and any node (F-PG-11).
+func (b *WorkflowBuilder) AddFanOut(name string, expander FanOutExpander, branchAction Action) *NodeBuilder {
 	node := b.AddNode(name)
 	if expander == nil || branchAction == nil {
 		node.actionErr = fmt.Errorf("%w: AddFanOut %q requires a non-nil expander and branchAction", ErrValidation, name)
@@ -176,6 +190,12 @@ func (n *NodeBuilder) WithMaxWidth(maxWidth int) *NodeBuilder {
 // deterministic ID) for the error. A partial failure does NOT fail the fan node, so under CollectPartial the
 // parent proceeds and a parent-level M12 WithCompensation rollback is NOT triggered by a partial branch failure
 // (containment (b) — the node Completes → no ExecutionError → no rollback). Only valid on an AddFanOut node.
+//
+// THE PARTITION IS NOT A RE-EXECUTION LEDGER. __failed__/__count__/baseKey[i] describe the FINAL outcome per
+// index, not how many times a branch ran: execution across a crash is AT-LEAST-ONCE, persistence exactly-once
+// (see AddFanOut — the terminal-fast-path that skips a completed branch on resume is an optimization, not the
+// guarantee). A branch in flight at a crash re-runs on resume, so a succeeded baseKey[i] does NOT mean its
+// action ran exactly once. Count re-executions, if you need to, in the branch's own idempotent effect.
 func (n *NodeBuilder) WithCollectPartial() *NodeBuilder {
 	a, ok := n.action.(*fanOutAction)
 	if !ok {
@@ -228,7 +248,7 @@ func (n *NodeBuilder) WithBranchRetries(count int, delay time.Duration, opts ...
 // sub-context, aggregated in discovery order. The expander result is journaled (expansion-once) before any branch.
 type fanOutAction struct {
 	nodeName       string
-	expander       fanOutExpander
+	expander       FanOutExpander
 	branchInner    Action // the raw user branch action, retained so WithBranchRetries can rebuild `branch` with a retry policy
 	branch         fanOutBranch
 	resultFrom     string             // the branch child DATA key each branch's result is read from (typed, value_long-faithful)
@@ -285,12 +305,25 @@ type fanOutJournal struct {
 	Items []json.RawMessage `json:"items"` // each item's JSON, preserved in discovery order
 }
 
-// subFanOutChildID derives the deterministic per-branch child ID from (parentID, nodeName, index) via ONE hash
-// (F3 — drops the spike's brittle base[len("sub:"):] prefix-slice). The 8-byte LE length prefixes on parentID and
-// nodeName make every (parentID, nodeName, index) split unambiguous (("ab","c",0) and ("a","bc",0) never
-// collide), and the index is folded into the SAME hash — resume-stable (same index → same ID) and collision-safe
-// vs a 2-field "sub:" child (distinct "fan:" prefix + the index in the digest).
-func subFanOutChildID(parentID, nodeName string, index int) string {
+// FanOutChildID derives the deterministic per-branch child ID from (parentID, nodeName, index) via ONE hash
+// (F3 — drops the spike's brittle base[len("sub:"):] prefix-slice).
+//
+//	digest = SHA-256( uint64-LE(len(parentID)) || parentID ||
+//	                  uint64-LE(len(nodeName)) || nodeName || uint64-LE(index) )
+//	id     = "fan:" + hex(digest)
+//
+// The 8-byte little-endian length prefixes on parentID and nodeName make every
+// (parentID, nodeName, index) split unambiguous (("ab","c",0) and ("a","bc",0) never collide), and the index is
+// folded into the SAME hash — resume-stable (same index → same ID) and collision-safe vs a 2-field "sub:" child
+// (distinct "fan:" prefix + the index in the digest). This construction is a STABLE CONTRACT — downstream
+// systems may recompute it, so it must not change across versions without a deliberate, documented break. The
+// same guarantee IdempotencyKey carries.
+//
+// Exported because WithCollectPartial's own contract tells a consumer to inspect a failed branch's child
+// journal by its deterministic ID — an instruction that was not followable while this was unexported.
+// Recompute it here rather than reimplementing the framing: the length prefixes are a collision guard, not
+// incidental.
+func FanOutChildID(parentID, nodeName string, index int) string {
 	h := sha256.New()
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], uint64(len(parentID)))
@@ -307,6 +340,14 @@ func subFanOutChildID(parentID, nodeName string, index int) string {
 // Execute runs the fan-out: F4 checkpointer gate → expansion-once → the node's bounded, cancellable N-branch pool
 // → discovery-order aggregate. FailFast: the first branch failure cancels the branch sub-context; in-flight
 // siblings observe ctx.Done() and no un-started branch launches.
+// engineTrusted marks fanOutAction as engine machinery: it orchestrates branches as
+// isolated CHILD workflows (driveBranch → child.Execute; the consumer branch action is
+// sealed inside that child execution) and writes the fan-out result/count/journal keys
+// into parentData. It runs unsealed so those engine-journal writes succeed; it never runs
+// consumer code on parentData, so trusting it does not widen the mediation surface.
+// (M24 DEC-M24-MEDIATION.)
+func (a *fanOutAction) engineTrusted() {}
+
 func (a *fanOutAction) Execute(ctx context.Context, parentData *WorkflowData) error {
 	store := parentStoreFrom(ctx)
 	if store == nil {
@@ -493,8 +534,108 @@ func (a *fanOutAction) Execute(ctx context.Context, parentData *WorkflowData) er
 				continue
 			}
 			key := fanOutResultIndexKey(a.resultKey, i)
-			if existing, present := parentData.Get(key); present && !reflect.DeepEqual(existing, results[i]) {
-				return fmt.Errorf("%w: indexed key %q (node %q)", ErrFanOutResultKeyCollision, key, a.nodeName)
+			// 116-AF2, the DeepEqual class. reflect.DeepEqual RECURSES, and dies at ~922
+			// bytes of goroutine stack per level — sooner than json.Marshal's ~743, so it
+			// is the tighter class and the same bound covers both. results[i] is a branch
+			// result: host code's return value, of arbitrary depth.
+			//
+			// 🔴 116-GC-F1, AND IT WAS MINE. An earlier version of this comment said
+			// results[i] "has been nowhere else" and contrasted it against sub-workflow's
+			// store.Load. That is BACKWARDS, and it was a FIFTH instance of the very class
+			// the rest of this comment corrects — introduced by the commit that fixed the
+			// other four, and caught by an independent reviewer rather than by me.
+			//
+			// driveBranch returns a.readBranchResult(...) on BOTH of its return paths, and
+			// each reads a *WorkflowData that came from store.Load(childID) — the terminal
+			// fast path and the post-drive reload alike. Its own doc comment says it uses
+			// "the SAME per-child idempotency as subWorkflowAction". So a branch result HAS
+			// met the store, exactly as a sub-workflow result has; the two sites are
+			// structurally the same, not opposites.
+			//
+			// It is the OTHER operand that may never meet an encoder: `existing` comes from
+			// parentData.Get, and WorkflowData.Get/Set are in-memory map operations with no
+			// store involvement. On a fresh single-process run `existing` is the raw Go
+			// value a prior node Set, on EVERY backend; only on a RESUME was it rebuilt
+			// from the store.
+			//
+			// 🔴 116-AF9: "BOUNDING ONE SIDE IS SUFFICIENT" STOOD HERE AND IS FALSE.
+			// The proof offered for it — deepValueEqual descends only where both values
+			// have the corresponding element, so its depth is bounded by the shallower of
+			// the two — is about STRUCTURAL depth and holds only for ACYCLIC values. For a
+			// cyclic pair both structural depths are infinite and min() says nothing; what
+			// terminates deepValueEqual is its memo, and that memo matches on a repeated
+			// PAIR. That is why checkDeepEqualPairDepth takes BOTH values, and why it is
+			// called with both below. The stale proof is deleted rather than qualified: a
+			// reader who half-believes it will "tidy" the call back down to one side.
+			if existing, present := parentData.Get(key); present {
+				// Guard INSIDE the present branch: that is when DeepEqual actually runs.
+				// 🔴 116-AF6-R2, ACCEPTED RESIDUAL (medium). RE-WORDED, not
+				// re-dispositioned: an independent seat was commissioned to attack the
+				// original text and refuted it in three directions. Corrected here because
+				// this comment is the only copy of the finding that ships.
+				//
+				// The error-substitution class 116-AF1 named is NARROWED, not closed. Any
+				// pair checkDeepEqualPairDepth refuses returns ErrValidation from here,
+				// because the depth guard runs BEFORE this function's own comparison and a
+				// refusal pre-empts it.
+				//
+				// WIDER than first recorded — it substitutes for SUCCESS, not just for a
+				// sentinel. For a deeply EQUAL pair the contract here is nil, the
+				// idempotent re-apply. MEASURED: two distinct-but-equal 5-node rings —
+				// reflect.DeepEqual answers true in 79.9 us without difficulty — are
+				// refused. It fails a run that would have succeeded.
+				//
+				// NO CYCLE IS NEEDED; "notably two same-type cyclic values" understated
+				// the class. An ACYCLIC struct{Val int; Next *N} chain reaches it. MEASURED
+				// boundary, monotone, with the guard NAMED at each step:
+				//
+				//	links   walk frames (2n+1)   outcome
+				//	16,383  32,767              ACCEPT -> falls through to the DeepEqual
+				//	                            below -> ErrFanOutResultKeyCollision (correct)
+				//	16,384  32,769              REFUSE -> ErrValidation, checkDeepEqualPairDepth
+				//
+				// Note the arithmetic, because this project keeps tripping on it: a link
+				// costs a POINTER frame and a STRUCT frame, so n links cost 2n+1 walk
+				// frames, and the accept edge is 16,383 — NOT "16,384 x 2 = 32,768", which
+				// is the depth-vs-frames slip 116-AF5 was filed for.
+				//
+				// NARROWER than first recorded — exposure is InMemoryStore-ONLY, and the
+				// reason runs through results[i], NOT through `existing` (116-GC-F5: the
+				// operands were attributed the wrong way round here too).
+				//
+				// results[i] is the store-derived operand. On JSONFile / FlatBuffers /
+				// SQLite it comes back from store.Load FLATTENED — map[string]interface{}
+				// or string — while `existing` is whatever the parent map holds, so the
+				// pair TYPE-MISMATCHES, deepEqualSettlesWithoutRecursing accepts it, and
+				// the correct collision sentinel comes back. On a RESUME both operands are
+				// store-derived, both are flattened and therefore shallow, and the
+				// acyclic-side accept above fires instead. Either way a marshalling backend
+				// cannot reach this bound.
+				//
+				// Nor can an encoder-VISIBLE value get there through one: checkJSONDepth
+				// caps a document at 10,000 NESTING LEVELS, which is about 20,000 walk
+				// frames, and this guard does not refuse until past 32,768. Both quoted in
+				// FRAMES on purpose — comparing "10,000 levels" against "16,384 links"
+				// would be the AF5 unit slip, two paragraphs after the one warning about it.
+				//
+				// InMemoryStore is a supported public backend, so the residual is REAL —
+				// its blast radius is one backend.
+				//
+				// EXPOSURE IS AT Execute, NOT AT Save — confirmed independently. This check
+				// runs on in-memory results during the run, so "a cyclic value could never
+				// persist" is TRUE and about the WRONG AXIS. It is also false in its own
+				// right; see 116-AF9 in value_depth_deepequal.go.
+				//
+				// The remedy — a bounded lockstep probe to decide cheap-disqualification
+				// during recursion — was DECLINED by the architect: ~60 lines of equality
+				// re-implementation inside a bound, on the guard already carrying the most
+				// mirroring complexity, to convert a safe refusal into a less safe accept.
+				if derr := checkDeepEqualPairDepth(existing, results[i], fmt.Sprintf("fan-out %q branch %d result", a.nodeName, i)); derr != nil {
+					return derr
+				}
+				if !reflect.DeepEqual(existing, results[i]) {
+					return fmt.Errorf("%w: indexed key %q (node %q)", ErrFanOutResultKeyCollision, key, a.nodeName)
+				}
 			}
 			parentData.Set(key, results[i])
 		}
@@ -512,6 +653,18 @@ func (a *fanOutAction) Execute(ctx context.Context, parentData *WorkflowData) er
 				return fmt.Errorf("fan-out %q encode failed-list: %w", a.nodeName, err)
 			}
 			fkey := fanOutResultFailedKey(a.resultKey)
+			// NO checkValueDepth here, and it is an ARGUMENT rather than an omission — this
+			// site was enumerated with the two above as a DeepEqual crash vector and it is
+			// not one. The second argument is always a `string`, and reflect.DeepEqual
+			// compares TYPES first ("values of distinct types are never deeply equal"), so
+			// a deep `existing` returns false immediately without descending; and if
+			// `existing` is also a string it is a string comparison, which does not recurse
+			// either. MEASURED in a child process at depth 650,000:
+			// DeepEqual(deepValue, "a string") exits 0, while DeepEqual(deep, deep) dies.
+			//
+			// If that second argument ever stops being a string, this argument breaks and
+			// the site needs the guard. Adding one TODAY would be worse than useless: it
+			// would make the next reader's census count a vector that does not exist.
 			if existing, present := parentData.Get(fkey); present && !reflect.DeepEqual(existing, string(enc)) {
 				return fmt.Errorf("%w: failed-list key %q (node %q)", ErrFanOutResultKeyCollision, fkey, a.nodeName)
 			}
@@ -583,15 +736,47 @@ func (a *fanOutAction) resolveExpansion(ctx context.Context, parentData *Workflo
 	}
 	items := make([]json.RawMessage, len(resolved))
 	for i, it := range resolved {
+		// AF2: the CRASH axis, BEFORE the marshal. The expander is host code returning
+		// arbitrary values, so this is where a fan-out gets one.
+		if derr := checkValueDepth(it, fmt.Sprintf("fan-out %q item %d", a.nodeName, i)); derr != nil {
+			return nil, derr
+		}
 		enc, merr := json.Marshal(it)
 		if merr != nil {
 			return nil, fmt.Errorf("%w: fan-out %q item %d not JSON-encodable: %w", ErrValidation, a.nodeName, i, merr)
 		}
+		// DEPTH CAP AT THE WRITE, because this journal is read back by a decoder that
+		// has one and the snapshot guard structurally cannot see it.
+		//
+		// The journal is stored as a JSON *string* (Set below), so in the snapshot its
+		// nesting lives inside a string literal — and jsonNestingDepth correctly skips
+		// string contents. That is the guard working, not failing. But resolveExpansion
+		// reads it back with json.Unmarshal, which IS capped at maxJSONNestingDepth by
+		// the stdlib scanner. Without this check the pair is: WRITE ACCEPTS, RESUME
+		// REFUSES, permanently — a wedged run rather than a rejected input. Refusing
+		// here turns a lost workflow into a loud validation error at the moment the bad
+		// value is produced.
+		if derr := checkJSONDepth(enc, fmt.Sprintf("fan-out %q item %d", a.nodeName, i)); derr != nil {
+			return nil, derr
+		}
 		items[i] = enc
 	}
+	// NO checkValueDepth here, and the reason is an ARGUMENT rather than an oversight —
+	// stated because a reader pairing marshal sites against pre-marshal walks will
+	// otherwise find a gap. items is []json.RawMessage, and RawMessage implements
+	// json.Marshaler, so the walk would stop at every element without descending: it can
+	// only ever return nil. Each item was walked individually at its own marshal above,
+	// while it was still a live Go value, which is the only point at which it is walkable.
+	// If Items ever stops being []json.RawMessage that argument breaks and this site needs
+	// its own walk.
 	journal, err := json.Marshal(fanOutJournal{N: len(items), Items: items})
 	if err != nil {
 		return nil, fmt.Errorf("fan-out %q journal encode: %w", a.nodeName, err)
+	}
+	// The whole journal too, not only the items: the envelope adds levels, and the
+	// decoder's cap applies to the document it actually parses.
+	if derr := checkJSONDepth(journal, fmt.Sprintf("fan-out %q journal", a.nodeName)); derr != nil {
+		return nil, derr
 	}
 	parentData.Set(fanOutItemsKey(a.nodeName), string(journal))
 	cp := checkpointFrom(ctx)
@@ -606,7 +791,7 @@ func (a *fanOutAction) resolveExpansion(ctx context.Context, parentData *Workflo
 // result WITHOUT re-executing (crash-after-branch-k idempotency, N-wide, from the DETERMINISTIC ID); else drive
 // it. Returns the branch's declared result value (resultFrom key) for the aggregate.
 func (a *fanOutAction) driveBranch(ctx context.Context, store WorkflowStore, parentID string, idx int, item interface{}) (interface{}, error) {
-	childID := subFanOutChildID(parentID, a.nodeName, idx)
+	childID := FanOutChildID(parentID, a.nodeName, idx)
 
 	// Terminal-fast-path (optimization, not the guarantee): an already-complete branch child is a no-op on resume.
 	if existing, err := store.Load(childID); err == nil && existing != nil {
@@ -619,7 +804,7 @@ func (a *fanOutAction) driveBranch(ctx context.Context, store WorkflowStore, par
 	}
 
 	branchDAG := a.branch(idx, item)
-	child := &Workflow{DAG: branchDAG, WorkflowID: childID, Store: store}
+	child := &Workflow{dag: branchDAG, WorkflowID: childID, Store: store}
 	if err := child.Execute(withDriveID(ctx, childID)); err != nil {
 		return nil, err // includes ctx.Canceled when a sibling fail-fasts this branch mid-run.
 	}

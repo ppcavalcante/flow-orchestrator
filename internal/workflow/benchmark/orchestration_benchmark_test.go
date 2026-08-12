@@ -315,26 +315,38 @@ func BenchmarkRecoveryPattern(b *testing.B) {
 // Utility function to determine which nodes are ready to execute
 func getReadyNodes(dag *workflow.DAG, data *workflow.WorkflowData) []*workflow.Node {
 	var readyNodes []*workflow.Node
-	// Find all nodes in the DAG
-	for _, node := range dag.Nodes {
-		// Skip already completed or failed nodes
-		status, _ := data.GetNodeStatus(node.Name)
-		if status == workflow.Completed || status == workflow.Failed || status == workflow.Running {
-			continue
-		}
-
-		// Check if all dependencies are satisfied
-		allDependenciesMet := true
-		for _, dep := range node.DependsOn {
-			depStatus, _ := data.GetNodeStatus(dep.Name)
-			if depStatus != workflow.Completed {
-				allDependenciesMet = false
-				break
+	// Find all nodes in the DAG. M23 SEAL-02 sealed the Nodes map, so an
+	// out-of-package caller reaches the node set through GetLevels — which also
+	// removes this loop's dependence on Go's randomized map iteration order.
+	for _, level := range dag.GetLevels() {
+		for _, node := range level {
+			// Skip already completed or failed nodes
+			status, _ := data.GetNodeStatus(node.Name())
+			if status == workflow.Completed || status == workflow.Failed || status == workflow.Running {
+				continue
 			}
-		}
 
-		if allDependenciesMet {
-			readyNodes = append(readyNodes, node)
+			// Check if all dependencies are satisfied.
+			//
+			// M23 SEAL-01: this read the Node.DependsOn field directly; the only
+			// external read path is now GetDependencies. THAT COSTS ONE SLICE
+			// ALLOCATION PER NODE PER CALL, and this function runs inside the
+			// benchmark loop — so the numbers this file produces are not comparable to
+			// any pre-seal baseline. They already were not (F117-T3-01: this package
+			// was measuring a hand-rolled scheduler rather than the engine), but this
+			// is a second, independent reason.
+			allDependenciesMet := true
+			for _, dep := range node.GetDependencies() {
+				depStatus, _ := data.GetNodeStatus(dep.Name())
+				if depStatus != workflow.Completed {
+					allDependenciesMet = false
+					break
+				}
+			}
+
+			if allDependenciesMet {
+				readyNodes = append(readyNodes, node)
+			}
 		}
 	}
 

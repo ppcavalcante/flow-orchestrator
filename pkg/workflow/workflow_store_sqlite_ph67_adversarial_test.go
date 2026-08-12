@@ -475,14 +475,16 @@ func TestPh67Adv_CrashBeforeCommit_ZeroTorn(t *testing.T) {
 		require.NoError(t, s.SaveCheckpoint(d))
 	}
 	committed := snapOf(t, s, "wf")
-	shadowBefore := shadowFromData(d) // == the durable frontier after level 2
+	shadowBefore, sberr := shadowFromData(d) // == the durable frontier after level 2
+	require.NoError(t, sberr)
 
 	// Now simulate a CRASH during level 3: build the target, open a txn, write SOME of
 	// the delta, then die before commit (Rollback). This is exactly what the real
 	// single-txn saveIncremental does up to — but never reaching — tx.Commit().
 	step := steps[3]
 	step(d)
-	target := shadowFromData(d)
+	target, terr := shadowFromData(d)
+	require.NoError(t, terr)
 	ctx := context.Background()
 	tx, err := s.db.BeginTx(ctx, nil)
 	require.NoError(t, err)
@@ -535,7 +537,8 @@ func TestPh67Adv_SeededShouldFail_NonTxnLeavesTornLevel(t *testing.T) {
 	// (autocommit) and crash AFTER the node but BEFORE the data.
 	d.SetNodeStatus("a", Failed)
 	d.Set("k", int64(2))
-	target := shadowFromData(d)
+	target, terr := shadowFromData(d)
+	require.NoError(t, terr)
 	clean1 := fullSaveSnap(t, dir, "clean1.db", d)
 	ctx := context.Background()
 	// node write (autocommit — durable immediately, no enclosing txn).

@@ -28,7 +28,7 @@ True branching needs two things the strict-AND model did not have:
    `Skipped` under a strict-AND gate, so the gate itself had to be redesigned, not patched.
 
 The constraint that shaped the design is the project moat: an **embeddable, no-server,
-no-DB** engine with a **formally verified** core and **no determinism tax** (the workflow is
+no-DB** engine with a **TLA+-model-checked** core and **no determinism tax** (the workflow is
 static DAG *data*, never replayed code). Branching had to stay **static and declared** (no
 runtime graph mutation) so it remains exhaustively model-checkable, and it had to add **no
 new dependency** and **no cost to the non-branching hot path**.

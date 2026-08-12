@@ -81,8 +81,8 @@ func CompensationIdempotencyKey(ctx context.Context) (string, bool) {
 // declared => exactly the old behavior — no rolling_back marker, a single failed-state
 // save). Scanned only on the failure path, never the hot path.
 func (w *Workflow) hasCompensations() bool {
-	for _, n := range w.DAG.Nodes {
-		if n.Compensation != nil {
+	for _, n := range w.dag.nodes {
+		if n.compensation != nil {
 			return true
 		}
 	}
@@ -137,7 +137,7 @@ func (w *Workflow) driveRollback(data *WorkflowData) *sagaOutcome {
 		defer cancel()
 	}
 
-	maxConc := w.DAG.config.MaxConcurrency
+	maxConc := w.dag.config.MaxConcurrency
 	if maxConc <= 0 {
 		maxConc = DefaultMaxConcurrency
 	}
@@ -150,7 +150,7 @@ func (w *Workflow) driveRollback(data *WorkflowData) *sagaOutcome {
 	if !w.hasPendingCompensation(data) {
 		return out
 	}
-	levels := w.DAG.GetLevels()
+	levels := w.dag.GetLevels()
 	for i := len(levels) - 1; i >= 0; i-- {
 		compensateLevel(ctx, levels[i], data, maxConc, out)
 		// §1 per-reverse-level checkpoint (DEC-M12-P48-CHECKPOINT): persist progress
@@ -177,8 +177,8 @@ func (w *Workflow) driveRollback(data *WorkflowData) *sagaOutcome {
 // Completed node that declares a compensation. Used to fast-path a re-drive of a
 // fully-rolled-back run (§3 rollback-complete = this returns false).
 func (w *Workflow) hasPendingCompensation(data *WorkflowData) bool {
-	for name, n := range w.DAG.Nodes {
-		if n.Compensation == nil {
+	for name, n := range w.dag.nodes {
+		if n.compensation == nil {
 			continue
 		}
 		if st, _ := data.GetNodeStatus(name); st == Completed {
@@ -208,7 +208,7 @@ func (w *Workflow) reconstructOutcome(data *WorkflowData, fresh *sagaOutcome) *s
 		freshFailed[ne.NodeName] = ne.Err
 	}
 	out := &sagaOutcome{saveErr: fresh.saveErr}
-	for name, n := range w.DAG.Nodes {
+	for name, n := range w.dag.nodes {
 		status, _ := data.GetNodeStatus(name)
 		switch {
 		case status == Compensated:
@@ -219,7 +219,7 @@ func (w *Workflow) reconstructOutcome(data *WorkflowData, fresh *sagaOutcome) *s
 				err = errRecoveredCompensationFailure // pre-crash failure; string not journaled
 			}
 			out.failedToCompensate = append(out.failedToCompensate, NodeError{NodeName: name, Err: err})
-		case status == Completed && n.Compensation == nil:
+		case status == Completed && n.compensation == nil:
 			out.skipped = append(out.skipped, name)
 		case status == Completed: // has a compensation but still Completed — defensive
 			out.failedToCompensate = append(out.failedToCompensate,
@@ -258,7 +258,7 @@ func reconstructCause(data *WorkflowData, dag *DAG) error {
 	}
 
 	var failures []NodeError
-	for name := range dag.Nodes {
+	for name := range dag.nodes {
 		if status, _ := data.GetNodeStatus(name); status == Failed {
 			failures = append(failures, NodeError{NodeName: name, Err: errRecoveredForwardFailure})
 		}
@@ -324,12 +324,12 @@ func compensateLevel(ctx context.Context, level []*Node, data *WorkflowData, max
 	sem := make(chan struct{}, maxConc)
 	var wg sync.WaitGroup
 	for _, node := range level {
-		status, _ := data.GetNodeStatus(node.Name)
+		status, _ := data.GetNodeStatus(node.name)
 		if status != Completed {
 			continue // never-run / Failed / Bypassed / Skipped — not in the completed partition
 		}
-		if node.Compensation == nil {
-			out.markSkipped(node.Name) // Completed, nothing to undo; status stays Completed
+		if node.compensation == nil {
+			out.markSkipped(node.name) // Completed, nothing to undo; status stays Completed
 			continue
 		}
 		wg.Add(1)
@@ -341,17 +341,17 @@ func compensateLevel(ctx context.Context, level []*Node, data *WorkflowData, max
 			// Present the stable dedup handle to the compensation (MAJOR-3). The key
 			// is derived from WorkflowID+nodeName, so it is identical across an
 			// at-least-once re-invocation on resume (ph48).
-			compCtx := withCompensationKey(ctx, IdempotencyKey(data, n.Name))
+			compCtx := withCompensationKey(ctx, IdempotencyKey(data, n.name))
 			if err := runCompensationWithRetry(compCtx, n, data); err != nil {
 				// BEST-EFFORT: record the failure, mark the node, and RETURN (do not
 				// abort the wave). The node's effect is NOT undone — the *SagaError
 				// surfaces it to the caller.
-				data.SetNodeStatus(n.Name, CompensationFailed)
-				out.markFailed(n.Name, err)
+				data.SetNodeStatus(n.name, CompensationFailed)
+				out.markFailed(n.name, err)
 				return
 			}
-			data.SetNodeStatus(n.Name, Compensated)
-			out.markCompensated(n.Name)
+			data.SetNodeStatus(n.name, Compensated)
+			out.markCompensated(n.name)
 		}(node)
 	}
 	wg.Wait()
@@ -376,7 +376,7 @@ const compensationRetryBackoff = time.Second
 // Compensations do not park (DEC-M12-SUSPEND); an ErrSuspended is a plain error.
 func runCompensationWithRetry(ctx context.Context, n *Node, data *WorkflowData) error {
 	var lastErr error
-	for attempt := 0; attempt <= n.RetryCount; attempt++ {
+	for attempt := 0; attempt <= n.retryCount; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -384,7 +384,7 @@ func runCompensationWithRetry(ctx context.Context, n *Node, data *WorkflowData) 
 		// goroutine, so a ctx-ignoring blocking Execute would otherwise hang wg.Wait()
 		// forever. Run it in a child goroutine and race it against ctx.Done().
 		errCh := make(chan error, 1)
-		go func() { errCh <- n.Compensation.Execute(ctx, data) }()
+		go func() { errCh <- n.compensation.Execute(ctx, data) }()
 		select {
 		case err := <-errCh:
 			if err == nil {
@@ -395,7 +395,7 @@ func runCompensationWithRetry(ctx context.Context, n *Node, data *WorkflowData) 
 			return ctx.Err()
 		}
 		// ctx-aware backoff before the next attempt (skip after the last).
-		if attempt < n.RetryCount {
+		if attempt < n.retryCount {
 			select {
 			case <-time.After(compensationRetryBackoff):
 			case <-ctx.Done():

@@ -90,5 +90,5 @@ func (a *suspendingAction) Execute(ctx context.Context, data *WorkflowData) erro
 
 // newSuspendingNode builds a test node whose action parks per the given gate.
 func newSuspendingNode(name string, gate *parkGate) *Node {
-	return NewNode(name, &suspendingAction{gate: gate})
+	return newNode(name, &suspendingAction{gate: gate})
 }

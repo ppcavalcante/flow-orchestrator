@@ -35,9 +35,9 @@ func jsonInput(t *testing.T, m map[string]interface{}) []byte {
 // TestRegistry_RegisterGuards — dup / empty / nil-factory are rejected loud.
 func TestRegistry_RegisterGuards(t *testing.T) {
 	r := NewRegistry()
-	require.NoError(t, r.Register("A", func() (*DAG, error) { return NewDAG("a"), nil }))
-	require.ErrorIs(t, r.Register("A", func() (*DAG, error) { return NewDAG("a2"), nil }), ErrValidation, "dup type rejected")
-	require.ErrorIs(t, r.Register("", func() (*DAG, error) { return NewDAG("x"), nil }), ErrValidation, "empty type rejected")
+	require.NoError(t, r.Register("A", func() (*DAG, error) { return newDAGForTest("a"), nil }))
+	require.ErrorIs(t, r.Register("A", func() (*DAG, error) { return newDAGForTest("a2"), nil }), ErrValidation, "dup type rejected")
+	require.ErrorIs(t, r.Register("", func() (*DAG, error) { return newDAGForTest("x"), nil }), ErrValidation, "empty type rejected")
 	require.ErrorIs(t, r.Register("B", nil), ErrValidation, "nil factory rejected")
 	require.ElementsMatch(t, []string{"A"}, r.Types())
 }
@@ -82,8 +82,8 @@ func TestRunNext_SeedSaveError_Terminalizes(t *testing.T) {
 // oneNodeReadingKey builds a 1-node DAG whose action reads a seeded KV key and records it into `got`.
 func oneNodeReadingKey(key string, got *string) DAGFactory {
 	return func() (*DAG, error) {
-		d := NewDAG("read")
-		err := d.AddNode(NewNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+		d := newDAGForTest("read")
+		err := d.addNode(newNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 			if v, ok := data.Get(key); ok {
 				if s, ok := v.(string); ok {
 					*got = s
@@ -167,14 +167,14 @@ func TestRunNext_ReconciliationSeam_Idempotent(t *testing.T) {
 	ctr := newRunCounter()
 	reg := NewRegistry()
 	require.NoError(t, reg.Register("chain", func() (*DAG, error) {
-		d := NewDAG("chain")
-		if err := d.AddNode(NewNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n0"); return nil }))); err != nil {
+		d := newDAGForTest("chain")
+		if err := d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n0"); return nil }))); err != nil {
 			return nil, err
 		}
-		if err := d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
+		if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
 			return nil, err
 		}
-		return d, d.AddDependency("n0", "n1")
+		return d, d.addDependency("n0", "n1")
 	}))
 
 	// Manually stage the seam: a COMPLETE journal (both nodes Completed) + a `claimed` queue row + a
@@ -196,14 +196,14 @@ func TestRunNext_ReconciliationSeam_Idempotent(t *testing.T) {
 	// already-complete journal, and terminalizes the row — proving the drive is idempotent + the CAS flip
 	// fires exactly once, WITHOUT needing ph82's queue-reclaim. This mirrors the M16 token-seam structure.
 	clk.Advance(6 * time.Second)
-	tokB, err := s.Claim("wf", "B") // B re-claims the lapsed LEASE → token 2 (fences A)
+	tokB, err := s.Claim(context.Background(), "wf", "B") // B re-claims the lapsed LEASE → token 2 (fences A)
 	require.NoError(t, err)
 	require.Equal(t, FencingToken(2), tokB, "the lapsed lease re-claim bumped the token (A fenced)")
 
 	// B rebuilds the DAG (same registry) + re-Executes on the SAME store (checkpoint CAS reads token 2).
 	dag, ferr := reg.factories["chain"]()
 	require.NoError(t, ferr)
-	wB := &Workflow{DAG: dag, WorkflowID: "wf", Store: s}
+	wB := &Workflow{dag: dag, WorkflowID: "wf", Store: s}
 	require.NoError(t, wB.Execute(context.Background()), "re-Execute of a complete journal is a clean NO-OP")
 
 	// (i) Execute NO-OPS: neither node re-executed (both were terminal in the loaded journal → skipped).
@@ -236,8 +236,8 @@ func TestRunNext_InputBearingReClaim_NoReSeed(t *testing.T) {
 	// A 2-node chain n0->n1; n0 records that it ran + reads the seeded input key.
 	var sawInput string
 	require.NoError(t, reg.Register("chain", func() (*DAG, error) {
-		d := NewDAG("chain")
-		if err := d.AddNode(NewNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
+		d := newDAGForTest("chain")
+		if err := d.addNode(newNode("n0", ActionFunc(func(_ context.Context, data *WorkflowData) error {
 			ctr.inc("n0")
 			if v, ok := data.Get("k"); ok {
 				if sv, ok := v.(string); ok {
@@ -248,10 +248,10 @@ func TestRunNext_InputBearingReClaim_NoReSeed(t *testing.T) {
 		}))); err != nil {
 			return nil, err
 		}
-		if err := d.AddNode(NewNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
+		if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
 			return nil, err
 		}
-		return d, d.AddDependency("n0", "n1")
+		return d, d.addDependency("n0", "n1")
 	}))
 
 	// Construct a PENDING queue row that ALREADY has a journal with partial progress (n0 Completed + input +
@@ -295,8 +295,8 @@ func TestRunNext_TopologyDrift_SurfacesErrValidation(t *testing.T) {
 	reg := NewRegistry()
 	// the factory builds a DAG with node "nX" ONLY.
 	require.NoError(t, reg.Register("drift", func() (*DAG, error) {
-		d := NewDAG("drift")
-		return d, d.AddNode(NewNode("nX", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+		d := newDAGForTest("drift")
+		return d, d.addNode(newNode("nX", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
 	}))
 
 	_, err := s.Enqueue("wf", "drift", nil)

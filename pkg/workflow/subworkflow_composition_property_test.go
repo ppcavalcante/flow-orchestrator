@@ -94,9 +94,9 @@ func checkCompositionRun(t *testing.T, pre int, childFails bool, outSeed int64) 
 	dag, err := pb.Build()
 	require.NoError(t, err)
 
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = wf
-	w.DAG = dag
+	w.dag = dag
 
 	execErr := w.Execute(context.Background())
 
@@ -108,7 +108,7 @@ func checkCompositionRun(t *testing.T, pre int, childFails bool, outSeed int64) 
 
 	final, err := store.Load(wf)
 	require.NoError(t, err)
-	childID := subWorkflowChildID(wf, "sub")
+	childID := SubWorkflowChildID(wf, "sub")
 
 	if childFails {
 		// ChildFailParentFail (INV-01): the sub node failed, Execute errored, and the
@@ -210,9 +210,9 @@ func TestSubWorkflowComposition_Property_NegationShrinks(t *testing.T) {
 			pb.AddNode("post").DependsOn("sub").WithAction(ActionFunc(func(_ context.Context, _ *WorkflowData) error { return nil }))
 			dag, err := pb.Build()
 			require.NoError(t, err)
-			w := NewWorkflow(store)
+			w := newWorkflowForTest(store)
 			w.WorkflowID = wf
-			w.DAG = dag
+			w.dag = dag
 			_ = w.Execute(context.Background()) //nolint:errcheck // a failing child errors by design; the assertion is on post's status
 			final, err := store.Load(wf)
 			require.NoError(t, err)
@@ -257,6 +257,6 @@ func TestSubWorkflowComposition_StaticDAGAcyclic(t *testing.T) {
 	// BITE: seed a cycle through the sub-workflow node (post -> root, closing root->sub->post->root)
 	// and confirm the acyclicity assertion FIRES. Guards against the check silently passing a
 	// cyclic composition graph (a vacuous STATIC-DAG moat).
-	require.NoError(t, dag.AddDependency("post", "root"), "add the back-edge")
+	require.NoError(t, dag.addDependency("post", "root"), "add the back-edge")
 	require.Error(t, dag.Validate(), "STATIC-DAG: a cycle through the sub-workflow node MUST be rejected at validate")
 }

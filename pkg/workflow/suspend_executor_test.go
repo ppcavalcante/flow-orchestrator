@@ -23,7 +23,7 @@ import (
 // gate is parked and, once woken, records a run + writes an output so resume
 // convergence and "did not re-run completed nodes" are observable.
 func completingSuspendNode(name string, gate *parkGate, c *execCounter) *Node {
-	return NewNode(name, &suspendingAction{
+	return newNode(name, &suspendingAction{
 		gate: gate,
 		onComplete: func(_ context.Context, data *WorkflowData) error {
 			c.inc(name)
@@ -45,7 +45,7 @@ func TestSuspend_ParkResumesToConvergence(t *testing.T) {
 	counter := newExecCounter()
 
 	buildDAG := func() *DAG {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		mustAddNode(t, d, countingNode("a", counter))
 		mustAddNode(t, d, completingSuspendNode("park", gate, counter))
 		mustAddNode(t, d, countingNode("c", counter))
@@ -55,7 +55,7 @@ func TestSuspend_ParkResumesToConvergence(t *testing.T) {
 	}
 
 	// --- Phase 1: run until the park. ---
-	w1 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store}
+	w1 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store}
 	err := w1.Execute(context.Background())
 
 	require.ErrorIs(t, err, ErrSuspended, "a parked run returns the suspend sentinel")
@@ -73,7 +73,7 @@ func TestSuspend_ParkResumesToConvergence(t *testing.T) {
 
 	// --- Phase 2: the external event arrives; resume converges. ---
 	gate.wake()
-	w2 := &Workflow{DAG: buildDAG(), WorkflowID: id, Store: store}
+	w2 := &Workflow{dag: buildDAG(), WorkflowID: id, Store: store}
 	require.NoError(t, w2.Execute(context.Background()), "re-entry after wake converges")
 
 	final, lerr := store.Load(id)
@@ -95,12 +95,12 @@ func TestSuspend_DependentStaysPendingNotSkipped(t *testing.T) {
 	gate := newParkGate()
 	counter := newExecCounter()
 
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 	mustAddNode(t, d, countingNode("dependent", counter))
 	mustAddDep(t, d, "park", "dependent")
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 
 	require.ErrorIs(t, err, ErrSuspended)
@@ -120,11 +120,11 @@ func TestSuspend_ParkDoesNotFailFastSiblings(t *testing.T) {
 	gate := newParkGate()
 	counter := newExecCounter()
 
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 	mustAddNode(t, d, countingNode("sibling", counter)) // independent, same level 0
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 
 	require.ErrorIs(t, err, ErrSuspended)
@@ -144,7 +144,7 @@ func TestSuspend_ParkDoesNotFailFastSiblings(t *testing.T) {
 // non-durable ErrSuspended.
 func TestSuspend_NoCheckpointerReturnsConfigError(t *testing.T) {
 	gate := newParkGate()
-	d := NewDAG("susp-nocp")
+	d := newDAGForTest("susp-nocp")
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 
 	err := d.Execute(context.Background(), NewWorkflowData("susp-nocp"))
@@ -165,13 +165,13 @@ func TestSuspend_ParkWithFailFastClearsWaiting(t *testing.T) {
 	const id = "susp-failfast"
 	gate := newParkGate()
 
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
-	mustAddNode(t, d, NewNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	mustAddNode(t, d, newNode("boom", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		return errors.New("boom")
 	}))) // independent, same level 0, non-continue-on-error -> fail-fast
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 
 	// Fail-fast outranks park: an ExecutionError, never the suspend arm.
@@ -197,7 +197,7 @@ func TestSuspend_ParkWithFailFastClearsWaiting(t *testing.T) {
 // Bites: without clearParked on this branch the node stays Waiting and this fails.
 func TestSuspend_FlushErrorClearsWaiting(t *testing.T) {
 	gate := newParkGate()
-	d := NewDAG("susp-flush-err")
+	d := newDAGForTest("susp-flush-err")
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 	// A wired checkpoint (passes the checkpoint!=nil guard) whose flush fails —
 	// modelling a durable-store I/O error at the suspend barrier.
@@ -229,7 +229,7 @@ func TestSuspend_FlushErrorClearsWaiting(t *testing.T) {
 // unconditionally) → in-memory park == Pending → this fails. (D36-02.)
 func TestSuspend_ChokepointDoesNotOverClearSuccess(t *testing.T) {
 	gate := newParkGate()
-	d := NewDAG("susp-overclear")
+	d := newDAGForTest("susp-overclear")
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 	// A wired checkpointer so the park is a real durable suspend (ErrSuspended),
 	// not the no-checkpointer config error. Direct DAG.Execute so the in-memory
@@ -269,10 +269,10 @@ func TestSuspend_FlushErrorViaWorkflowExecute(t *testing.T) {
 	store := &flushErrorCheckpointer{InMemoryStore: NewInMemoryStore()}
 	const id = "susp-flush-we"
 	gate := newParkGate()
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(context.Background())
 
 	require.Error(t, err)
@@ -294,16 +294,16 @@ func TestSuspend_CancelWithParkViaWorkflowExecute(t *testing.T) {
 	gate := newParkGate()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	d := NewDAG(id)
+	d := newDAGForTest(id)
 	mustAddNode(t, d, newSuspendingNode("park", gate))
 	// Independent level-0 sibling that cancels the run from inside the level, so
 	// the post-level ctx check fires with a node already parked.
-	mustAddNode(t, d, NewNode("canceller", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
+	mustAddNode(t, d, newNode("canceller", ActionFunc(func(_ context.Context, _ *WorkflowData) error {
 		cancel()
 		return nil
 	})))
 
-	w := &Workflow{DAG: d, WorkflowID: id, Store: store}
+	w := &Workflow{dag: d, WorkflowID: id, Store: store}
 	err := w.Execute(ctx)
 
 	require.Error(t, err)

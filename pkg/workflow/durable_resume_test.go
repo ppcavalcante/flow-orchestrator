@@ -45,7 +45,7 @@ func (c *execCounter) get(name string) int {
 // countingNode builds a node whose action increments the counter and writes a
 // deterministic output (so we can assert output fidelity survives resume).
 func countingNode(name string, c *execCounter) *Node {
-	return NewNode(name, ActionFunc(func(_ context.Context, data *WorkflowData) error {
+	return newNode(name, ActionFunc(func(_ context.Context, data *WorkflowData) error {
 		c.inc(name)
 		data.SetOutput(name, "out-"+name)
 		return nil
@@ -63,7 +63,7 @@ func TestDurableResume_CrashResumeSkipsCompleted(t *testing.T) {
 	counter := newExecCounter()
 
 	buildDAG := func() *DAG {
-		d := NewDAG(id)
+		d := newDAGForTest(id)
 		mustAddNode(t, d, countingNode("a", counter))
 		mustAddNode(t, d, countingNode("b", counter))
 		mustAddNode(t, d, countingNode("c", counter))
@@ -145,11 +145,11 @@ func TestDurableResume_NoCheckpointerNoBehaviorChange(t *testing.T) {
 	require.False(t, isCP, "the test store must not implement Checkpointer")
 
 	counter := newExecCounter()
-	wf := NewWorkflow(st)
+	wf := newWorkflowForTest(st)
 	wf.WorkflowID = "no-cp"
-	mustAddNode(t, wf.DAG, countingNode("a", counter))
-	mustAddNode(t, wf.DAG, countingNode("b", counter))
-	mustAddDep(t, wf.DAG, "a", "b")
+	mustAddNode(t, wf.dag, countingNode("a", counter))
+	mustAddNode(t, wf.dag, countingNode("b", counter))
+	mustAddDep(t, wf.dag, "a", "b")
 
 	require.NoError(t, wf.Execute(context.Background()))
 	assert.Equal(t, 1, counter.get("a"))
@@ -176,9 +176,9 @@ func TestDurableResume_GraphIdentityGuard(t *testing.T) {
 	require.NoError(t, store.Save(seed))
 
 	// Current DAG has only "a" — "ghost" is gone.
-	wf := NewWorkflow(store)
+	wf := newWorkflowForTest(store)
 	wf.WorkflowID = id
-	mustAddNode(t, wf.DAG, NewNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+	mustAddNode(t, wf.dag, newNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
 
 	err := wf.Execute(context.Background())
 	require.Error(t, err, "resume against a changed graph must be rejected")
@@ -189,8 +189,8 @@ func TestDurableResume_GraphIdentityGuard(t *testing.T) {
 // TestDurableResume_CheckpointFailureAbortsRun: a checkpoint write error aborts
 // the run (durability failure surfaced, not silently dropped).
 func TestDurableResume_CheckpointFailureAbortsRun(t *testing.T) {
-	dag := NewDAG("cp-fail")
-	mustAddNode(t, dag, NewNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+	dag := newDAGForTest("cp-fail")
+	mustAddNode(t, dag, newNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
 	cp := func(*WorkflowData) error { return errors.New("disk full") }
 
 	err := dag.Execute(withCheckpoint(context.Background(), cp), NewWorkflowData("cp-fail"))

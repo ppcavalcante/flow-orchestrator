@@ -87,7 +87,14 @@ type ClaimStore interface {
 	// (an opaque process identity), returning a fresh monotonic FencingToken. INSERT-or-CAS: the
 	// lease row may not exist yet (a never-run workflow — the z4 initial-claim case). Returns
 	// ErrClaimLost if a LIVE lease is held by a different owner.
-	Claim(workflowID, ownerID string) (FencingToken, error)
+	//
+	// ctx bounds the claim (AUD-034 / P-10). Claim is the BUSIEST cross-process contention point —
+	// every worker claims, and all serialize on the one BEGIN IMMEDIATE write lock — so a loser can
+	// wait out busy_timeout inside a single call. Passing the caller's request context lets a
+	// cancelled/timed-out request abandon the wait instead of the claim outliving it on
+	// context.Background. (Renew/Release are deliberately NOT ctx-bound: they are background
+	// lifecycle + best-effort cleanup that must complete even when a drive's ctx is already done.)
+	Claim(ctx context.Context, workflowID, ownerID string) (FencingToken, error)
 
 	// Renew extends the lease's expiry under the held token (DEC-M16-D4 explicit lifecycle;
 	// ph76 calls it). Returns ErrFencedOut if the token was superseded by a re-claim — the drive
@@ -300,18 +307,28 @@ func (s *SQLiteStore) claimLocked(ctx context.Context, tx *sql.Tx, workflowID, o
 // behalf of ownerID, returning a fresh monotonic FencingToken. The whole read-branch-write is ONE
 // BEGIN IMMEDIATE txn (mp DSN), so N contenders SERIALIZE on the write lock and exactly one wins
 // (the z4 arbiter — the atomic INSERT-or-CAS, not a read-then-write race). Requires mp mode.
-func (s *SQLiteStore) Claim(workflowID, ownerID string) (FencingToken, error) {
+func (s *SQLiteStore) Claim(ctx context.Context, workflowID, ownerID string) (FencingToken, error) {
 	if !s.dur.mp {
 		return 0, fmt.Errorf("%w: Claim requires a multi-process store (WithMultiProcess)", ErrValidation)
 	}
 	if err := validateWorkflowID(workflowID); err != nil {
 		return 0, err
 	}
-	ctx := context.Background()
+	// AUD-003 / P-08: reject an empty ownerID. claimLocked treats equal owner
+	// strings as a re-entrant (same-process) re-claim, so two INDEPENDENT stores
+	// both claiming with ownerID=="" would each be handed the same live lease and
+	// token — collapsing distinct processes onto one owner and defeating fencing.
+	// The library cannot prove global uniqueness, but it can reject the single most
+	// dangerous invalid value. NewPool/NewSchedulePoller already reject it; the
+	// direct Claim path (and thus WithMultiProcessLocker's Locker) did not.
+	if ownerID == "" {
+		return 0, fmt.Errorf("%w: Claim requires a non-empty ownerID — an empty owner collapses distinct "+
+			"processes onto a single lease; supply a stable, process-distinct identity", ErrValidation)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil) // IMMEDIATE (mp DSN) → the write lock is held across this txn
+	tx, err := s.db.BeginTx(ctx, nil) // IMMEDIATE (mp DSN) → the write lock is held across this txn; ctx-cancellable (AUD-034)
 	if err != nil {
 		// Claim is the BUSIEST cross-process contention point (every worker claims; all serialize on
 		// the one write lock). A loser that waits out busy_timeout surfaces SQLITE_BUSY here → classify

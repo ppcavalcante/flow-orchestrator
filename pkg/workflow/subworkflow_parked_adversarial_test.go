@@ -57,8 +57,8 @@ func setResultAction(v any) Action {
 // so it cannot model a child that terminalizes FAILED / rolled-back.
 func oobRun(t *testing.T, store WorkflowStore, parentWF, nodeName string, childDAG *DAG) error {
 	t.Helper()
-	childID := subWorkflowChildID(parentWF, nodeName)
-	child := &Workflow{DAG: childDAG, WorkflowID: childID, Store: store}
+	childID := SubWorkflowChildID(parentWF, nodeName)
+	child := &Workflow{dag: childDAG, WorkflowID: childID, Store: store}
 	return child.Execute(context.Background())
 }
 
@@ -114,7 +114,7 @@ func bypassedChild() *DAG {
 // rollback → a Compensated, fail stays Failed. child.Execute returns non-nil.
 func sagaTriggerChild() *DAG {
 	cb := NewWorkflowBuilder()
-	cb.AddNode("a").WithAction(choiceNoop()).WithCompensation(okCompFn)
+	cb.AddNode("a").WithAction(choiceNoop()).WithCompensationFunc(okCompFn)
 	cb.AddNode("fail").DependsOn("a").WithAction(boomAction())
 	return mustBuildDAG(cb)
 }
@@ -158,9 +158,9 @@ func runParity(t *testing.T, name string, childFactory func() *DAG, declareResul
 	ib.AddNode("after").DependsOn("sub").WithAction(countingAction(&inlineAfter))
 	idag, err := ib.Build()
 	require.NoError(t, err, "inline parent build")
-	iw := NewWorkflow(inlineStore)
+	iw := newWorkflowForTest(inlineStore)
 	iw.WorkflowID = "wf-inline-" + name
-	iw.DAG = idag
+	iw.dag = idag
 	out.inlineErr = iw.Execute(context.Background())
 	out.inlineAfter = inlineAfter.Load()
 
@@ -175,9 +175,9 @@ func runParity(t *testing.T, name string, childFactory func() *DAG, declareResul
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(&parkedAfter))
 	pdag, err := pb.Build()
 	require.NoError(t, err, "parked parent build")
-	pw := NewWorkflow(parkedStore)
+	pw := newWorkflowForTest(parkedStore)
 	pw.WorkflowID = "wf-parked-" + name
-	pw.DAG = pdag
+	pw.dag = pdag
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "first drive parks")
 	out.inlineChildErr = oobRun(t, parkedStore, "wf-parked-"+name, "sub", childFactory())
 	out.parkedErr = pw.DeliverAndResume(context.Background(), SubWorkflowCompletionSignal("sub", "c1"))
@@ -236,7 +236,8 @@ func TestParkedAdv_ChildRunFailed_FirstFailedDeterministic(t *testing.T) {
 	cd.SetNodeStatus("zeta", Failed)
 	cd.SetNodeStatus("alpha", Failed)
 	for range 64 { // hammer to defeat any accidental map-order dependence
-		failed, first := childRunFailed(dag, cd)
+		failed, first, vErr := childRunFailed(dag, cd)
+		require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 		require.True(t, failed)
 		require.Equal(t, "alpha", first, "first-failed must be the deterministic lowest name")
 	}
@@ -272,7 +273,8 @@ func TestParkedAdv_ChildRunFailed_RecognizesRollbackAsFailure(t *testing.T) {
 		cd.SetRollingBack(true)
 		cd.SetTriggerCause(TriggerCanceled)
 		require.True(t, childTerminal(cd), "a Compensated node is terminal")
-		failed, _ := childRunFailed(dag, cd)
+		failed, _, vErr := childRunFailed(dag, cd)
+		require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 		require.True(t, failed,
 			"a cleanly rolled-back child (Compensated, no Failed node) → FAILURE (rollback implies failure)")
 	})
@@ -282,7 +284,8 @@ func TestParkedAdv_ChildRunFailed_RecognizesRollbackAsFailure(t *testing.T) {
 		cd.SetNodeStatus("a", CompensationFailed) // effect NOT undone — never a silent success
 		cd.SetRollingBack(true)
 		require.True(t, childTerminal(cd), "CompensationFailed is terminal")
-		failed, _ := childRunFailed(dag, cd)
+		failed, _, vErr := childRunFailed(dag, cd)
+		require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 		require.True(t, failed, "a CompensationFailed node → FAILURE (an effect was not undone)")
 	})
 
@@ -296,11 +299,12 @@ func TestParkedAdv_ChildRunFailed_RecognizesRollbackAsFailure(t *testing.T) {
 		seed.SetRollingBack(true)
 		seed.SetTriggerCause(TriggerCanceled)
 		require.NoError(t, store.Save(seed))
-		child := &Workflow{DAG: sagaTriggerChild(), WorkflowID: childID, Store: store}
+		child := &Workflow{dag: sagaTriggerChild(), WorkflowID: childID, Store: store}
 		inlineErr := child.Execute(context.Background())
 		require.Error(t, inlineErr, "inline: a rolled-back child is a FAILURE")
 		reloaded, _ := store.Load(childID) //nolint:errcheck // asserted below
-		parkedFailed, _ := childRunFailed(sagaTriggerChild(), reloaded)
+		parkedFailed, _, vErr := childRunFailed(sagaTriggerChild(), reloaded)
+		require.NoError(t, vErr, "the verdict DAG must carry the M23 SEAL-06 token; an unstamped DAG makes childRunFailed return false and this assertion vacuous")
 		require.True(t, parkedFailed, "parked: agrees — a rolled-back child is a FAILURE (F-P92-01 closed)")
 	})
 }
@@ -506,8 +510,8 @@ func TestParkedAdv_ChildTerminal_Edges(t *testing.T) {
 func TestParkedAdv_SuspendableChildReParks(t *testing.T) {
 	store := NewInMemoryStore()
 	// child: a WaitForSignal node that parks forever (no signal for it is ever delivered).
-	childDAG := NewDAG("susp-child")
-	require.NoError(t, childDAG.AddNode(NewWaitForSignalNode("childwait", "child-inner-signal")))
+	childDAG := newDAGForTest("susp-child")
+	require.NoError(t, childDAG.addNode(newWaitForSignalNode("childwait", "child-inner-signal")))
 
 	var afterN atomic.Int32
 	pb := NewWorkflowBuilder().WithWorkflowID("wf-suspchild")
@@ -515,14 +519,14 @@ func TestParkedAdv_SuspendableChildReParks(t *testing.T) {
 	pb.AddNode("after").DependsOn("sub").WithAction(countingAction(&afterN))
 	pdag, err := pb.Build()
 	require.NoError(t, err)
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-suspchild"
-	w.DAG = pdag
+	w.dag = pdag
 	require.ErrorIs(t, w.Execute(context.Background()), ErrSuspended)
 
 	// Run the child out-of-band → it PARKS (a Waiting node persists), not terminal.
-	childID := subWorkflowChildID("wf-suspchild", "sub")
-	cw := &Workflow{DAG: childDAG, WorkflowID: childID, Store: store}
+	childID := SubWorkflowChildID("wf-suspchild", "sub")
+	cw := &Workflow{dag: childDAG, WorkflowID: childID, Store: store}
 	require.ErrorIs(t, cw.Execute(context.Background()), ErrSuspended, "child parks")
 
 	// Wake the parent: the child is NON-terminal (a Waiting node) → the parent RE-PARKS,

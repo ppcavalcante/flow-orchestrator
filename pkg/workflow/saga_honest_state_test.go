@@ -24,16 +24,16 @@ func buildHonestDiamond(t *testing.T, rec *compRecorder, store WorkflowStore, id
 		return func(context.Context, *WorkflowData) error { rec.record(name); return nil }
 	}
 	b := NewWorkflowBuilder()
-	b.AddNode("a").WithAction(benchNoopAction()).WithCompensation(okComp("a"))
-	b.AddNode("b").WithAction(benchNoopAction()).WithCompensation(failComp(rec, "b")).DependsOn("a")
-	b.AddNode("c").WithAction(benchNoopAction()).WithCompensation(okComp("c")).DependsOn("a")
+	b.AddNode("a").WithAction(benchNoopAction()).WithCompensationFunc(okComp("a"))
+	b.AddNode("b").WithAction(benchNoopAction()).WithCompensationFunc(failComp(rec, "b")).DependsOn("a")
+	b.AddNode("c").WithAction(benchNoopAction()).WithCompensationFunc(okComp("c")).DependsOn("a")
 	b.AddNode("d").WithAction(benchNoopAction()).DependsOn("b", "c") // no compensation -> skipped
 	b.AddNode("fail").
 		WithAction(ActionFunc(func(context.Context, *WorkflowData) error { return errors.New("boom") })).
 		DependsOn("d")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	return &Workflow{DAG: dag, WorkflowID: id, Store: store}
+	return &Workflow{dag: dag, WorkflowID: id, Store: store}
 }
 
 func failedNames(nes []NodeError) []string {
@@ -144,7 +144,7 @@ func TestSagaHonest_RetryCount(t *testing.T) {
 	b := NewWorkflowBuilder()
 	b.AddNode("a").WithAction(benchNoopAction()).
 		WithRetries(3).
-		WithCompensation(func(context.Context, *WorkflowData) error {
+		WithCompensationFunc(func(context.Context, *WorkflowData) error {
 			attempts++
 			if attempts < 3 { // fail twice, succeed on the 3rd attempt
 				return errors.New("transient")
@@ -156,7 +156,7 @@ func TestSagaHonest_RetryCount(t *testing.T) {
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "honest-retry", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "honest-retry", Store: store}
 
 	err = w.Execute(context.Background())
 	var se *SagaError
@@ -174,7 +174,7 @@ func TestSagaHonest_BoundedDeadline(t *testing.T) {
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder()
 	b.AddNode("a").WithAction(benchNoopAction()).
-		WithCompensation(func(ctx context.Context, _ *WorkflowData) error {
+		WithCompensationFunc(func(ctx context.Context, _ *WorkflowData) error {
 			<-ctx.Done() // block until the rollback deadline cancels the ctx
 			return ctx.Err()
 		})
@@ -183,7 +183,7 @@ func TestSagaHonest_BoundedDeadline(t *testing.T) {
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "honest-deadline", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "honest-deadline", Store: store}
 	w.WithRollbackTimeout(50 * time.Millisecond)
 
 	done := make(chan error, 1)
@@ -210,7 +210,7 @@ func TestSagaHonest_HungCompensationDoesNotHangRun(t *testing.T) {
 	store := NewInMemoryStore()
 	b := NewWorkflowBuilder()
 	b.AddNode("a").WithAction(benchNoopAction()).
-		WithCompensation(func(context.Context, *WorkflowData) error {
+		WithCompensationFunc(func(context.Context, *WorkflowData) error {
 			<-block // ignore ctx ENTIRELY — block forever
 			return nil
 		})
@@ -219,7 +219,7 @@ func TestSagaHonest_HungCompensationDoesNotHangRun(t *testing.T) {
 		DependsOn("a")
 	dag, err := b.Build()
 	require.NoError(t, err)
-	w := &Workflow{DAG: dag, WorkflowID: "honest-hung", Store: store}
+	w := &Workflow{dag: dag, WorkflowID: "honest-hung", Store: store}
 	w.WithRollbackTimeout(50 * time.Millisecond)
 
 	done := make(chan error, 1)
@@ -240,19 +240,19 @@ func TestSagaHonest_HungCompensationDoesNotHangRun(t *testing.T) {
 func TestSagaNeg_Validation_NoRollback(t *testing.T) {
 	rec := &compRecorder{}
 	store := NewInMemoryStore()
-	d := NewDAG("honest-validation")
+	d := newDAGForTest("honest-validation")
 	// Build a CYCLE directly at the Node level (Node.AddDependency bypasses the DAG-
 	// level cycle guard), so DAG.Validate() fails. Both nodes declare a compensation,
 	// so the trigger COULD fire if a validation error were (wrongly) reached past the
 	// pre-Execute return.
 	a := compNode(t, "a", rec)
 	b := compNode(t, "b", rec)
-	a.AddDependency(b)
-	b.AddDependency(a) // a <-> b cycle
+	a.dependsOn = append(a.dependsOn, b)
+	b.dependsOn = append(b.dependsOn, a) // a <-> b cycle
 	mustAddNode(t, d, a)
 	mustAddNode(t, d, b)
 
-	w := &Workflow{DAG: d, WorkflowID: "honest-validation", Store: store}
+	w := &Workflow{dag: d, WorkflowID: "honest-validation", Store: store}
 	err := w.Execute(context.Background())
 	require.Error(t, err, "an invalid (cyclic) DAG fails validation")
 	require.NotErrorAs(t, err, new(*SagaError), "a validation error must NOT trigger rollback")

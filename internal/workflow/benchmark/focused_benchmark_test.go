@@ -422,7 +422,7 @@ func BenchmarkFocusedDependencyResolution(b *testing.B) {
 
 				// Setup with initial statuses
 				for _, node := range nodes {
-					data.SetNodeStatus(node.Name, workflow.Pending)
+					data.SetNodeStatus(node.Name(), workflow.Pending)
 				}
 
 				b.ResetTimer()
@@ -432,18 +432,18 @@ func BenchmarkFocusedDependencyResolution(b *testing.B) {
 					for j, node := range nodes {
 						if j < len(nodes)/3 {
 							// Mark first third as completed
-							data.SetNodeStatus(node.Name, workflow.Completed)
+							data.SetNodeStatus(node.Name(), workflow.Completed)
 						} else {
-							data.SetNodeStatus(node.Name, workflow.Pending)
+							data.SetNodeStatus(node.Name(), workflow.Pending)
 						}
 					}
 
 					// Test dependency resolution for each node
 					for _, node := range nodes {
 						// Use the DAG to check if the node is runnable
-						nodeInDag, _ := dag.GetNode(node.Name)
+						nodeInDag, _ := dag.GetNode(node.Name())
 						if nodeInDag != nil {
-							_ = data.IsNodeRunnable(node.Name)
+							_ = data.IsNodeRunnable(node.Name())
 						}
 					}
 				}
@@ -494,32 +494,29 @@ func BenchmarkFocusedWorkflowExecution(b *testing.B) {
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("Size_%d", size), func(b *testing.B) {
 			// Create a workflow with the specified number of nodes
-			dag := workflow.NewDAG("benchmark-workflow")
+			spec := newDAGSpec("benchmark-workflow")
 
 			// Create nodes with simple actions
 			for i := 0; i < size; i++ {
 				nodeName := fmt.Sprintf("node%d", i)
 				action := createBenchmarkAction(nodeName)
-				node := workflow.NewNode(nodeName, action)
-				if err := dag.AddNode(node); err != nil {
-					b.Fatalf("Failed to add node: %v", err)
-				}
+				spec.node(nodeName, action)
 
-				// Add dependencies to create a realistic workflow
+				// Add dependencies to create a realistic workflow. Argument order is
+				// carried over verbatim from AddDependency(nodeName, node{i-1}), which
+				// means node{i-1} depends on nodeName — another REVERSED chain, like
+				// createLinearDAGForBenchmark. Preserved, not corrected.
 				if i > 0 {
 					// Connect to previous node
-					if err := dag.AddDependency(nodeName, fmt.Sprintf("node%d", i-1)); err != nil {
-						b.Fatalf("Failed to add dependency: %v", err)
-					}
+					spec.dep(nodeName, fmt.Sprintf("node%d", i-1))
 
 					// Add some cross-dependencies for more complex graphs
 					if i > 5 && i%5 == 0 {
-						if err := dag.AddDependency(nodeName, fmt.Sprintf("node%d", i-5)); err != nil {
-							b.Fatalf("Failed to add dependency: %v", err)
-						}
+						spec.dep(nodeName, fmt.Sprintf("node%d", i-5))
 					}
 				}
 			}
+			dag := spec.build()
 
 			b.ResetTimer()
 			b.ReportAllocs()
@@ -618,14 +615,14 @@ func BenchmarkIntegratedWorkflow(b *testing.B) {
 
 					// Set all nodes to Completed status (since we're not actually executing)
 					for _, node := range nodes {
-						data.SetNodeStatus(node.Name, workflow.Completed)
+						data.SetNodeStatus(node.Name(), workflow.Completed)
 					}
 
 					// Verify some results
 					for j := 0; j < len(nodes); j += len(nodes) / 5 {
-						status, _ := data.GetNodeStatus(nodes[j].Name)
+						status, _ := data.GetNodeStatus(nodes[j].Name())
 						if status != workflow.Completed && status != workflow.Skipped {
-							b.Fatalf("Node %s should be completed or skipped, got %v", nodes[j].Name, status)
+							b.Fatalf("Node %s should be completed or skipped, got %v", nodes[j].Name(), status)
 						}
 					}
 				}
@@ -723,16 +720,18 @@ func BenchmarkWorkflowReuse(b *testing.B) {
 
 // createComplexWorkflow creates a complex workflow with the specified number of nodes and depth
 func createComplexWorkflow(nodeCount, depth int) (*workflow.DAG, []*workflow.Node) {
-	dag := workflow.NewDAG(fmt.Sprintf("complex-workflow-%d-%d", nodeCount, depth))
-	nodes := make([]*workflow.Node, 0, nodeCount)
+	// M23 SEAL-06: assembled via dagSpec, which takes edges in AddDependency's original
+	// (from, to) order — so every dep() call below is the verbatim argument pair the
+	// mustAddDep call passed, with no direction re-derivation at this site. That matters
+	// here more than anywhere: the dependencies are chosen with rand, so an inverted
+	// translation would yield a DIFFERENT RANDOM GRAPH rather than a visibly wrong one.
+	s := newDAGSpec(fmt.Sprintf("complex-workflow-%d-%d", nodeCount, depth))
 
-	// Create nodes
+	names := make([]string, 0, nodeCount)
 	for i := 0; i < nodeCount; i++ {
 		nodeName := fmt.Sprintf("node-%d", i)
-		action := createBenchmarkAction(nodeName)
-		node := workflow.NewNode(nodeName, action)
-		mustAddNode(dag, node)
-		nodes = append(nodes, node)
+		s.node(nodeName, createBenchmarkAction(nodeName))
+		names = append(names, nodeName)
 	}
 
 	// Create dependencies with a maximum depth
@@ -743,31 +742,20 @@ func createComplexWorkflow(nodeCount, depth int) (*workflow.DAG, []*workflow.Nod
 			// Pick a random node from the previous 'depth' nodes
 			depIndex := i - (rand.Intn(depth) + 1)
 			if depIndex >= 0 {
-				mustAddDep(dag, nodes[i].Name, nodes[depIndex].Name)
+				s.dep(names[i], names[depIndex])
 			}
 		}
 	}
 
-	return dag, nodes
+	return s.buildWithNodes()
 }
 
 // Helper functions
 
-// mustAddNode / mustAddDep wrap DAG construction in the setup helpers below
-// (which have no *testing.B in scope). A graph that cannot be built is a broken
-// benchmark — panic loudly rather than silently drop the error (errcheck
-// check-blank also forbids a bare _ = here).
-func mustAddNode(dag *workflow.DAG, node *workflow.Node) {
-	if err := dag.AddNode(node); err != nil {
-		panic(fmt.Sprintf("benchmark setup: AddNode: %v", err))
-	}
-}
-
-func mustAddDep(dag *workflow.DAG, from, to string) {
-	if err := dag.AddDependency(from, to); err != nil {
-		panic(fmt.Sprintf("benchmark setup: AddDependency(%s,%s): %v", from, to, err))
-	}
-}
+// mustAddNode / mustAddDep were DELETED by M23 SEAL-06: they wrapped
+// (*DAG).AddNode and (*DAG).AddDependency, both now unexported. dagSpec.node /
+// dagSpec.dep replace them one-for-one, dep taking the same (from, to) argument order
+// so the call sites did not have to be re-reasoned. See dag_spec_test.go.
 
 // createBenchmarkAction creates a test action that simulates work
 func createBenchmarkAction(name string) workflow.Action {
@@ -782,76 +770,73 @@ func createBenchmarkAction(name string) workflow.Action {
 
 // createLinearDAGForBenchmark creates a linear chain of nodes: A → B → C → ...
 func createLinearDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
-	dag := workflow.NewDAG("linear-benchmark")
-	nodes := make([]*workflow.Node, count)
+	s := newDAGSpec("linear-benchmark")
 
-	// Create all nodes first
 	for i := 0; i < count; i++ {
 		nodeName := fmt.Sprintf("node%d", i)
-		node := workflow.NewNode(nodeName, createBenchmarkAction(nodeName))
-		nodes[i] = node
-		mustAddNode(dag, node)
+		s.node(nodeName, createBenchmarkAction(nodeName))
 	}
 
-	// Add dependencies
+	// Add dependencies. NOTE the argument order, preserved verbatim from the
+	// mustAddDep(dag, toName, fromName) this replaces: the arguments were ALREADY
+	// swapped relative to this file's other helpers, so node{i-1} depends on node{i}
+	// and "linear-benchmark" is really a REVERSED chain. That is very likely an
+	// accident, but correcting it here would be a silent measurement change inside a
+	// compile fix, so it is preserved and reported instead.
 	for i := 1; i < count; i++ {
 		fromName := fmt.Sprintf("node%d", i-1)
 		toName := fmt.Sprintf("node%d", i)
-		mustAddDep(dag, toName, fromName)
+		s.dep(toName, fromName)
 	}
 
-	return dag, nodes
+	return s.buildWithNodes()
 }
 
 // createDiamondDAGForBenchmark creates a diamond pattern with multiple paths
 func createDiamondDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
-	dag := workflow.NewDAG("diamond-benchmark")
-	nodes := make([]*workflow.Node, count)
+	// Preserved verbatim, comments included: as written, mustAddDep(dag, node_i,
+	// "node0") makes node0 depend on node_i, so this fans IN to node0 rather than out
+	// of it, and the "first half depends on node0" comment describes the opposite of
+	// what the code does. Reported, not corrected here.
+	s := newDAGSpec("diamond-benchmark")
 
-	// Create all nodes first
 	for i := 0; i < count; i++ {
 		nodeName := fmt.Sprintf("node%d", i)
-		node := workflow.NewNode(nodeName, createBenchmarkAction(nodeName))
-		nodes[i] = node
-		mustAddNode(dag, node)
+		s.node(nodeName, createBenchmarkAction(nodeName))
 	}
 
 	// Add dependencies to create diamond pattern
 	for i := 1; i < count; i++ {
 		// First half depends on node0
 		if i <= count/2 {
-			mustAddDep(dag, fmt.Sprintf("node%d", i), "node0")
+			s.dep(fmt.Sprintf("node%d", i), "node0")
 		} else {
 			// Second half depends on middle nodes
 			dep1 := fmt.Sprintf("node%d", i/2)
 			dep2 := fmt.Sprintf("node%d", i/2+1)
-			mustAddDep(dag, fmt.Sprintf("node%d", i), dep1)
+			s.dep(fmt.Sprintf("node%d", i), dep1)
 			if dep1 != dep2 {
-				mustAddDep(dag, fmt.Sprintf("node%d", i), dep2)
+				s.dep(fmt.Sprintf("node%d", i), dep2)
 			}
 		}
 	}
 
-	return dag, nodes
+	return s.buildWithNodes()
 }
 
 // createComplexDAGForBenchmark creates a complex graph with random dependencies
 func createComplexDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
-	dag := workflow.NewDAG("complex-benchmark")
-	nodes := make([]*workflow.Node, count)
+	s := newDAGSpec("complex-benchmark")
 
-	// Create all nodes first
 	for i := 0; i < count; i++ {
 		nodeName := fmt.Sprintf("node%d", i)
-		node := workflow.NewNode(nodeName, createBenchmarkAction(nodeName))
-		nodes[i] = node
-		mustAddNode(dag, node)
+		s.node(nodeName, createBenchmarkAction(nodeName))
 	}
 
 	// Add dependencies to create complex pattern
 	for i := 1; i < count; i++ {
 		// Always depend on at least one previous node
-		mustAddDep(dag, fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
+		s.dep(fmt.Sprintf("node%d", i), fmt.Sprintf("node%d", i-1))
 
 		// Add some random dependencies
 		maxDeps := 3
@@ -863,9 +848,9 @@ func createComplexDAGForBenchmark(count int) (*workflow.DAG, []*workflow.Node) {
 		for d := 0; d < numDeps; d++ {
 			depIdx := rand.Intn(i)
 			depName := fmt.Sprintf("node%d", depIdx)
-			mustAddDep(dag, fmt.Sprintf("node%d", i), depName)
+			s.dep(fmt.Sprintf("node%d", i), depName)
 		}
 	}
 
-	return dag, nodes
+	return s.buildWithNodes()
 }

@@ -47,7 +47,7 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 ```
 
 > All tags are pre-releases (alpha; no stable release yet), so `@latest` resolves to the highest
-> pre-release — currently `v0.21.0-alpha`. See the
+> pre-release — currently `v0.22.0-alpha`. See the
 > [Installation Guide](./installation.md#using-go-modules-recommended) for details.
 
 ## Step 1: Create the Main Application File
@@ -265,7 +265,11 @@ Now, let's create the workflow using Flow Orchestrator's builder pattern:
 ```go
 // Add to main.go
 
-func buildOrderWorkflow() (*workflow.DAG, error) {
+// Returns the BUILDER, not a built *DAG. The store is only known at the call site, and
+// a durable run needs the store ON the builder so FromBuilder can carry it onto the
+// *Workflow. Handing back a bare *DAG would force the caller into Build(), which
+// refuses a store-configured builder.
+func buildOrderWorkflow() *workflow.WorkflowBuilder {
 	// Create a workflow builder
 	builder := workflow.NewWorkflowBuilder().
 		WithWorkflowID("order-processing")
@@ -296,8 +300,7 @@ func buildOrderWorkflow() (*workflow.DAG, error) {
 		WithAction(stack.Apply(workflow.ActionFunc(sendNotificationAction))).
 		DependsOn("fulfill-order")
 	
-	// Build the workflow
-	return builder.Build()
+	return builder
 }
 ```
 
@@ -311,8 +314,10 @@ Now, let's implement the main function to create and execute the workflow:
 func main() {
 	fmt.Println("=== Order Processing Workflow ===")
 
-	// Build the workflow
-	dag, err := buildOrderWorkflow()
+	// buildOrderWorkflow returns the *WorkflowBuilder; Build() produces the *DAG.
+	// This is the non-durable path (no store) — call dag.Execute directly.
+	builder := buildOrderWorkflow()
+	dag, err := builder.Build()
 	if err != nil {
 		log.Fatalf("Failed to build workflow: %v", err)
 	}
@@ -432,17 +437,13 @@ func main() {
 		log.Fatalf("Failed to create store: %v", err)
 	}
 
-	// Build the workflow
-	dag, err := buildOrderWorkflow()
+	// Build the workflow. The store goes on the builder, and FromBuilder carries it
+	// onto the returned *Workflow — that is the durable path.
+	builder := buildOrderWorkflow().WithStore(store)
+
+	wf, err := workflow.FromBuilder(builder)
 	if err != nil {
 		log.Fatalf("Failed to build workflow: %v", err)
-	}
-
-	// Create the workflow with persistence
-	wf := &workflow.Workflow{
-		DAG:        dag,
-		WorkflowID: "order-processing",
-		Store:      store,
 	}
 
 	// Create a sample order

@@ -124,7 +124,7 @@ func TestMPClaim_BusyStarvation_ErrBusy(t *testing.T) {
 	}()
 
 	// Claim contends for the held write lock, waits out busy_timeout → SQLITE_BUSY → ErrBusy.
-	_, claimErr := store.Claim("wf", "owner")
+	_, claimErr := store.Claim(context.Background(), "wf", "owner")
 	require.Error(t, claimErr, "a Claim contending with a held write lock past busy_timeout must error")
 	require.ErrorIs(t, claimErr, ErrBusy, "ph77-F1: a contended Claim past busy_timeout classifies as ErrBusy (retryable), NOT opaque ErrIO")
 	require.False(t, errors.Is(claimErr, ErrFencedOut), "a busy Claim is transient (retry), distinct from ErrFencedOut (abort)")

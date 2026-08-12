@@ -28,11 +28,11 @@ import (
 // the engineer before commit.
 func TestConcurrentExecute_CheckpointFieldRaceClean(t *testing.T) {
 	store := NewInMemoryStore() // implements Checkpointer → exercises the callback path
-	wf := NewWorkflow(store)
+	wf := newWorkflowForTest(store)
 	wf.WorkflowID = "concurrent-exec-race"
-	mustAddNode(t, wf.DAG, NewNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
-	mustAddNode(t, wf.DAG, NewNode("b", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
-	mustAddDep(t, wf.DAG, "a", "b")
+	mustAddNode(t, wf.dag, newNode("a", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+	mustAddNode(t, wf.dag, newNode("b", ActionFunc(func(context.Context, *WorkflowData) error { return nil })))
+	mustAddDep(t, wf.dag, "a", "b")
 
 	const drivers = 8
 	var wg sync.WaitGroup

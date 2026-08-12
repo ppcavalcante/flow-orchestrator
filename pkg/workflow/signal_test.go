@@ -12,9 +12,9 @@ import (
 // over the given store, with workflow id wf.
 func buildSignalWorkflow(t *testing.T, store WorkflowStore, wf, signalName string) *Workflow {
 	t.Helper()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = wf
-	require.NoError(t, w.AddNode(NewWaitForSignalNode("wait", signalName)))
+	require.NoError(t, w.addNode(newWaitForSignalNode("wait", signalName)))
 	return w
 }
 
@@ -120,8 +120,8 @@ func TestWaitForSignal_AckedAfterCompletion(t *testing.T) {
 // SignalStore in scope (DAG.Execute directly, no injection) fails loudly rather
 // than parking forever.
 func TestWaitForSignal_RequiresSignalStore(t *testing.T) {
-	d := NewDAG("wf-nostore")
-	require.NoError(t, d.AddNode(NewWaitForSignalNode("wait", "go")))
+	d := newDAGForTest("wf-nostore")
+	require.NoError(t, d.addNode(newWaitForSignalNode("wait", "go")))
 	cp := func(*WorkflowData) error { return nil }
 	err := d.Execute(withCheckpoint(context.Background(), cp), NewWorkflowData("wf-nostore"))
 	require.ErrorIs(t, err, ErrWaitRequiresSignalStore)
@@ -131,9 +131,9 @@ func TestWaitForSignal_RequiresSignalStore(t *testing.T) {
 // while its predicate is false and converges once a re-drive sees it true.
 func TestWaitForCondition_ParksUntilPredicateFlips(t *testing.T) {
 	store := NewInMemoryStore()
-	w := NewWorkflow(store)
+	w := newWorkflowForTest(store)
 	w.WorkflowID = "wf-cond"
-	require.NoError(t, w.AddNode(NewWaitForConditionNode("await", func(d *WorkflowData) bool {
+	require.NoError(t, w.addNode(newWaitForConditionNode("await", func(d *WorkflowData) bool {
 		v, ok := d.Get("ready")
 		return ok && v == true
 	})))

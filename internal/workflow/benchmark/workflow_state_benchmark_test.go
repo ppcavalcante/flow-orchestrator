@@ -101,19 +101,28 @@ func BenchmarkDAGConstructionPerformance(b *testing.B) {
 
 				b.StartTimer()
 
-				// Create DAG and add nodes
-				dag := workflow.NewDAG(fmt.Sprintf("dag-construction-bench-%d", size))
+				// Create DAG and add nodes.
+				//
+				// M23 SEAL-06 CHANGED WHAT THIS BENCHMARK MEASURES, and unlike every
+				// other migrated site that cannot be avoided by hoisting: construction
+				// IS this benchmark's subject, so it must stay inside the timed region.
+				// It now measures builder assembly + build(), i.e. full Validate plus
+				// validateReconvergence, where it used to measure raw map/slice
+				// assembly with no validation at all. The number is NOT comparable to
+				// any pre-seal figure — it is a different quantity, not a regression.
+				// Flagged for T11; do not quote it against an old baseline.
+				spec := newDAGSpec(fmt.Sprintf("dag-construction-bench-%d", size))
 				for j := 0; j < size; j++ {
-					node := workflow.NewNode(nodeNames[j], action)
-					mustAddNode(dag, node)
+					spec.node(nodeNames[j], action)
 				}
 
 				// Add some dependencies (linear chain for simplicity)
 				if size > 1 {
 					for j := 0; j < size-1; j++ {
-						mustAddDep(dag, nodeNames[j], nodeNames[j+1])
+						spec.dep(nodeNames[j], nodeNames[j+1])
 					}
 				}
+				_ = spec.build()
 			}
 		})
 	}
