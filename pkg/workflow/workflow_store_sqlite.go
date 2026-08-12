@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     spec           TEXT NOT NULL,          -- cron: the 5-field spec; interval: the period in nanos (as text); oneshot: ''
     target_type    TEXT NOT NULL,          -- the work_queue dispatch type the fire enqueues (RunNext resolves type->DAG)
     next_fire_time INTEGER NOT NULL,       -- unix-nanos of the next due slot; THE SAFETY ARBITER (poller cadence is liveness)
-    missed_policy  TEXT NOT NULL,          -- 'skip' (skip-to-next, default) | 'catchup' (catch-up-once) (DEC-P100-MISSED-RUN)
+    missed_policy  TEXT NOT NULL,          -- always 'skip' (skip-to-next); reserved slot for a future catch-up policy (DEC-P100-MISSED-RUN; AUD-067 removed the WithCatchupOnce 'catchup' writer)
     paused         INTEGER NOT NULL DEFAULT 0, -- 0 = active, 1 = paused (a paused schedule never fires; SCHED-03)
     created_at     INTEGER NOT NULL,       -- unix-nanos (audit / tiebreak)
     updated_at     INTEGER NOT NULL        -- unix-nanos of the last fire/lifecycle transition

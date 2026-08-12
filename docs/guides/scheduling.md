@@ -87,10 +87,11 @@ If the poller is down and comes back after several slots have elapsed, **all mis
 into a single fire**: the schedule fires **once**, then advances to the next future slot. There is
 deliberately no catch-up-all — replaying every missed slot would grow the backlog unbounded.
 
-`WithCatchupOnce()` is a **reserved** API. Today it is a **no-op** — the coalesce-to-one behavior
-above is the only missed-run behavior, and setting it does not change anything (a distinct
-fire-once-per-missed-window catch-up is a deferred increment). Do not rely on it selecting a different
-behavior yet.
+There is currently **one** missed-run policy (skip-to-next, the coalesce-to-one behavior above). A
+distinct per-missed-slot catch-up is a deferred additive increment; the store's `missed_policy` column
+reserves the slot for it. (Pre-1.0, AUD-067 removed the earlier `WithCatchupOnce()` reserved flag —
+it recorded a 'catchup' intent the engine never honored, so it was a public promise of behavior that
+did not exist. Real catch-up, if added, will be introduced additively when it actually does something.)
 
 ## Concurrency caps
 

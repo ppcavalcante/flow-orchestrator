@@ -24,11 +24,12 @@ const (
 	schedOneshot  = "oneshot"
 )
 
-// missed-run policies (DEC-P100-MISSED-RUN, SCHED-04).
-const (
-	missedSkip    = "skip"    // skip-to-next: advance past all missed slots to the next future slot, fire nothing extra
-	missedCatchup = "catchup" // catch-up-once: fire exactly one run for the missed window, then advance to the next future slot
-)
+// missedSkip is the sole missed-run policy (DEC-P100-MISSED-RUN, SCHED-04): on a missed window, advance
+// past all missed slots to the next future slot, coalescing them into a single fire. It is persisted in
+// the `missed_policy` column as a reserved slot — a distinct per-missed-slot catch-up is a future ADDITIVE
+// increment. The `WithCatchupOnce` reserved flag was removed pre-1.0 (AUD-067): it recorded a 'catchup'
+// intent the engine never acted on, so it was a public promise of unimplemented behavior.
+const missedSkip = "skip"
 
 // scheduleLeaseKey namespaces a schedule id into the shared M16 leases id-space so a schedule claim
 // (claimLocked) can never collide with a workflow lease (DEC-P100-FENCE-PER-SCHEDULE).
@@ -46,8 +47,6 @@ type ScheduleSpec struct {
 	targetType string        // the work_queue dispatch type the fire enqueues
 	interval   time.Duration // interval kind only
 	firstFire  time.Time     // the first next_fire_time (oneshot: the fire instant; cron/interval: the anchor)
-	missedSkip bool          // true = skip-to-next (default); false = catch-up-once
-	haveMissed bool          // whether a missed-policy was explicitly chosen (else default skip)
 }
 
 // NewCronSchedule builds a cron schedule firing target type `typ` per the 5-field `spec`. firstFire is
@@ -96,21 +95,6 @@ func NewOneshotSchedule(id, typ string, fireAt time.Time) (ScheduleSpec, error) 
 	return ScheduleSpec{ID: id, kind: schedOneshot, spec: "", targetType: typ, firstFire: fireAt}, nil
 }
 
-// WithCatchupOnce sets the catch-up-once missed-run policy (persisted as `missed_policy='catchup'`).
-// RESERVED: (STABILITY.md marker — exported + durably accepted, but no distinct behaviour yet).
-// V-M20-01 / DEC-P103-CATCHUP-RESERVED: it is CURRENTLY IDENTICAL to the default skip-to-next. A due schedule
-// whose next-fire is far in the past coalesces ALL missed slots into a SINGLE fire on the next poll and jumps to
-// the first future slot, regardless of policy (advanceSchedule fires once + advances; the `policy` arg is not yet
-// consumed). A distinct per-missed-slot catch-up (fire once per missed slot) is a deferred increment. The flag +
-// column round-trip durably today (so a future implementation reads the intent), but the OBSERVABLE behavior does
-// not yet differ from the default. Ignored for one-shot (no missed-run window). Use it to record the intent; do
-// NOT rely on a distinct catch-up firing yet.
-func (s ScheduleSpec) WithCatchupOnce() ScheduleSpec {
-	s.missedSkip = false
-	s.haveMissed = true
-	return s
-}
-
 // CreateSchedule durably registers (or idempotently re-registers, SCHED-05) a schedule. A re-register of an
 // existing id is a VISIBLE no-op on the fire state (the row is left byte-unchanged — never a silent next_fire
 // reset that would double-fire), returning created=false. Requires mp mode (the schedules fire onto the mp
@@ -130,10 +114,10 @@ func (s *SQLiteStore) CreateSchedule(spec ScheduleSpec) (created bool, err error
 	if verr := validateWorkflowID(spec.ID); verr != nil {
 		return false, fmt.Errorf("%w: schedule id %q: %w", ErrSchedule, spec.ID, verr)
 	}
+	// Every schedule persists the sole missed-run policy, skip-to-next (missed slots coalesce into one
+	// fire). The column is a reserved slot for a future additive catch-up policy (AUD-067 removed the
+	// WithCatchupOnce flag that used to write 'catchup' without any distinct behavior).
 	policy := missedSkip
-	if spec.haveMissed && !spec.missedSkip {
-		policy = missedCatchup
-	}
 	ctx := context.Background()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -420,12 +404,12 @@ func (s *SQLiteStore) fireDueLocked(ctx context.Context, id, ownerID string) (fi
 	return fired, nil
 }
 
-// advanceSchedule computes (newNextFire, doEnqueue) for a fire at `nextFire` observed at `now`, honoring the
-// missed-run policy. For cron/interval it advances PAST every slot ≤ now to the first future slot; doEnqueue is
-// true iff at least one slot was due. skip-to-next fires ONE run for the whole missed window (the current slot)
-// then jumps ahead — matching standard "coalesce missed slots into one". catch-up-once likewise fires one, then
-// advances to the next future slot (both fire exactly once per poll; the difference is only observable when we
-// later add fire-per-missed-slot, deferred). A one-shot returns doEnqueue=true and is deleted by the caller.
+// advanceSchedule computes (newNextFire, doEnqueue) for a fire at `nextFire` observed at `now`. For cron/interval
+// it advances PAST every slot ≤ now to the first future slot; doEnqueue is true iff at least one slot was due.
+// The sole missed-run policy, skip-to-next, fires ONE run for the whole missed window (the current slot) then
+// jumps ahead — the standard "coalesce missed slots into one". `policy` (always 'skip' today, read from the
+// reserved missed_policy column) is not yet consumed; a fire-per-missed-slot catch-up is a deferred additive
+// increment. A one-shot returns doEnqueue=true and is deleted by the caller.
 func advanceSchedule(kind, spec, policy string, nextFire, now int64) (newNext int64, doEnqueue bool, err error) {
 	switch kind {
 	case schedOneshot:
@@ -450,7 +434,7 @@ func advanceSchedule(kind, spec, policy string, nextFire, now int64) (newNext in
 			}
 			next = nextFire + k*period
 		}
-		_ = policy // skip vs catchup are indistinguishable at one-fire-per-poll granularity (see doc).
+		_ = policy // 'skip' is the only policy today; the reserved missed_policy column is not yet consumed (see doc).
 		return next, true, nil
 	case schedCron:
 		sched, cerr := ParseCron(spec)

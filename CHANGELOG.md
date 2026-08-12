@@ -5,6 +5,20 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**M24 — deliberate pre-1.0 surface work (NOT a 1.0 commitment).** Landing the breaking decisions that
+must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a later ratification.
+
+**Removed (BREAKING):**
+- **`ScheduleSpec.WithCatchupOnce()`** (AUD-067). It was a `RESERVED:` public method that durably
+  recorded a `missed_policy='catchup'` intent the engine never acted on — a public promise of behavior
+  that did not exist. Missed runs still coalesce into a single fire (skip-to-next, the sole missed-run
+  policy); the store's `missed_policy` column is retained as a reserved slot so a real per-missed-slot
+  catch-up can be added **additively** later, when it actually does something. *Migration:* delete any
+  `.WithCatchupOnce()` call — behavior is unchanged (it was already a no-op). With this removed, the
+  intended-public surface now carries **no** `RESERVED:`/`EXPERIMENTAL:` markers (see STABILITY.md).
+
 ## [0.22.4-alpha] — 2026-08-12
 
 **Patch — CI mutation-job rollup fix (no engine change).** With the coverage timeout fixed in

@@ -1,9 +1,8 @@
 package workflow
 
-// M20 ph103 earn-back — biting tests over the schedule/cron constructor VALIDATION branches and the two
-// reserved-but-durable surfaces (Schedule.String, ScheduleSpec.WithCatchupOnce) that the happy-path tests in
-// schedule_test.go / cron_test.go leave uncovered. Every assertion checks a real refusal or a real state effect;
-// none touches production code.
+// M20 ph103 earn-back — biting tests over the schedule/cron constructor VALIDATION branches and the
+// reserved-but-durable Schedule.String surface that the happy-path tests in schedule_test.go / cron_test.go
+// leave uncovered. Every assertion checks a real refusal or a real state effect; none touches production code.
 
 import (
 	"testing"
@@ -77,30 +76,21 @@ func TestCronSchedule_StringRoundTrips(t *testing.T) {
 	require.Equal(t, spec, sched.String(), "String() must round-trip the parsed spec")
 }
 
-// TestWithCatchupOnce_PersistsCatchupPolicy — WithCatchupOnce() flips the spec to the catch-up-once policy, and a
-// CreateSchedule of that spec durably records missed_policy='catchup' (the RESERVED-but-round-trips contract,
-// DEC-P103-CATCHUP-RESERVED). Bites both the 0%-covered WithCatchupOnce and the catchup branch of CreateSchedule.
-func TestWithCatchupOnce_PersistsCatchupPolicy(t *testing.T) {
+// TestSchedule_MissedPolicyPersistsSkip — a CreateSchedule durably records missed_policy='skip', the SOLE
+// missed-run policy (missed slots coalesce into one fire on the next poll). AUD-067 removed the WithCatchupOnce
+// reserved flag that used to write 'catchup' without any distinct behavior, so 'skip' is now the only value the
+// column ever holds. Bites the missed-policy branch of CreateSchedule.
+func TestSchedule_MissedPolicyPersistsSkip(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1_700_000_000, 0).UTC())
 	s := mkSchedStore(t, clk)
 
-	base, err := NewIntervalSchedule("cu", "T", time.Minute, clk.Now())
+	def, err := NewIntervalSchedule("sk", "T", time.Minute, clk.Now())
 	require.NoError(t, err)
-	spec := base.WithCatchupOnce()
-
-	created, err := s.CreateSchedule(spec)
+	created, err := s.CreateSchedule(def)
 	require.NoError(t, err)
 	require.True(t, created)
 
 	var policy string
-	require.NoError(t, s.db.QueryRow(`SELECT missed_policy FROM schedules WHERE id=?`, "cu").Scan(&policy))
-	require.Equal(t, "catchup", policy, "WithCatchupOnce must durably persist the catchup missed policy")
-
-	// Contrast: the default (no WithCatchupOnce) persists skip — proves the flag is what changed the column.
-	def, err := NewIntervalSchedule("sk", "T", time.Minute, clk.Now())
-	require.NoError(t, err)
-	_, err = s.CreateSchedule(def)
-	require.NoError(t, err)
 	require.NoError(t, s.db.QueryRow(`SELECT missed_policy FROM schedules WHERE id=?`, "sk").Scan(&policy))
-	require.Equal(t, "skip", policy, "the default missed policy is skip-to-next")
+	require.Equal(t, "skip", policy, "the sole missed policy is skip-to-next")
 }

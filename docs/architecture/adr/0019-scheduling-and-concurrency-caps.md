@@ -112,8 +112,9 @@ data loss.
 
 (Note: the general missed-run behavior — for a poller that was *down* across several slots, not a
 cap-block — is that missed slots **coalesce into a single fire**; `advanceSchedule` fires once and
-jumps to the next future slot. `WithCatchupOnce` is a **reserved** API that is a no-op today, `==` the
-default; a distinct per-missed-slot catch-up is a deferred increment. See the guide.)
+jumps to the next future slot. A distinct per-missed-slot catch-up policy is a deferred additive
+increment; the `missed_policy` column reserves the slot. See the guide. (AUD-067 later removed the
+`WithCatchupOnce` reserved flag pre-1.0 — it recorded a 'catchup' intent the engine never acted on.)
 
 So a **cap-blocked one-shot is RETAINED** (`DEC-P101-ONESHOT-AT-CAP-RETAIN`, architect-ruled,
 **user-ratified at close**): `next_fire_time` is left unchanged (still `≤ now`, still due), so it

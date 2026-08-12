@@ -1134,7 +1134,6 @@ store.**
 func NewCronSchedule(id, typ, spec string, anchor time.Time) (ScheduleSpec, error) // 5-field cron
 func NewIntervalSchedule(id, typ string, period time.Duration, anchor time.Time) (ScheduleSpec, error)
 func NewOneshotSchedule(id, typ string, fireAt time.Time) (ScheduleSpec, error)    // auto-deletes on fire
-func (s ScheduleSpec) WithCatchupOnce() ScheduleSpec                               // RESERVED — no-op today (missed slots coalesce into one fire)
 
 // Lifecycle (bool = "a row was affected"; idempotent).
 func (s *SQLiteStore) CreateSchedule(spec ScheduleSpec) (created bool, err error)  // re-register = no-op, byte-unchanged
@@ -1174,8 +1173,9 @@ func (m *DispatchMetrics) MissedFires() int64                                   
 - **Schedule × cap:** a recurring fire at cap = **missed slot** (schedule advances, nothing enqueued);
   a one-shot at cap is **RETAINED** (stays due, fires exactly once when the cap drains — never
   dropped). Both increment `MissedFires()`.
-- **Missed runs** (poller down across slots): missed slots **coalesce into one fire**. `WithCatchupOnce`
-  is reserved (no-op today, `==` the default).
+- **Missed runs** (poller down across slots): missed slots **coalesce into one fire** (skip-to-next, the
+  sole missed-run policy). A per-missed-slot catch-up is a deferred additive increment. (AUD-067 removed
+  the earlier reserved `WithCatchupOnce` flag pre-1.0.)
 
 ## Dynamic fan-out (added M21)
 

@@ -55,7 +55,7 @@ The complete current list of marked exceptions — nothing else is unsupported:
 
 | Symbol | Marker | Meaning |
 |---|---|---|
-| `ScheduleSpec.WithCatchupOnce()` | `RESERVED:` | Records the catch-up-once missed-run policy durably, but is **currently identical to the default skip-to-next** (missed slots coalesce into one fire). A distinct per-missed-slot catch-up is a deferred increment; set it to record intent, do not yet rely on a distinct catch-up firing. (`DEC-P103-CATCHUP-RESERVED`.) |
+| _(none)_ | — | There are currently **no** `RESERVED:` or `EXPERIMENTAL:` exceptions — the whole intended-public surface is supported. (`ScheduleSpec.WithCatchupOnce()`, the last reserved-but-no-op marker, was removed pre-1.0 in AUD-067 rather than frozen as a standing promise of unimplemented behavior.) |
 
 `internal/**` is never public regardless of what the Go toolchain would allow (see above);
 this table governs only the *intended-public* packages.
