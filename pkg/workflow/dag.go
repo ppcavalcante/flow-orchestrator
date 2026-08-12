@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -705,6 +706,14 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 		levelCtx = withMaxConcurrency(ctx, cfg.MaxConcurrency)
 	}
 
+	// The engine-reserved current-level key is invariant across the loop (d.name is
+	// fixed), so build it ONCE. Built by string concat, not fmt.Sprintf, deliberately:
+	// fmt recycles its printer structs through an internal sync.Pool (ppFree) that GC
+	// drains on every cycle, so a per-level fmt call pays a spurious +alloc/op under GC
+	// pressure that the det-tax ceiling must not see. Concat + strconv touch no pool, so
+	// the non-durable drive allocates a GC-independent constant count. (det-tax root cause.)
+	currentLevelKey := "__current_level_" + d.name
+
 	// Execute each level in sequence
 	for levelIndex, level := range levels {
 		// Stop scheduling further levels if the context has been cancelled or
@@ -726,8 +735,8 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 		// Execute nodes in this level. The key is in the engine-reserved namespace
 		// (AUD-018: __-prefixed, so a consumer cannot clobber it); written on the
 		// executor's unsealed data via setReserved.
-		levelName := fmt.Sprintf("Level %d", levelIndex)
-		data.setReserved(fmt.Sprintf("__current_level_%s", d.name), levelName)
+		levelName := "Level " + strconv.Itoa(levelIndex)
+		data.setReserved(currentLevelKey, levelName)
 
 		// Execute all nodes in this level in parallel, bounded by the configured
 		// per-level concurrency limit. Fail-fast (non-continue-on-error)

@@ -5,6 +5,28 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1-alpha] — 2026-08-12
+
+**Patch — det-tax gate root-cause fix.** No behavior change to the engine's public surface; a
+CI-only correctness fix plus a leaner hot path. The `v0.22.0-alpha` release's CI went red on the
+determinism-tax allocation ceiling (`TestPerfCeiling_DetTax`) under loaded runners (285/278 vs the
+quiescent 284/277). Root cause: `(*DAG).Execute` built its per-level engine-reserved key/value with
+`fmt.Sprintf`, and `fmt` recycles its printer structs through an internal `sync.Pool` (`ppFree`) that
+Go's GC drains on **every** cycle — so under GC pressure each per-level `Sprintf` paid a spurious
+extra allocation the ceiling was never calibrated for. This was **not** a determinism-tax regression
+and **not** the library's own object pools; the non-durable drive was always correct.
+
+**Fixed:**
+- **`(*DAG).Execute` no longer calls `fmt.Sprintf` on the per-level hot path** — the loop-invariant
+  reserved key is built once, and both strings are assembled with `strconv.Itoa` + concatenation (no
+  `fmt`, no pool). The reserved key/value strings are byte-identical to before, so consumers are
+  unaffected. The DAG non-durable drive is now **GC-independent** (a flat allocation count regardless
+  of GC pressure) and ~5 allocations leaner per drive.
+- A new regression guard `TestDetTax_GCIndependent` asserts each non-durable drive's per-op allocation
+  count under GC pressure does not exceed its quiescent count — the direct root-cause guard, distinct
+  from the absolute-ceiling `TestPerfCeiling_DetTax` (which additionally pins GC for a deterministic
+  ceiling reading).
+
 ## [0.22.0-alpha] — 2026-08-12
 
 **M23 — Sealed Graph + Complete Mediation.** The graph surface is **sealed** (a validated `Node`/

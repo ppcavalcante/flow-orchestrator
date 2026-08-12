@@ -29,11 +29,11 @@ go get github.com/ppcavalcante/flow-orchestrator@latest
 In your `go.mod` file, you'll see a line like:
 
 ```
-require github.com/ppcavalcante/flow-orchestrator v0.22.0-alpha
+require github.com/ppcavalcante/flow-orchestrator v0.22.1-alpha
 ```
 
 > **Versioning:** the project is **alpha** — every published tag is a pre-release and there is
-> **no stable (`v1`+) release**. The latest is **`v0.22.0-alpha`** (M23 — Sealed Graph + Complete
+> **no stable (`v1`+) release**. The latest is **`v0.22.1-alpha`** (M23 — Sealed Graph + Complete
 > Mediation: a **sealed** Node/DAG/Workflow surface, complete per-node action mediation, a structural
 > definition digest that rejects a changed graph on resume, engine-reserved keys, a build-time
 > `WithBoundary` verifier-dominance check, and a store-only approval nonce — an independent-audit
@@ -65,11 +65,11 @@ require github.com/ppcavalcante/flow-orchestrator v0.22.0-alpha
 > wait-for-signal/condition, the `Waiting` status), and the M9 crash-resume core, all with no
 > determinism tax).
 > Because there is no stable tag, `go get @latest`
-> resolves to the highest pre-release — currently **`v0.22.0-alpha`** — so the command above is
+> resolves to the highest pre-release — currently **`v0.22.1-alpha`** — so the command above is
 > correct. Pinning the exact version
-> (`go get github.com/ppcavalcante/flow-orchestrator@v0.22.0-alpha`) is optional but recommended
+> (`go get github.com/ppcavalcante/flow-orchestrator@v0.22.1-alpha`) is optional but recommended
 > for reproducibility, and the API may change between alpha minors. The in-code version
-> (`pkg/workflow.Version`) reads `0.22.0-alpha`. See
+> (`pkg/workflow.Version`) reads `0.22.1-alpha`. See
 > [CHANGELOG.md](../../CHANGELOG.md) and [STABILITY.md](../../STABILITY.md).
 
 ### Using Traditional GOPATH
@@ -196,7 +196,7 @@ go mod tidy
 
 ```
 require (
-    github.com/ppcavalcante/flow-orchestrator v0.22.0-alpha
+    github.com/ppcavalcante/flow-orchestrator v0.22.1-alpha
     github.com/conflicting/package v1.2.3 // indirect
 )
 

@@ -82,8 +82,11 @@ jobs:
         # — so it SKIPS under the -race step above. This dedicated non-race step keeps the
         # moat guard BLOCKING on amd64 CI (the exact arch-specific alloc delta a local
         # arm64 run cannot see — M14 ph60 removed one alloc, read only on amd64). Runs on
-        # BOTH toolchain arms.
-        run: go test -run '^TestPerfCeiling_DetTax$' ./pkg/workflow
+        # BOTH toolchain arms. GOGC=800 (belt-and-suspenders with the in-test
+        # debug.SetGCPercent(800)) keeps a loaded runner's GC from evicting the per-drive
+        # sync.Pool mid-measurement and counting a MISS as a spurious +1 alloc — the det-tax
+        # load-sensitivity that false-reddened this gate on 2026-08-12.
+        run: GOGC=800 go test -run '^TestPerfCeiling_DetTax$' ./pkg/workflow
       # AUD-002 retired the `adversarial_copyclass` tag and its dedicated CI step. The tag existed
       # ONLY to quarantine `go vet`'s copylocks diagnostic on `cp := *dag`, which was the first half
       # of the copied-mutex-wedge finding. The fix makes DAG.mu a *sync.RWMutex: a value copy no

@@ -7,6 +7,7 @@ package workflow
 
 import (
 	"context"
+	"runtime/debug"
 	"sync"
 	"testing"
 )
@@ -37,6 +38,16 @@ func TestPerfCeiling_DetTax(t *testing.T) {
 	if !detTaxToolchainCalibrated {
 		t.Skip("det-tax absolute alloc budget is calibrated for Go 1.25+ (arm64 283/277); an older toolchain has a different baseline — a real regression still shows on 1.25")
 	}
+
+	// Pin GC high for the whole measurement window. AllocsPerOp counts a per-drive sync.Pool
+	// MISS as an allocation; under GC pressure — a loaded CI runner — the pool is evicted
+	// BETWEEN benchmark iterations, adding a spurious +1..+3 the ceiling was never calibrated
+	// for (the ceiling is the quiescent / GOGC=800 reading; amd64 unloaded reads even 1 LOWER).
+	// This is the documented det-tax load-sensitivity: measuring at a raised GC percent (the
+	// "prove innocence with GOGC=800" condition) makes the count deterministic regardless of
+	// runner load, so the gate reflects the ENGINE's allocation, not the runner's. A real +1
+	// regression still shows on top of the true baseline and reddens. (CI det-tax flake, 2026-08-12.)
+	defer debug.SetGCPercent(debug.SetGCPercent(800))
 
 	d := benchDiamondDAG(t)
 	ctx := context.Background()
