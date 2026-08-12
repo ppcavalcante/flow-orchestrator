@@ -48,18 +48,24 @@ property-tests: generate-fb
 
 # Run tests with coverage
 test-coverage: generate-fb
-	go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage.tmp.txt -covermode=atomic ./...
+	go test -timeout $(TEST_TIMEOUT) -coverprofile=coverage.tmp.txt -covermode=atomic ./...
 	mv coverage.tmp.txt coverage.txt
 	go tool cover -html=coverage.txt -o coverage.html
 
 # Run tests with coverage for core packages only (excluding examples, benchmarks, and generated code)
-# NOTE: CI's coverage job calls this target. It MUST carry -timeout (AUD-006): a
-# killed race run writes a PARTIAL profile and exits non-zero with zero --- FAIL,
-# which a coverage gate reads as a truncated-but-"green" result. The profile is
-# written to a temp file and renamed only on success, so a killed run cannot leave
-# a truncated coverage-focused.txt standing in for a complete one.
+# NOTE: CI's coverage job calls this target. Coverage generation runs WITHOUT -race
+# deliberately: data-race detection is fully gated by the separate `test` job
+# (go test ./... -race -timeout 30m), statement coverage is race-independent, and the
+# -race+atomic-coverage combination roughly doubled the run time — it hit the 30m
+# ceiling on a marginal run (v0.22.2 CI focused-coverage timeout at 1800s). Dropping
+# the redundant -race gives ~2-3x headroom so the gate reflects coverage, not runner load.
+# It MUST still carry -timeout (AUD-006): a killed run writes a PARTIAL profile and
+# exits non-zero with zero --- FAIL, which a coverage gate reads as a truncated-but-
+# "green" result. The profile is written to a temp file and renamed only on success,
+# so a killed run cannot leave a truncated coverage-focused.txt standing in for a
+# complete one.
 test-coverage-focused: generate-fb
-	go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage-focused.tmp.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
+	go test -timeout $(TEST_TIMEOUT) -coverprofile=coverage-focused.tmp.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"`
 	mv coverage-focused.tmp.txt coverage-focused.txt
 	go tool cover -html=coverage-focused.txt -o coverage-focused.html
 
@@ -69,7 +75,7 @@ codecov-coverage: generate-fb
 	@# Run tests for all packages
 	@go test -race -timeout $(TEST_TIMEOUT) ./...
 	@# Generate coverage report for relevant packages only (temp → rename on success)
-	@go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage.tmp.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"` && mv coverage.tmp.txt coverage.txt
+	@go test -timeout $(TEST_TIMEOUT) -coverprofile=coverage.tmp.txt -covermode=atomic `go list ./... | grep -v "examples\|fb\|benchmark"` && mv coverage.tmp.txt coverage.txt
 	@echo "Coverage report generated at coverage.txt"
 	@echo "Coverage by priority level:"
 	@echo "Critical (pkg/workflow): $(shell go tool cover -func=coverage.txt | grep "pkg/workflow" | grep -v "internal/workflow/fb" | grep total | awk '{print $$3}')"
@@ -78,7 +84,7 @@ codecov-coverage: generate-fb
 
 # Run tests for core functionality only
 test-core: generate-fb
-	go test -race -timeout $(TEST_TIMEOUT) -coverprofile=coverage-core.tmp.txt -covermode=atomic ./pkg/workflow ./internal/workflow/arena ./internal/workflow/memory
+	go test -timeout $(TEST_TIMEOUT) -coverprofile=coverage-core.tmp.txt -covermode=atomic ./pkg/workflow ./internal/workflow/arena ./internal/workflow/memory
 	mv coverage-core.tmp.txt coverage-core.txt
 	go tool cover -func=coverage-core.txt
 	go tool cover -html=coverage-core.txt -o coverage-core.html

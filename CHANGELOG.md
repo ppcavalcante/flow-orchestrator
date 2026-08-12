@@ -5,6 +5,21 @@ All notable changes to Flow Orchestrator will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.3-alpha] — 2026-08-12
+
+**Patch — CI coverage-timeout fix (no engine change).** Completes a fully green amd64 CI for the
+M23 release chain. The coverage job's focused-coverage step ran `go test -race -covermode=atomic`
+over most packages; the `-race` + atomic-coverage combination is ~2–3× heavier than either alone, so
+the run sat on its 30-minute timeout and runner variance pushed it over on v0.22.2-alpha's run (it had
+passed on v0.22.1's). Raising the timeout would only defer the same failure as the suite grows.
+
+**CI:**
+- Coverage generation no longer runs under `-race`. Data-race detection is fully and separately gated
+  by the `test` job (`go test ./... -race -timeout 30m`), and statement coverage is race-independent,
+  so nothing is lost — the coverage run gains ~2–3× headroom and reflects coverage rather than runner
+  load. `-race` dropped from the four coverage targets; the two pure race-test invocations keep it;
+  `-covermode=atomic` retained so coverage numbers are unchanged.
+
 ## [0.22.2-alpha] — 2026-08-12
 
 **Patch — coverage-gate fix (no engine change).** Closes a pre-existing coverage regression M23
