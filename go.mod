@@ -11,7 +11,7 @@ go 1.25.0
 // (which exists to test the true floor).
 toolchain go1.25.11
 
-require github.com/google/flatbuffers v25.2.10+incompatible
+require github.com/google/flatbuffers v25.12.19+incompatible
 
 require (
 	github.com/leanovate/gopter v0.2.11
