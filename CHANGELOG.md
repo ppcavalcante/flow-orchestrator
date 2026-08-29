@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **M24 — deliberate pre-1.0 surface work (NOT a 1.0 commitment).** Landing the breaking decisions that
 must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a later ratification.
 
+**Added:**
+- **`ScheduleSpec.WithInput([]byte)`** — a schedule now carries the JSON-object input its fire enqueues,
+  so a scheduled run can be parameterized (e.g. per-tenant/per-engagement), not just typed. The input is
+  copied verbatim into each fired run's `work_queue.input` (run provenance) and validated as a JSON object
+  at `CreateSchedule` (a malformed payload is refused there, not left to fail at every future fire). Backed
+  by an additive nullable `schedules.input` column with the established idempotent-`ALTER` migration; a
+  schedule without input behaves exactly as before. (SCHED-INPUT — requested by a downstream consumer.)
+- **`Observability.ListSchedules() ([]ScheduleInfo, error)`** — the operator read-model can now enumerate
+  every schedule (soonest next-fire first, one atomic SELECT), including paused ones, closing the only
+  read-model asymmetry (create/pause/resume/delete existed; no read did). (OBS-RM-06.)
+
 **Removed (BREAKING):**
 - **`ScheduleSpec.WithCatchupOnce()`** (AUD-067). It was a `RESERVED:` public method that durably
   recorded a `missed_policy='catchup'` intent the engine never acted on — a public promise of behavior

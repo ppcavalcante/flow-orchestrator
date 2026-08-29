@@ -84,6 +84,21 @@ type WorkerInfo struct {
 	LiveHeld  int // leases with expiry >= now
 }
 
+// ScheduleInfo is one schedule's durable state (OBS-RM-06). A read-model mirror of the schedules row so an
+// operator can answer "what schedules exist, when does this next fire, is it paused, what is it for/with".
+type ScheduleInfo struct {
+	ID           string
+	Kind         string // "cron" | "interval" | "oneshot"
+	Spec         string // cron: the 5-field spec; interval: period-nanos as text; oneshot: ""
+	TargetType   string // the work_queue dispatch type each fire enqueues
+	NextFireTime int64  // unix-nanos of the next due slot
+	MissedPolicy string // always "skip" today (AUD-067 removed the 'catchup' writer; reserved slot)
+	Paused       bool
+	Input        []byte // the JSON-object bytes each fire seeds (nil = no input; SCHED-INPUT)
+	CreatedAt    int64  // unix-nanos
+	UpdatedAt    int64  // unix-nanos of the last fire/lifecycle transition
+}
+
 // Observability is the additive optional operator read-model interface (M18 ph85, OBS-RM). A store opened
 // as an mp SQLiteStore implements it; callers type-assert like Checkpointer/ClaimStore/WorkflowQuery. Four
 // of the five granular methods are ONE atomic SELECT each; WorkflowStatus composes TWO (its dispatch row +
@@ -104,6 +119,9 @@ type Observability interface {
 	WorkflowStatus(workflowID string) (*WorkflowStatus, error)
 	// WorkerHealth returns each lease owner's held/live counts (OBS-RM-05).
 	WorkerHealth() ([]WorkerInfo, error)
+	// ListSchedules enumerates every schedule, soonest next-fire first (OBS-RM-06). ONE atomic SELECT, like
+	// OBS-RM-01/-02/-03/-05. A paused schedule is included (invisible to the poller, visible to an operator).
+	ListSchedules() ([]ScheduleInfo, error)
 }
 
 // Compile-time assertion that *SQLiteStore satisfies Observability.
@@ -322,6 +340,38 @@ func (s *SQLiteStore) WorkerHealth() ([]WorkerInfo, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("%w: worker rows: %w", ErrCorruptData, err)
+	}
+	return out, nil
+}
+
+// ListSchedules implements OBS-RM-06: every schedule, soonest next-fire first, in one atomic SELECT.
+func (s *SQLiteStore) ListSchedules() ([]ScheduleInfo, error) {
+	if !s.dur.mp {
+		return nil, fmt.Errorf("%w: ListSchedules requires a multi-process store", ErrValidation)
+	}
+	ctx := context.Background()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, kind, spec, target_type, next_fire_time, missed_policy, paused, input, created_at, updated_at
+		 FROM schedules ORDER BY next_fire_time`)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list schedules: %w", ErrIO, err)
+	}
+	defer rows.Close()             //nolint:errcheck // read-only
+	out := make([]ScheduleInfo, 0) // empty store → empty non-nil slice (OBS-RM contract)
+	for rows.Next() {
+		var si ScheduleInfo
+		var paused int
+		if err := rows.Scan(&si.ID, &si.Kind, &si.Spec, &si.TargetType, &si.NextFireTime,
+			&si.MissedPolicy, &paused, &si.Input, &si.CreatedAt, &si.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("%w: scan schedule row: %w", ErrCorruptData, err)
+		}
+		si.Paused = paused == 1
+		out = append(out, si)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: schedule rows: %w", ErrCorruptData, err)
 	}
 	return out, nil
 }

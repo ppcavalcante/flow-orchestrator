@@ -673,12 +673,14 @@ type Observability interface {
     StuckWork(olderThan int64, registeredTypes []string) ([]StuckItem, error) // wedged items + StuckReason
     WorkflowStatus(workflowID string) (*WorkflowStatus, error) // dispatch state + per-node journal tally
     WorkerHealth() ([]WorkerInfo, error)                      // per-owner held/live lease counts
+    ListSchedules() ([]ScheduleInfo, error)                   // every schedule, soonest next-fire first (one atomic SELECT)
 }
 func (s *SQLiteStore) Snapshot(olderThan int64, registeredTypes []string) (*QueueSnapshot, error) // BEGIN DEFERRED, mutually consistent
 // Result types: InFlightItem{WorkflowID,Type,OwnerID string;Attempts int;EnqueuedAt,Expiry int64;LeaseLive bool}
 //   StuckItem{WorkflowID,Type,State string;Attempts int;EnqueuedAt int64;Reason StuckReason}
 //   WorkflowStatus{WorkflowID,State,OwnerID string;Queued bool;Attempts int;UpdatedAt int64;NodeCounts []NodeStatusCount}
 //   WorkerInfo{OwnerID string;TotalHeld,LiveHeld int}; QueueSnapshot{Counts,InFlight,Stuck,Workers}
+//   ScheduleInfo{ID,Kind,Spec,TargetType,MissedPolicy string;NextFireTime,CreatedAt,UpdatedAt int64;Paused bool;Input []byte}
 //   StuckReason ∈ {"unregistered_type","too_old_pending","lapsed_claimed"}
 
 // Cancel a RUNNING (claimed, mid-Execute) workflow → terminal `cancelled`, NEVER resumed. Sets a durable
@@ -1134,6 +1136,7 @@ store.**
 func NewCronSchedule(id, typ, spec string, anchor time.Time) (ScheduleSpec, error) // 5-field cron
 func NewIntervalSchedule(id, typ string, period time.Duration, anchor time.Time) (ScheduleSpec, error)
 func NewOneshotSchedule(id, typ string, fireAt time.Time) (ScheduleSpec, error)    // auto-deletes on fire
+func (s ScheduleSpec) WithInput(input []byte) ScheduleSpec                          // JSON object seeded into each fired run (validated at CreateSchedule)
 
 // Lifecycle (bool = "a row was affected"; idempotent).
 func (s *SQLiteStore) CreateSchedule(spec ScheduleSpec) (created bool, err error)  // re-register = no-op, byte-unchanged
