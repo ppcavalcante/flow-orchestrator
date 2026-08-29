@@ -11,6 +11,7 @@ package workflow
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -47,6 +48,7 @@ type ScheduleSpec struct {
 	targetType string        // the work_queue dispatch type the fire enqueues
 	interval   time.Duration // interval kind only
 	firstFire  time.Time     // the first next_fire_time (oneshot: the fire instant; cron/interval: the anchor)
+	input      []byte        // JSON-object bytes seeded into each fired run (nil = no input); set via WithInput
 }
 
 // NewCronSchedule builds a cron schedule firing target type `typ` per the 5-field `spec`. firstFire is
@@ -95,6 +97,22 @@ func NewOneshotSchedule(id, typ string, fireAt time.Time) (ScheduleSpec, error) 
 	return ScheduleSpec{ID: id, kind: schedOneshot, spec: "", targetType: typ, firstFire: fireAt}, nil
 }
 
+// WithInput attaches the JSON object seeded into every run this schedule fires. The bytes are copied
+// verbatim into the fired run's work_queue.input, so a node reads them exactly as it would for a manually
+// enqueued run (Enqueue). Because the input is copied AT EACH FIRE, a fired run durably records the
+// parameters it was actually fired with (run provenance) — re-registering the schedule with different input
+// does not rewrite history. Pass nil for no input (the prior behaviour). Ignored by the constructors; it takes
+// effect at CreateSchedule, which VALIDATES that a non-nil input is a JSON object (a malformed payload is
+// refused there, not left to fail at every future fire).
+//
+// FIDELITY NOTE: seedInput unmarshals the object and Sets each value, so a node Gets JSON's native decode —
+// a number arrives as float64 (NOT readable via GetInt), a nested object as map[string]any. Prefer scalar
+// string values a node decodes itself if it needs typed/integer fields. (See seedInput, review ph81-F4.)
+func (s ScheduleSpec) WithInput(input []byte) ScheduleSpec {
+	s.input = input
+	return s
+}
+
 // CreateSchedule durably registers (or idempotently re-registers, SCHED-05) a schedule. A re-register of an
 // existing id is a VISIBLE no-op on the fire state (the row is left byte-unchanged — never a silent next_fire
 // reset that would double-fire), returning created=false. Requires mp mode (the schedules fire onto the mp
@@ -114,6 +132,15 @@ func (s *SQLiteStore) CreateSchedule(spec ScheduleSpec) (created bool, err error
 	if verr := validateWorkflowID(spec.ID); verr != nil {
 		return false, fmt.Errorf("%w: schedule id %q: %w", ErrSchedule, spec.ID, verr)
 	}
+	// VALIDATE the input at CREATE, not at fire (same reasoning as the id check above, review ph100-F2):
+	// seedInput requires a JSON object, so a malformed input accepted here would make EVERY future fire enqueue
+	// a run that fails at seedInput/claim forever, with the cause far from the mistake. Refuse a non-object now.
+	if spec.input != nil {
+		var probe map[string]interface{}
+		if jerr := json.Unmarshal(spec.input, &probe); jerr != nil {
+			return false, fmt.Errorf("%w: schedule %q input is not a JSON object: %w", ErrSchedule, spec.ID, jerr)
+		}
+	}
 	// Every schedule persists the sole missed-run policy, skip-to-next (missed slots coalesce into one
 	// fire). The column is a reserved slot for a future additive catch-up policy (AUD-067 removed the
 	// WithCatchupOnce flag that used to write 'catchup' without any distinct behavior).
@@ -123,10 +150,10 @@ func (s *SQLiteStore) CreateSchedule(spec ScheduleSpec) (created bool, err error
 	defer s.mu.Unlock()
 	now := unixNanoNow()
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO schedules(id, kind, spec, target_type, next_fire_time, missed_policy, paused, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,0,?,?)
+		`INSERT INTO schedules(id, kind, spec, target_type, next_fire_time, missed_policy, paused, created_at, updated_at, input)
+		 VALUES (?,?,?,?,?,?,0,?,?,?)
 		 ON CONFLICT(id) DO NOTHING`,
-		spec.ID, spec.kind, spec.spec, spec.targetType, spec.firstFire.UnixNano(), policy, now, now)
+		spec.ID, spec.kind, spec.spec, spec.targetType, spec.firstFire.UnixNano(), policy, now, now, spec.input)
 	if err != nil {
 		return false, classifyTxErr("create schedule", err)
 	}
@@ -298,10 +325,11 @@ func (s *SQLiteStore) fireDueLocked(ctx context.Context, id, ownerID string) (fi
 		kind, spec, targetType, policy string
 		nextFire                       int64
 		paused                         int
+		input                          []byte // the schedule's stored input (NULL → nil → a nil-input run, the prior behaviour)
 	)
 	scanErr := tx.QueryRowContext(ctx,
-		`SELECT kind, spec, target_type, next_fire_time, missed_policy, paused FROM schedules WHERE id=?`, id).
-		Scan(&kind, &spec, &targetType, &nextFire, &policy, &paused)
+		`SELECT kind, spec, target_type, next_fire_time, missed_policy, paused, input FROM schedules WHERE id=?`, id).
+		Scan(&kind, &spec, &targetType, &nextFire, &policy, &paused, &input)
 	switch {
 	case errors.Is(scanErr, sql.ErrNoRows):
 		return false, nil // deleted since the scan → nothing to fire.
@@ -350,7 +378,7 @@ func (s *SQLiteStore) fireDueLocked(ctx context.Context, id, ownerID string) (fi
 	}
 	if admit && doEnqueue {
 		runID := scheduledRunID(id, firedSlot)
-		inserted, eerr := s.enqueueRunLocked(ctx, tx, runID, targetType, nil)
+		inserted, eerr := s.enqueueRunLocked(ctx, tx, runID, targetType, input)
 		if eerr != nil {
 			return false, eerr
 		}

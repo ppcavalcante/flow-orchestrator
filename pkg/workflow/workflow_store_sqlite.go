@@ -171,7 +171,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     missed_policy  TEXT NOT NULL,          -- always 'skip' (skip-to-next); reserved slot for a future catch-up policy (DEC-P100-MISSED-RUN; AUD-067 removed the WithCatchupOnce 'catchup' writer)
     paused         INTEGER NOT NULL DEFAULT 0, -- 0 = active, 1 = paused (a paused schedule never fires; SCHED-03)
     created_at     INTEGER NOT NULL,       -- unix-nanos (audit / tiebreak)
-    updated_at     INTEGER NOT NULL        -- unix-nanos of the last fire/lifecycle transition
+    updated_at     INTEGER NOT NULL,       -- unix-nanos of the last fire/lifecycle transition
+    input          BLOB                    -- JSON-object bytes seeded into each fired run (NULL = no input); copied verbatim to work_queue.input at fire (SCHED-INPUT)
 );
 -- CLAIMABLE index: the poller scans active, non-paused, due rows oldest-fire-first.
 CREATE INDEX IF NOT EXISTS idx_sched_due ON schedules(next_fire_time) WHERE paused=0;`
@@ -307,6 +308,14 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
 		return nil, fmt.Errorf("%w: parked migration: %w", ErrIO, err)
+	}
+	// SCHED-INPUT: additive nullable `input` column on schedules so a scheduled fire can carry parameters
+	// (same idempotent ADD COLUMN pattern). NULLABLE with no default → an existing schedules row backfills to
+	// NULL = "no input", which is exactly the prior behaviour (the fire enqueued a nil-input run).
+	if _, err := db.ExecContext(ctx, `ALTER TABLE schedules ADD COLUMN input BLOB`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
+		return nil, fmt.Errorf("%w: schedules input migration: %w", ErrIO, err)
 	}
 	// M16 (ph75): resolve the lease-liveness clock + TTL (defaults when unset). Lease liveness only.
 	clock := dur.clock
