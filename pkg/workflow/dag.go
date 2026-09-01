@@ -843,18 +843,6 @@ func (d *DAG) Execute(ctx context.Context, data *WorkflowData) (retErr error) {
 	return nil
 }
 
-// markSkippedFrom sweeps the levels at index startLevel and beyond in
-// topological order, assigning each not-yet-terminal node its CAUSE-AWARE
-// terminal status via the shared classifyBlockedStatus predicate — the SAME
-// classifier the launch gate uses, so the sweep and the gate cannot drift
-// (DEC-M11-STATUS-CAUSE). A node blocked by a non-coe Failed / Skipped ancestor
-// becomes Skipped; a node blocked purely by a Bypassed branch interior becomes
-// Bypassed; a bypassed node with a surviving taken ancestor becomes Skipped
-// (the diamond rule, DEC-M11-P41-DIAMOND). Because the sweep runs in level
-// order, a node settled here propagates its cause to its own dependents in later
-// levels — transitivity (DEC-CHUNK3-status, S1). A node whose dependencies all
-// resolved, or that has only a not-reached-yet (Pending/Running/Waiting)
-// ancestor, is left untouched (stays Pending) — it was simply never reached.
 // countSkipped returns the number of nodes across all levels whose final status
 // is Skipped. It is used only to annotate the parent workflow span
 // (workflow.skipped_count); Skipped nodes get no span of their own because a
@@ -897,6 +885,18 @@ func clearWaiting(data *WorkflowData) {
 	}
 }
 
+// markSkippedFrom sweeps the levels at index startLevel and beyond in
+// topological order, assigning each not-yet-terminal node its CAUSE-AWARE
+// terminal status via the shared classifyBlockedStatus predicate — the SAME
+// classifier the launch gate uses, so the sweep and the gate cannot drift
+// (DEC-M11-STATUS-CAUSE). A node blocked by a non-coe Failed / Skipped ancestor
+// becomes Skipped; a node blocked purely by a Bypassed branch interior becomes
+// Bypassed; a bypassed node with a surviving taken ancestor becomes Skipped
+// (the diamond rule, DEC-M11-P41-DIAMOND). Because the sweep runs in level
+// order, a node settled here propagates its cause to its own dependents in later
+// levels — transitivity (DEC-CHUNK3-status, S1). A node whose dependencies all
+// resolved, or that has only a not-reached-yet (Pending/Running/Waiting)
+// ancestor, is left untouched (stays Pending) — it was simply never reached.
 func markSkippedFrom(levels [][]*Node, startLevel int, data *WorkflowData) {
 	for li := startLevel; li < len(levels); li++ {
 		for _, node := range levels[li] {

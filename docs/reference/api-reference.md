@@ -96,7 +96,8 @@ Controls per-level concurrency of `DAG.Execute` (wired end-to-end as of v0.3.0):
 
 ```go
 type ExecutionConfig struct {
-    MaxConcurrency int // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency)
+    MaxConcurrency int                 // Max nodes executed concurrently per level (<=0 -> DefaultMaxConcurrency)
+    TracerProvider trace.TracerProvider // OTel provider; nil disables tracing (hot path byte-identical). See WithTracerProvider.
 }
 
 const DefaultMaxConcurrency = 16
@@ -624,7 +625,8 @@ func (s *SQLiteStore) CancelPending(workflowID string) (bool, error) // pending�
 func (s *SQLiteStore) ListPending(olderThan int64) ([]PendingItem, error) // stuck-work visibility, FIFO
 
 // A claimed item; input is the opaque Enqueue payload; Token is the M16 fencing token.
-type WorkItem struct { WorkflowID, Type string; Input []byte; Token FencingToken }
+// ParentID/ParentSignal/Depth are engine-set sub-workflow control fields (M19, never from the input BLOB).
+type WorkItem struct { WorkflowID, Type string; Input []byte; Token FencingToken; ParentID, ParentSignal string; Depth int }
 // A pending item for operator inspection (Attempts climbing = a poison item nearing dead-letter).
 type PendingItem struct { WorkflowID, Type string; EnqueuedAt int64; Attempts int }
 
@@ -818,9 +820,10 @@ func (b *WorkflowBuilder) AddWaitForCondition(name string, predicate func(*Workf
 // unique-per-logical-event identifier (the inbound analog of IdempotencyKey):
 // re-delivering the same ID is idempotent (one entry).
 type Signal struct {
-    ID      string // stable unique-per-logical-event id (host-supplied; dedupe key)
-    Name    string // the signal name a WaitForSignalNode waits on
-    Payload any    // arbitrary payload (JSON-encoded in the durable stores)
+    ID         string // stable unique-per-logical-event id (host-supplied; dedupe key)
+    Name       string // the signal name a WaitForSignalNode waits on
+    Payload    any    // arbitrary payload (JSON-encoded in the durable stores)
+    EnqueuedAt int64  // READ-path unix-nanos delivery time (TakeSignals) for stale-signal rejection; 0 if the store persists none (AUD-025)
 }
 
 // DeliverSignal durably enqueues sig to this workflow's mailbox (enqueue-only). It
@@ -1099,8 +1102,10 @@ func SubWorkflowCompletionSignal(nodeName, sigID string) Signal                 
 func SubWorkflowChildID(parentID, nodeName string) string       // "sub:" + hex(SHA-256(uint64-LE(len(parentID))||parentID||nodeName))
 func FanOutChildID(parentID, nodeName string, index int) string // the fan-out branch counterpart
 
-// Queue path structurally needs an MP *SQLiteStore + Pool + a Registry (type→DAG), injected at Execute:
-type Workflow struct{ /* DAG is sealed — see FromBuilder */ Registry *Registry; MaxSubWorkflowDepth int /* inline-path override; default 8 */ }
+// Queue path structurally needs an MP *SQLiteStore + Pool + a Registry (type→DAG). The Registry is
+// NOT a struct field — SEAL-06 unexported it; you pass *Registry as a parameter to RunNext(...) /
+// NewPool(...), never `&Workflow{Registry: reg}` (that does not compile; see ErrSubWorkflowRequiresRegistry).
+type Workflow struct{ /* DAG + registry are sealed/unexported — see FromBuilder */ MaxSubWorkflowDepth int /* inline-path override; default 8 */ }
 
 // Optional build-time cycle check — CALL ONCE at Registry assembly, BEFORE the first RunNext/Pool run.
 func (r *Registry) ValidateNoTypeCycles() error

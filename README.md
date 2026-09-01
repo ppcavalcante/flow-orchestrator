@@ -602,9 +602,14 @@ Flow Orchestrator follows [Semantic Versioning](https://semver.org/):
   partition, 8th/9th `Compensated`/`CompensationFailed` statuses; TLA+-verified.
 
 **Future (not yet shipped):**
-- **Retry-policy hardening:** capped backoff, jitter, and non-retryable classification for
-  node (and compensation) retries — deferred from M12.
-- **Exactly-once** via a same-transaction (SQLite) store, and a **query / visibility API**.
+- **Cross-process exactly-once execution** via a same-transaction (SQLite) store — the
+  single-writer / exactly-once *execution* guarantee across processes is deferred (see the
+  `lease.go` scope note). Within a process, fan-out and retry already give exactly-once
+  *persistence* (crash-resume is at-least-once execution, exactly-once persistence).
+
+_(Retry-policy hardening — capped backoff/jitter (`WithMaxDelay`/`WithJitter`) and non-retryable
+classification (`WithRetryIf`) — and the **query / visibility API** (`WorkflowQuery`:
+`ListByNodeStatus` / `ListRollingBack`) have since **shipped** in M22/M15 and are no longer future.)_
 
 **Deliberately out of scope (protecting the moat):** unstructured (van der Aalst) OR-joins,
 loops, arbitrary code-as-workflow / replay, and any mandatory distribution or server —

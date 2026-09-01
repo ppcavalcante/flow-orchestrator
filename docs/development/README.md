@@ -7,5 +7,6 @@ This section contains documentation for developers working on Flow Orchestrator,
 - [Contribution Guide](./contributing.md)
 - [Troubleshooting](./troubleshooting.md)
 - [Test Coverage Strategy](./test_coverage_strategy.md)
+- [Verification Pitfalls & Deferred Residuals](./verification-pitfalls.md)
 - [Supply Chain Security](./supply_chain_security.md)
 - [Release Process](./release-process.md)
