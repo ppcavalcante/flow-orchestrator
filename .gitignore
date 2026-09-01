@@ -51,12 +51,21 @@ playground/
 
 # TLC model-checker scratch output (timestamped run dirs under specs/)
 specs/states/
+# TLC counterexample dumps written next to the spec on a failing/interrupted run
+# (e.g. specs/WorkQueue_TTrace_1788126836.tla / .bin) — transient, never source.
+specs/*_TTrace_*.tla
+specs/*_TTrace_*.bin
 
 # Doc-sample gate temp build dirs (internal/doctest buildAndRun)
 .doctest*
 
 # Local dogfood harness (dev-only, never shipped)
 _local/
+
+# Local dev launchers (anvil-cc orchestration wrappers) — dev-only, never shipped.
+# These are the untracked launcher scripts AUD-071 flags as workspace-hygiene noise.
+/anvil-cc
+/anvil-up-ollama
 
 # Runtime store artifacts produced by RUNNING an example or a probe. JSONFileStore's
 # baseDir is a DIRECTORY named for the path the caller passes, so `go run
