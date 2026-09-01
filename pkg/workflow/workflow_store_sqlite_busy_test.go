@@ -52,12 +52,17 @@ func TestMPSave_BusyStarvation_ErrBusy(t *testing.T) {
 		`INSERT INTO leases(workflow_id, owner_id, expiry, fencing_token) VALUES ('holder','h',0,1)`)
 	require.NoError(t, err)
 
-	// Release the lock after > busy_timeout so the contending Save has already given up with BUSY.
-	// (If the Save somehow acquires the lock first, releasing here lets the test finish either way;
-	// the assertion below is what gates.)
+	// Release the holder's write lock ONLY AFTER the contending Save has returned — so the Save
+	// reliably waits out busy_timeout and gets SQLITE_BUSY, never racing the holder for the lock.
+	// A fixed-duration hold is a flake in BOTH directions: modernc's busy_timeout wall-clock varies
+	// with runner load (observed 3.5s–5s+ for a 5s timeout), so too-short a hold lets the Save
+	// acquire the lock (no ErrBusy) and too-long a hold slows every run. The channel makes the hold
+	// last exactly as long as the Save's attempt.
+	release, released := make(chan struct{}), make(chan struct{})
 	go func() {
-		time.Sleep(6 * time.Second) // > busy_timeout=5000ms
-		_ = htx.Rollback()          //nolint:errcheck // release the lock; the assertion already ran
+		<-release
+		_ = htx.Rollback() //nolint:errcheck // release the lock; the assertions already ran
+		close(released)
 	}()
 
 	// The production Save contends for the write lock the holder is sitting on. It waits out
@@ -67,15 +72,20 @@ func TestMPSave_BusyStarvation_ErrBusy(t *testing.T) {
 	start := time.Now()
 	saveErr := store.Save(d)
 	waited := time.Since(start)
+	close(release) // the Save has given up; let the holder release now
+	<-released     // and wait for the rollback to land before the Load below
 
 	require.Error(t, saveErr, "a Save contending with a held write lock past busy_timeout must error, not silently succeed")
 	require.ErrorIs(t, saveErr, ErrBusy, "SQLITE_BUSY past busy_timeout MUST classify as ErrBusy at the Save boundary (the typed error is reachable, not dead code)")
 	require.False(t, errors.Is(saveErr, ErrFencedOut), "ErrBusy (transient, retry) must be errors.Is-DISTINCT from ErrFencedOut (superseded, abort)")
-	require.GreaterOrEqual(t, waited, 4*time.Second, "the Save actually WAITED out (most of) busy_timeout before BUSY — this is the starvation tail, not an instant lock")
+	// Floor proves the Save waited out a SUBSTANTIAL fraction of busy_timeout (the starvation tail),
+	// not an instant lock failure (which returns in <50ms). Loosened from 4s: modernc's busy_timeout
+	// wall-clock is nondeterministic under load and was observed at 3.48s for a 5000ms timeout, so a
+	// 4s floor false-fails on a loaded runner; 2s still separates the tail from an instant failure by ~40x.
+	require.GreaterOrEqual(t, waited, 2*time.Second, "the Save WAITED out a substantial part of busy_timeout before BUSY — the starvation tail, not an instant lock")
 
-	// Clean abort: the failed Save wrote NOTHING (its txn never acquired the lock). After the holder
-	// releases, a fresh Load finds no 'wf' rows — no partial write leaked.
-	time.Sleep(500 * time.Millisecond) // let the holder's rollback land
+	// Clean abort: the failed Save wrote NOTHING (its txn never acquired the lock). The holder has
+	// already released (<-released above), so a fresh Load finds no 'wf' rows — no partial write leaked.
 	_, loadErr := store.Load("wf")
 	require.ErrorIs(t, loadErr, ErrNotFound, "clean abort: the busy-failed Save left NO partial 'wf' state")
 }
@@ -118,13 +128,19 @@ func TestMPClaim_BusyStarvation_ErrBusy(t *testing.T) {
 	_, err = htx.ExecContext(ctx,
 		`INSERT INTO leases(workflow_id, owner_id, expiry, fencing_token) VALUES ('holder','h',0,1)`)
 	require.NoError(t, err)
+	// Release only after the Claim has returned (same deterministic hold as the Save bite above —
+	// a fixed sleep flakes if the busy wait ever outlasts it under load).
+	release, released := make(chan struct{}), make(chan struct{})
 	go func() {
-		time.Sleep(6 * time.Second)
+		<-release
 		_ = htx.Rollback() //nolint:errcheck // release after the assertion window
+		close(released)
 	}()
 
 	// Claim contends for the held write lock, waits out busy_timeout → SQLITE_BUSY → ErrBusy.
 	_, claimErr := store.Claim(context.Background(), "wf", "owner")
+	close(release)
+	<-released
 	require.Error(t, claimErr, "a Claim contending with a held write lock past busy_timeout must error")
 	require.ErrorIs(t, claimErr, ErrBusy, "ph77-F1: a contended Claim past busy_timeout classifies as ErrBusy (retryable), NOT opaque ErrIO")
 	require.False(t, errors.Is(claimErr, ErrFencedOut), "a busy Claim is transient (retry), distinct from ErrFencedOut (abort)")
