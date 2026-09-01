@@ -27,6 +27,13 @@ exporter, and endpoint.
 > the dispatch layer, not here — see the
 > [Dispatch guide → Operator observability](dispatch.md#operator-observability-added-m18).
 
+> **⚠️ Read metrics only after the run (read-after-run contract).** On the enabled path,
+> `GetMetrics()` reads stats written during the drive without synchronization. Reading them
+> concurrently with an in-flight `Execute` on the **same** `*Workflow` is a **data race** —
+> call `GetMetrics()` only once `Execute` has returned. `go test` does not run `-race` by
+> default, so your own suite will not surface this. The disabled default is race-free by
+> construction.
+
 ---
 
 ## The API-only contract

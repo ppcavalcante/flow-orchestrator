@@ -94,6 +94,14 @@ type Workflow struct {
 	// run via GetMetrics() and exportable through metrics.OTelBridge. Set this field
 	// DIRECTLY on the *Workflow before Execute — there is no builder setter (AUD-042:
 	// an earlier comment named a WithMetrics builder method that does not exist).
+	//
+	// CONCURRENCY (read-after-run): on the ENABLED path GetMetrics() reads stats
+	// written during the drive WITHOUT synchronization, so reading metrics
+	// concurrently with an in-flight Execute on the SAME *Workflow is a data race.
+	// The intended contract is read-after-run: call GetMetrics() only once Execute
+	// has returned. Note `go test` does not run `-race` by default, so a consumer's
+	// own suite will not surface this. The nil default is race-free by construction
+	// (the field is never written).
 	MetricsConfig *metrics.Config
 
 	// metrics retains the last run's collector so a caller reaching only the
