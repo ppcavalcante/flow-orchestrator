@@ -70,8 +70,9 @@ because *this* commit closes `CUR-008`:
 public signature, but no repository-wide signature-validation *gate* was built; the gate is an
 accepted-alpha residual.
 
-The residual `Partial`/`Open` set is entirely accepted-alpha debt (enumerated below), **except `AUD-043`**
-(the pending pre-1.0 USER decision). **Zero release blockers remain.**
+The residual `Partial`/`Open` set is **entirely accepted-alpha debt** (enumerated below) — including
+`AUD-043`, ratified 2026-09-01 (accept the `pkg/workflow` path, revisit at a 1.0 freeze).
+**Zero release blockers remain.**
 
 ---
 
@@ -100,7 +101,8 @@ since shipped `v0.22.0-alpha` … `v0.22.4-alpha`):
 Not release blockers; carried openly at alpha per the 2026-08-11 register:
 
 - **API / architecture / process:** `AUD-042` (no small `Runner` facade), `AUD-043` (`pkg/workflow`
-  import-path layout — **the one remaining pre-1.0 USER decision**, tracked separately below),
+  import-path layout — **USER decision 2026-09-01: accept and revisit at a 1.0 freeze**; the sole
+  consumer is local/no-remote so a later migration is a lockstep change, not a public break),
   `AUD-045` (load-dependent wall-clock test is opt-in), `AUD-066` (whole-level execution barriers),
   `AUD-071` (workspace hygiene — untracked launcher scripts now gitignored).
 - **Structural residuals:** `AUD-010` (structural `DefinitionDigest` omits action-body semantics;
@@ -118,9 +120,11 @@ Not release blockers; carried openly at alpha per the 2026-08-11 register:
 
 ## Still open at HEAD
 
-- `AUD-043` — the `pkg/workflow` import-path layout. The **last pre-1.0 USER-owned decision**; a
-  module-path change is a breaking change for the real external consumer (`openai-workflow`), so it
-  is being decided deliberately rather than executed silently. Tracked in the M24 backlog.
+- `AUD-043` — the `pkg/workflow` import-path layout. **Decided 2026-09-01: accepted; revisit at a 1.0
+  freeze.** The options were weighed (rename to `github.com/ppcavalcante/flow` / bare-module-root /
+  additive re-export / accept); a module-path change buys a cleaner identity but is not worth the
+  churn pre-1.0, and the sole consumer (`openai-workflow`) is local with no remote, so migrating later
+  is a lockstep change rather than a public break. No code change.
 - The other 13 non-fixed priors (5 `Partial` + 8 remaining `Open`) are the accepted-alpha items
   enumerated above; none is a release blocker.
 
