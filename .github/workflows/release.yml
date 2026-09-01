@@ -36,6 +36,17 @@ jobs:
       - name: Generate FlatBuffers code
         run: make generate-fb
 
+      # Release identity preflight (CUR-007 / AUD-009). Binds the pushed tag to
+      # source identity BEFORE anything is published: tag == pkg/workflow.Version,
+      # a RELEASED changelog section for that version (an [Unreleased] entry does
+      # NOT count), and HEAD descends from the previous published tag (canonical
+      # lineage). RUN_GATES=1 also runs the cheap gates (build, vet, gofmt,
+      # FlatBuffers freshness) at this exact candidate SHA. A mismatch fails the
+      # job here, so no GitHub Release / SBOM / provenance is ever created for a
+      # tag whose version, changelog, or lineage disagrees with the source.
+      - name: Release identity preflight
+        run: RUN_GATES=1 scripts/release/preflight.sh "${{ github.ref_name }}"
+
       - name: Run Tests
         run: go test -v ./...
 
