@@ -69,7 +69,29 @@ func (a *parkedSubWorkflowAction) Execute(ctx context.Context, parentData *Workf
 	child, err := store.Load(childID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return ErrSuspended // child not spawned yet → park, re-check on the next wake
+			// BUG-2 / C15: a QUEUE child can terminalize WITHOUT ever writing a journal — a constructor
+			// or seed failure at the worker leaves a terminal `failed`/`cancelled` work_queue row and no
+			// journal (nothing ran). Consult the queue authority BEFORE treating a missing journal as
+			// unfinished work, else the parent parks forever on a child that is already terminal. A
+			// MANUAL/non-queue child has no work_queue row (exists=false) → falls through to the
+			// journal-based park below, byte-unchanged.
+			if sq, ok := store.(*SQLiteStore); ok {
+				if wqState, exists, qerr := sq.queueTerminalState(childID); qerr == nil && exists {
+					switch wqState {
+					case wqFailed, wqCancelled:
+						// Terminal non-success with no journal → fail the parent node (INV-01). The
+						// wqState IS the disposition — a construction failure never wrote a journal to
+						// re-derive a verdict from.
+						return fmt.Errorf("parked sub-workflow %q: child terminal %s (queue authority, no journal)", a.nodeName, wqState)
+					case wqDone:
+						// A `done` row REQUIRES its journal (+ any declared result). A done-without-journal
+						// is an integrity error — never a silent success and never an indefinite park.
+						return fmt.Errorf("%w: parked sub-workflow %q: child %q is queue-done but has no journal", ErrCorruptData, a.nodeName, childID)
+					}
+					// pending|claimed → the queue child is not terminal yet → fall through to the park.
+				}
+			}
+			return ErrSuspended // child not spawned yet / still running → park, re-check on the next wake
 		}
 		return fmt.Errorf("parked sub-workflow %q: load child %q: %w", a.nodeName, childID, err)
 	}
