@@ -6,6 +6,21 @@ the full §14.A acceptance set (A1–A10) landed on `main`, TDD, additive and ba
 **A** receipt (E-01 completion); the two additional engine requests are delivered separately as **B1** (public
 submission inspection/discovery) and **B2** (targeted host-local admission), each with its own receipt.
 
+> **Rev 4 — §15 recheck response.** The full-delivery recheck of `b4fba05` (§15) kept both defects closed and
+> confirmed A1–A8 runtime behavior, but asked us to correct several witnesses that STAGED intermediate state
+> rather than driving the real transition, and retracted one false claim. All addressed at `2246b97`:
+> - **A2** — the earlier "not constructible" claim was **wrong** and is **retracted**: a valid JSON object with
+>   a `json.Number("1e1000")` value is accepted by the constructor but rejected by float64 `seedInput`, so the
+>   real "constructor accepts, seed rejects, parent converges on failure" case IS constructible and is now a
+>   witness (`..._constructor_accepts_object_but_seed_rejects_float64_overflow`).
+> - **A3** — now sets a **genuinely different worker default** and proves the durable input mode wins over it.
+> - **A6** — now an **actual worker losing its lease during `RunNext`** (a construction barrier + a real reclaim
+>   through `RunNext`), whose stale checkpoint is fenced (`ErrFencedOut`); no manual `ClaimNext`/`build`/`Execute`.
+> - **A8** — a **real ctx drain** (cancel mid-`RunNext` → left claimed → reclaim resumes) and the **real bounded
+>   infra-retry state machine** (exactly `maxAttempts` drives, then dead-letter), not a staged journal.
+> - **A9** — the different-type refusal is now in the dispatch guide and the CHANGELOG (below), and the
+>   legacy-replay witness is labeled LEGACY-PATH (§3). This is same-model self-review, not independent certification.
+>
 > **Rev 3 — §14 E-01 completion.** Following the §13 recheck (both reproduced defects CLOSED on `53cfb98`),
 > the remaining §9 acceptance obligations now have DIRECT new-path witnesses:
 > - **A1–A8** — eight new-path acceptance witnesses (`dispatch_input_aware_acceptance_test.go`, commit
@@ -40,10 +55,11 @@ submission inspection/discovery) and **B2** (targeted host-local admission), eac
 
 ## 1. Commit / version / public API
 
-- **Final engine commit (E-01 complete):** `bfa1a92` on `main` (feature + fixes `53cfb98`; A1–A8 witnesses
-  `bfa1a92`; built on the handoff's inspected baseline `defd443`).
-- **Canonical module version:** `v0.22.4-alpha.0.20260907163418-bfa1a9258c38`.
-- **Consume before the next tag:** `go get github.com/ppcavalcante/flow-orchestrator@bfa1a92`
+- **Final engine commit (E-01 complete, after the §15 recheck):** `2246b97` on `main` (feature + fixes
+  `53cfb98`; A1–A8 witnesses `bfa1a92`; §15 R4 real-transition witness corrections `2246b97`; built on the
+  handoff's inspected baseline `defd443`).
+- **Canonical module version:** `v0.22.4-alpha.0.20260907180132-2246b979a37c`.
+- **Consume before the next tag:** `go get github.com/ppcavalcante/flow-orchestrator@2246b97`
   (or wait for the `v0.23.0-alpha` tag — this ships in it).
 - **Final public API (matches the handoff's proposed shape):**
 
@@ -93,7 +109,7 @@ its existing green coverage. Every W1–W13 now has a **new-path** witness.
 | W2 input-selected fan-out width | at-bound runs every branch; over-bound fails loud (`ErrFanOutMaxWidth`), never truncates | `TestInputAware_W2_FanOutWidthBound` | NEW-PATH |
 | W3 payload/seed identity + **nested decode + node reads seed** | byte-identity + mutation protection + durable-bytes unchanged (W3); constructor decodes nested JSON-string config and a **node reads the seeded >2^53 int after reload** (A1) | `TestInputAware_W3_PayloadSeedIdentity`, `TestInputAware_A1_W3_NestedDecodeNodeReadsSeed` | NEW-PATH |
 | W4 legacy + mixed registry | legacy unchanged; cross-method dup refused; unregistered stays pending | `TestInputAware_W4_LegacyAndMixedRegistry` | NEW-PATH |
-| W5 invalid/absent input + **early-fail/integrity** | constructor error (incl. wrapping `ErrIO`/`ErrBusy`) dead-lettered not requeued; nil DAG; malformed seed; absent-ok (W5). A2: input-aware child fails at worker → wake + parent resolves failure, zero child actions; done-without-journal → `ErrCorruptData` | `TestInputAware_W5_InvalidAndAbsentInput`, `TestInputAware_A2_W5_EarlyFailureAndIntegrity`, `TestQueueChild_*WithoutJournal*`, `_WorkerFactoryFailure_WakesParent` | NEW-PATH |
+| W5 invalid/absent input + **early-fail/integrity** | constructor error (incl. wrapping `ErrIO`/`ErrBusy`) dead-lettered not requeued; nil DAG; malformed seed; absent-ok (W5). A2: input-aware child fails at worker → wake + parent resolves failure, zero child actions; **the real "constructor accepts object, float64 seed rejects" case → durable failure + parent convergence**; done-without-journal → `ErrCorruptData` | `TestInputAware_W5_InvalidAndAbsentInput`, `TestInputAware_A2_W5_EarlyFailureAndIntegrity` (3 sub-cases), `TestQueueChild_*WithoutJournal*`, `_WorkerFactoryFailure_WakesParent` | NEW-PATH |
 | W6 checkpoint reclaim + **settings/progressed-KV** | reclaim rebuilds from durable input, completed work not re-invoked, progressed journal survives (W6); A3 adds worker-defaults-differ + progressed **data KV** survives (not reseeded) + config honored on rebuild | `TestInputAware_W6_ReclaimRebuildsFromDurableInput`, `TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim` | NEW-PATH |
 | W7 completion reconciliation | complete journal reclaimed **through `RegisterWithInput`** → re-execute is a no-op (counters flat), queue reaches done | `TestInputAware_A4_W7_CompletionReconciliation` | NEW-PATH (was shared in rev 2) |
 | W8 construction isolation + **cap/config isolation** | a second claim progresses while a constructor is held at a barrier, `Registry.Types` called inside (W8); A5 adds two store handles, per-type cap 1, config isolation with no leakage, capped candidate stays pending | `TestInputAware_W8_ConstructionHoldsNoLockOrTxn`, `TestInputAware_A5_W8_ConcurrentConfigIsolationAndCap` | NEW-PATH |
@@ -102,7 +118,7 @@ its existing green coverage. Every W1–W13 now has a **new-path** witness.
 | W11 control-plane separation | forged parent/signal/depth payload keys cannot change engine-derived identity/depth | `TestInputAware_W11_ControlPlaneSeparation` | NEW-PATH |
 | W12 static-inspection honesty | legacy cycle still detected; input-aware registry gets the unsupported-inspection refusal without invoking an invented-input factory | `TestInputAware_W12_CycleHelperRefusesInputAware` | NEW-PATH |
 | W13 cancel/drain/retry | A8: operator cancel before any action (constructor not reached); drain leaves committed progress claimed then reclaim resumes; constructor error wrapping `ErrBusy` stays terminal, not requeued | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` | NEW-PATH; genuine bare-infra retry budget = SHARED (`disposeExecErr` / `MarkForRetry` suites, registration-form-independent) |
-| A9 legacy replay vs different-type refusal | same-type legacy replay parks unchanged; different-type reuse of the same child ID refused | `TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` | NEW-PATH |
+| A9 legacy replay vs different-type refusal | same-type legacy replay parks unchanged; different-type reuse of the same child ID refused | `TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` | LEGACY-PATH (a legacy-registration behavior test, not the input-aware path) |
 
 W1's negative concurrency-ceiling assertion uses a bounded 150ms observation window — it is not a timing-free
 proof, only a strong bound; stated per the handoff's request.
@@ -135,46 +151,46 @@ proof, only a strong bound; stated per the handoff's request.
 
 ## 6. Gate (A10 — final reproducible checks)
 
-Commands run against the final subject `bfa1a92`:
+Commands run against the final subject `2246b97`:
 
 ```text
-GOTOOLCHAIN=local go test ./pkg/workflow/ -run '^(TestInputAware_|TestQueueChild_|TestQueuedChild_|TestRunNext_ReconciliationSeam_)' -race -count=1 -timeout=180s
-  → ok  github.com/ppcavalcante/flow-orchestrator/pkg/workflow  11.090s   (no race report)
-GOTOOLCHAIN=local go vet ./pkg/workflow/                → clean
-golangci-lint run pkg/workflow/                         → 0 issues on the new file
+GOTOOLCHAIN=local go test ./pkg/workflow/ -run '^(TestInputAware_|TestB2Security_|TestHostLocal_|TestERead_|TestQueueChild_|TestQueuedChild_|TestRunNext|TestClaimNext|TestPool|TestCancel|TestCaps|TestAdversarial)' -race -count=1 -timeout=600s
+  → ok  github.com/ppcavalcante/flow-orchestrator/pkg/workflow  36.287s   (no race report)
+GOTOOLCHAIN=local go test ./pkg/workflow/ -count=1 -timeout=1800s          → ok (full suite; needs ≥900s — the suite exceeds 600s)
+GOTOOLCHAIN=local go vet ./pkg/workflow/                                    → clean
+golangci-lint run pkg/workflow/                                            → 0 issues on the new/changed files
+GOTOOLCHAIN=local go test ./internal/doctest/                              → ok (fenced-Go + live-corpus doc guards)
 ```
 
-- Candidate `b874471` earlier cleared the full producer CI-amd64 gate green (run `34133736256`: `-race 30m`,
-  coverage, govulncheck, formal models, lint, fuzz).
-- The A1–A8 commit `bfa1a92` is test-only over unchanged production code; its authoritative amd64 gate runs on
-  the push. **Bind any CI receipt to its exact SHA** — do not attribute a doc-only successor's run to a code
-  commit. (The earlier `0f8ae60` Coverage re-run passed; its first failure was a pre-existing unrelated flake,
-  `TestCancel_WinsOverGenuineFailure`, tracked separately — not part of E-01.)
-- Assurance level: **same-model fresh-context self-review**, not independent certification.
+- The `2246b97` change is the R4 witness corrections (real transitions) over the E-01 production code; the
+  authoritative amd64 gate runs on the push. **Bind any CI receipt to its exact SHA** — do not attribute a
+  doc-only successor's run to a code commit. (The earlier `0f8ae60` Coverage re-run passed; its first failure was
+  a pre-existing unrelated flake, `TestCancel_WinsOverGenuineFailure`, tracked separately — not part of E-01.)
+- Assurance level: **same-model fresh-context self-review**, not independent certification (any earlier
+  "independent-review" phrasing in this receipt refers to the consumer's own same-model recheck, not third-party
+  certification).
 
 ## 7. A1–A10 dispositions
 
 | Item | Disposition | Evidence |
 |---|---|---|
 | A1 (W3 end-to-end decode + node reads seed) | **DONE** | `TestInputAware_A1_W3_NestedDecodeNodeReadsSeed` |
-| A2 (W5 early failure + missing-data integrity) | **DONE**, with one structural note below | `TestInputAware_A2_W5_EarlyFailureAndIntegrity` (+ `TestQueueChild_*`) |
-| A3 (W6 settings + progressed KV survive reclaim) | **DONE** | `TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim` |
+| A2 (W5 early failure + missing-data integrity) | **DONE** — §15 R4: added the real float64-seed-reject case; impossibility claim retracted (below) | `TestInputAware_A2_W5_EarlyFailureAndIntegrity` (3 sub-cases) (+ `TestQueueChild_*`) |
+| A3 (W6 settings + progressed KV survive reclaim) | **DONE** — §15 R4: now sets a genuinely different worker default that the durable input overrides | `TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim` |
 | A4 (W7 input-aware completion reconciliation) | **DONE** | `TestInputAware_A4_W7_CompletionReconciliation` |
 | A5 (W8 concurrent config isolation + capped admission) | **DONE** | `TestInputAware_A5_W8_ConcurrentConfigIsolationAndCap` |
-| A6 (W9 lease loss on the new path) | **DONE** | `TestInputAware_A6_W9_LeaseLossOnNewPath` |
+| A6 (W9 lease loss on the new path) | **DONE** — §15 R4: an actual worker losing its lease during `RunNext` (barrier + real reclaim); the stale checkpoint is fenced (`ErrFencedOut`) | `TestInputAware_A6_W9_LeaseLossOnNewPath` |
 | A7 (W10 the input-aware child parks/resumes) | **DONE** | `TestInputAware_A7_W10_InputAwareChildParksResumes` |
-| A8 (W13 cancel/drain/bounded-retry) | **DONE** (bare-infra retry budget cited to shared coverage) | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` |
-| A9 (declare the compatibility broadening) | **DONE** | this receipt §2 + `CHANGELOG.md` + `docs/guides/dispatch.md`; witness `TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` |
-| A10 (final mapping + commands + version) | **DONE** | §3 mapping, §6 commands, §1 version `v0.22.4-alpha.0.20260907163418-bfa1a9258c38` |
+| A8 (W13 cancel/drain/bounded-retry) | **DONE** — §15 R4: real ctx drain + the real bounded infra-retry state machine (exactly `maxAttempts` drives) | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` (4 sub-cases) |
+| A9 (declare the compatibility broadening) | **DONE** — now in the dispatch guide (`## Input-aware factories`) + `CHANGELOG.md` **Compatibility notes**, not only this receipt; witness labeled LEGACY-PATH | witness `TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` |
+| A10 (final mapping + commands + version) | **DONE** | §3 mapping, §6 commands, §1 version `v0.22.4-alpha.0.20260907180132-2246b979a37c` |
 
-**A2 — the one structural limit (precise reason, not a waiver).** The exact single-child combination
-"input-aware queued child whose *constructor accepts* the payload but whose *`seedInput` rejects* it, **and**
-whose parent then converges on the child's failed queue outcome" is **not constructible**, for a structural
-reason: `seedInput` rejects only a **non-object** JSON payload; a parent declares its child input as a JSON
-**object** (`WithInput(map[string]any)`); and an input-aware child **enforces durable == declared input**, so a
-parent can never present the non-object payload that a directly-enqueued seed-rejecting child would carry — the
-re-drive would refuse on the input-conflict guard, not converge on the child's failure. The requirement is
-therefore split across two witnesses that together cover its intent: the **seed-rejection** on the input-aware
-path is proven at dispatch level by `TestInputAware_W5_InvalidAndAbsentInput` (`accept-any` constructor + a
-`[1,2,3]` seed → terminal `failed`, no action, not retried); the **early-failure → parent-convergence** is proven
-by `TestInputAware_A2_..._constructor_fails_at_worker_parent_resolves_failure`. No row silently became optional.
+**A2 — retraction of the earlier "not constructible" claim (§15 R4).** An earlier revision wrongly argued this
+combination was structurally impossible on the reasoning that `seedInput` rejects only a *non-object* payload.
+That is wrong: a valid JSON **object** can still fail float64 seeding. `WithInput(map[string]any{"huge":
+json.Number("1e1000")})` marshals to a valid object the input-aware constructor accepts (it decodes into a struct
+that ignores the overflowing key), but the worker's `seedInput` — which unmarshals into
+`map[string]interface{}` (float64) — rejects `1e1000`. The witness
+`TestInputAware_A2_..._constructor_accepts_object_but_seed_rejects_float64_overflow` drives exactly that: zero
+child actions, no child journal, durable terminal failure, completion notification, and the parent converging on
+failure. The impossibility claim is **retracted**; no row is optional.

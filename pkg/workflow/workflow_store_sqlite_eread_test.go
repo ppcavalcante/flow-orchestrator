@@ -229,6 +229,50 @@ func TestERead_ListSubmissions_ConcurrentChangeSemantics(t *testing.T) {
 	require.NotContains(t, got, "r2")
 }
 
+// B1 (§15 R3) — a filtered continuation is a finite per-page SWEEP, not a lossless change feed: a row whose
+// filter membership changes BEHIND the cursor is not caught by continuing the sweep, but a FRESH sweep finds it.
+func TestERead_ListSubmissions_FilterMembershipChangeBehindCursor(t *testing.T) {
+	s := mkQueueStore(t)
+	// Ordered a<b<c; b and c cancelled, a still pending.
+	for _, id := range []string{"a", "b", "c"} {
+		_, err := s.Enqueue(id, "t", []byte(`{}`))
+		require.NoError(t, err)
+	}
+	_, err := s.CancelPending("b")
+	require.NoError(t, err)
+	_, err = s.CancelPending("c")
+	require.NoError(t, err)
+
+	// A cancelled-only page of size 1 returns b (a is pending → excluded) and a cursor.
+	p1, err := s.ListSubmissions([]string{wqCancelled}, 1, nil)
+	require.NoError(t, err)
+	require.Len(t, p1.Items, 1)
+	require.Equal(t, "b", p1.Items[0].WorkflowID)
+	require.NotNil(t, p1.Next)
+
+	// Now cancel `a` (which is BEHIND the cursor position b in key order) through the public API.
+	_, err = s.CancelPending("a")
+	require.NoError(t, err)
+
+	// Continuation returns c, NOT the now-eligible a (its position is behind the cursor).
+	p2, err := s.ListSubmissions([]string{wqCancelled}, 10, p1.Next)
+	require.NoError(t, err)
+	ids := make([]string, len(p2.Items))
+	for i, it := range p2.Items {
+		ids[i] = it.WorkflowID
+	}
+	require.Equal(t, []string{"c"}, ids, "a membership change behind the cursor is NOT caught by continuation")
+
+	// A FRESH cancelled-only sweep returns all three — the documented way to achieve completeness.
+	fresh, err := s.ListSubmissions([]string{wqCancelled}, 10, nil)
+	require.NoError(t, err)
+	fids := make([]string, len(fresh.Items))
+	for i, it := range fresh.Items {
+		fids[i] = it.WorkflowID
+	}
+	require.Equal(t, []string{"a", "b", "c"}, fids, "a fresh sweep discovers all now-matching rows")
+}
+
 // B1 — the limit is clamped so a call can never be an unbounded dump; a 0/negative limit uses the default.
 func TestERead_ListSubmissions_LimitBounds(t *testing.T) {
 	s := mkQueueStore(t)

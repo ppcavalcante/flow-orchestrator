@@ -87,6 +87,15 @@ authoritative — a parent re-drive that declares a conflicting input is refused
 reinterpreted. Control-plane fields (parent address, completion signal, nesting depth) stay
 engine-set trusted columns; similarly-named payload keys cannot change them.
 
+> **Compatibility change — different-type reuse of a queued child ID (declared).** A parent re-drive
+> that tries to reuse an existing deterministic child ID with a **different registered type** now
+> refuses with `ErrValidation`, **including legacy-only (zero-argument) registrations**. Ordinary
+> same-type legacy replay is unchanged and fully supported; input-conflict enforcement
+> remains input-aware-specific. This **broadens** the original compatibility scope: it is *not*
+> unchanged behavior for different-type reuse of the same child ID. The change is a durable-type
+> integrity guard (a child ID must not silently become a different type); it never weakens to preserve
+> unsafe reuse.
+
 > **`ValidateNoTypeCycles` and input-aware types.** The opt-in static cycle check cannot inspect an
 > input-dependent factory (its edges depend on the per-run input), so a registry containing any
 > input-aware type returns an explicit `ErrValidation` from that helper — omit the optional check;
@@ -363,9 +372,75 @@ bridge, _ := workflow.NewOTelDispatchBridge(store, dm, meterProvider)
 defer bridge.Shutdown(ctx)
 ```
 
+## Targeted host-local dispatch (added M25)
+
+Sometimes a specific run must execute on a **designated host** — its own runner, fixtures, output
+paths and timeout — rather than being picked up by any generic worker. Bind a run to a host at
+**submit** time and drive it from that host:
+
+- `EnqueueForHost(id, type, input, host)` writes the run with its `owner_host` **binding set
+  atomically** on the pending row. There is no theft window: a generic `ClaimNext`/`RunNext`/`Pool`
+  will **never** claim a host-bound row (the generic scan excludes `owner_host IS NOT NULL`).
+- `RunNextForHost(ctx, store, reg, ownerID, host)` drives the host's **oldest** eligible bound run
+  (host-scoped FIFO); `RunSpecificForHost(ctx, store, reg, ownerID, host, workflowID)` drives one
+  **specifically requested** run and nothing else — it **fails closed** (`ran=false`, no fallback to
+  other work) when the requested run is absent, terminal, bound to a different host, claimed-live, or
+  over a shared cap. `ClaimSpecificForHost` is the claim-only primitive.
+- Host-bound runs use the engine's normal **shared caps**, token-bound execution/checkpoints,
+  cancellation, bounded retries and durable recovery — no cap bypass, stale-owner writes fenced.
+
+**Ownership and recovery contract (read before relying on it):**
+
+- **Binding is at enqueue; capped *admission* is at claim.** `EnqueueForHost` creates a *pending*
+  host-bound row; whether it may *run* is still gated by the shared cap at claim time. A run at cap
+  stays pending (backpressure).
+- **`host` is a caller-supplied routing identity, not an authenticated OS host.** Stable, unique host
+  identities and trusted embedders are required; the engine does not verify host identity.
+- **A duplicate `EnqueueForHost` returns `(false, nil)`** — a detectable no-op that does **not** change
+  the existing row's host/type/input/state. It is not a rebind. Inspect the durable binding with
+  `InspectSubmission(id).OwnerHost` to fail closed on identity before driving.
+- **Recovery is host-scoped.** A lapsed host-bound run is reclaimable **only by the same host** (its
+  `owner_host` identity persists), so a dead host's work is never silently executed elsewhere. To hand
+  work off a permanently-dead host, an operator re-submits or cancels it through the ordinary
+  lifecycle — the engine does **not** migrate ownership, and "resubmit on another host" is a *new* run
+  identity, not a rebind of the old one.
+- **Cancellation** of a *pending* host-bound row terminalizes it (`CancelPending`); `CancelRunning` on
+  a *claimed* row records intent — the owner or an eligible same-host reclaimer still completes the
+  lifecycle. Cancel does not instantly drain a permanently-unavailable host.
+- **Scope.** Binding a root run does **not** propagate `owner_host` to its queued sub-workflow children
+  or schedule-fired rows (those existing enqueue paths are unbound); route those explicitly if needed.
+- **Legacy direct-drive bypass (pre-existing).** The legacy direct `Claim`/`WithMultiProcessLocker(...)`
+  `.Execute` path is outside the host-bound queue/cap protocol; application cutover must not use it as a
+  workaround for host binding.
+
+> **Mixed-version rollout precondition (required).** The generic `ClaimNext` predicate that excludes
+> host-bound rows exists only in M25+ engines. An **older binary** opening the same database does **not**
+> know `owner_host` and will run a host-bound row as ordinary generic work. Therefore: **stop/drain and
+> upgrade every participating engine claimer to M25+ before enabling host-bound submissions**, and do
+> **not** dispatch (or roll back to) an older binary against a database with active host-bound work
+> unless you have a demonstrated safe procedure. Old-database *readability* by the new engine is not the
+> same as safe mixed-version *dispatch*.
+
+## Inspecting and discovering submissions (added M25)
+
+Read-only recovery/inspection over the durable queue row, independent of any journal:
+
+- `InspectSubmission(id)` returns the authoritative `QueuedSubmission` — original **type**, exact
+  **input**, lifecycle state, attempts, control-plane fields and `OwnerHost` — **by ID**, even for a
+  terminal record that never obtained a journal (a constructor/seed failure or a cancellation before any
+  action). A missing id is `ErrNotFound`, **distinguishable** from a storage failure
+  (`ErrBusy`/`ErrIO`/`ErrCorruptData`).
+- `ListSubmissions(states, limit, after)` is a **bounded, cursor-resumable** sweep over the immutable
+  `(enqueued_at, workflow_id)` key that includes terminal queue-only rows. It is a **finite per-page
+  sweep, not a lossless change feed**: a fixed forward cursor never skips or duplicates a row that stays
+  in the filter, but a row whose **filter membership changes behind the cursor** is not caught by
+  continuing that sweep — run a **fresh sweep**, or track ids and re-`InspectSubmission` them, where
+  concurrent completeness matters. Do not log raw submission `Input` (it is opaque caller payload).
+
 ## Requirements
 
 - Dispatch requires a **`WithMultiProcess()`** SQLite store — `Enqueue`/`ClaimNext`/the transitions
   all reject a single-process store with `ErrValidation`.
 - The `work_queue` table is **additive** — shipped tables and the FlatBuffers format are untouched;
-  dispatch engages only when you use it.
+  dispatch engages only when you use it. The M25 `owner_host` column is likewise additive (nullable;
+  `NULL` = generic), added with the established idempotent `ALTER TABLE` migration.

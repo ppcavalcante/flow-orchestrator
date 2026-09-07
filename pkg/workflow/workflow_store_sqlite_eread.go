@@ -119,16 +119,20 @@ type SubmissionPage struct {
 // continues a prior page (nil = from the beginning).
 //
 // ORDERING + CURSOR: rows are ordered by the immutable keyset (enqueued_at, workflow_id) and paged by
-// `(enqueued_at, workflow_id) > (after…)`. Because the ordering key never mutates, a continuation NEVER skips
-// or duplicates a row across pages.
+// `(enqueued_at, workflow_id) > (after…)`. The ordering key never mutates and work_queue rows are never deleted.
 //
-// CONCURRENT-CHANGE SEMANTICS (the honest contract): each page is a point-in-time read of the rows that exist
-// when that page is fetched — it is NOT a repeatable-read snapshot across pages. Concretely, between two pages:
+// SCOPE — a FINITE PER-PAGE SWEEP, NOT a lossless change feed (the honest contract; §15 R3). Each page is a
+// point-in-time read of the rows that exist and match `states` WHEN THAT PAGE IS FETCHED. Within one forward
+// sweep a row that was already BEHIND the cursor is not revisited, so:
 //   - a row APPENDED after the cursor position (a new Enqueue) IS observed on continuation (keyset advance);
-//   - a row whose STATE changed (e.g. pending→done) shows its state as of the instant its page is read — so a
-//     state filter can legitimately include a row on one run and exclude it on a re-run;
-//   - no row is ever skipped or seen twice for a fixed cursor sequence, because enqueued_at + workflow_id are
-//     immutable and work_queue rows are never deleted (terminal rows persist).
+//   - but a row whose FILTER MEMBERSHIP changes BEHIND the cursor is NOT caught by continuing that sweep — e.g.
+//     with a `cancelled`-only filter, if a row earlier in the key order transitions pending→cancelled AFTER the
+//     cursor has passed its position, this sweep will not return it (a later insertion ordered behind the cursor
+//     is likewise not caught). This is expected filtered-keyset behavior, not a cross-page snapshot guarantee.
+// For completeness where membership changes concurrently, run a FRESH sweep (a new cursor from the beginning),
+// or track ids and re-InspectSubmission them, rather than treating a filtered continuation as an event stream.
+// A single forward sweep with a FIXED cursor sequence never skips or duplicates a row that stays in the filter,
+// because the key is immutable and rows are never deleted.
 //
 // A caller needing a mutually-consistent multi-page view should quiesce writes or snapshot externally; this
 // method deliberately trades that for O(1) memory and unbounded-dataset resumability.

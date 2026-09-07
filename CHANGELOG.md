@@ -42,16 +42,21 @@ must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a
   `(enqueued_at, workflow_id)`, includes terminal queue-only rows, and documents its point-in-time-per-page
   concurrent-change semantics — never a silent `ListPending` substitute or unbounded dump. Additive; no
   schema/behavior change. (§14.B1 — requested by a downstream consumer.)
-- **Targeted host-local dispatch — `SQLiteStore.EnqueueForHost` + `ClaimNextForHost` + `RunNextForHost`** — a
-  designated-host binding so a specific run executes on **its** host, not a generic worker. `EnqueueForHost`
-  stamps the run's `owner_host` **atomically** with admission (no theft window); the generic `ClaimNext` now
-  excludes host-bound rows (`owner_host IS NULL` — matches every pre-existing row, so unchanged), and
-  `ClaimNextForHost(host)` claims/reclaims **only** that host's bound rows, so the host drives its own work,
-  substitutes no other queued work, and a dead host's work is never silently run elsewhere (reclaim is
-  host-scoped; the durable identity persists until the same host returns). Shared caps, token-bound
-  execution/checkpoints, cancellation, bounded retries and durable recovery are all reused unchanged (no cap
-  bypass; stale-owner writes fenced). Backed by an additive nullable `work_queue.owner_host` column
-  (idempotent `ALTER`; `NULL` = generic). (§14.B2 — requested by a downstream consumer.)
+- **Targeted host-local dispatch — `SQLiteStore.EnqueueForHost` + `ClaimNextForHost` + `RunNextForHost`, plus
+  by-workflow-ID `ClaimSpecificForHost` + `RunSpecificForHost`** — a designated-host binding so a *specific*
+  run executes on **its** host, not a generic worker. `EnqueueForHost` stamps the run's `owner_host`
+  **atomically** at enqueue (no theft window); the generic `ClaimNext` now excludes host-bound rows
+  (`owner_host IS NULL` — matches every pre-existing row, so unchanged); `ClaimNextForHost(host)` claims the
+  host's oldest bound run (host-scoped FIFO); and `ClaimSpecificForHost`/`RunSpecificForHost(...workflowID)`
+  drive one **specifically requested** run and **fail closed** (no fallback to other work) when it is absent,
+  terminal, bound to a different host, claimed-live, or over a shared cap. A dead host's work is never silently
+  run elsewhere (reclaim is host-scoped; the durable identity persists until the same host returns). Shared
+  caps, token-bound execution/checkpoints, cancellation, bounded retries and durable recovery are all reused
+  unchanged (no cap bypass; stale-owner writes fenced). Backed by an additive nullable `work_queue.owner_host`
+  column (idempotent `ALTER`; `NULL` = generic); `QueuedSubmission.OwnerHost` exposes the binding to E-read.
+  Capped *admission* is at claim, not enqueue; `host` is a caller-supplied routing identity (not an
+  authenticated OS host); see the coordinated-upgrade precondition under **Compatibility notes**. (§14.B2 /
+  §15.R1 — requested by a downstream consumer.)
 
 **Fixed:**
 - A queued sub-workflow child that failed **construction** (unregistered type, factory error, bad seed)
@@ -62,6 +67,21 @@ must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a
   as a failure (a `done` row with no journal is a typed integrity error; manual/non-queue children retain
   journal-based waiting). Pre-existing lifecycle bugs, reachable with a zero-arg factory that fails at the
   worker after enqueue — far more likely with input-aware factories.
+
+**Compatibility notes:**
+- **Different-type reuse of a queued sub-workflow child ID now refuses** (`ErrValidation`), **including
+  legacy-only (zero-argument) registrations.** A parent re-drive that reuses an existing deterministic
+  child ID with a *different* registered type is rejected — a child ID must not silently become a
+  different type. Ordinary **same-type legacy replay is unchanged and fully supported**; input-conflict
+  enforcement remains input-aware-specific. This **broadens** the earlier compatibility scope (it is not
+  unchanged behavior for different-type reuse) and is a safety integrity guard, not weakened to preserve
+  unsafe reuse.
+- **Targeted host-local dispatch requires a coordinated upgrade.** The generic `ClaimNext` predicate
+  that excludes host-bound rows exists only in this (M25+) engine; an **older binary** opening the same
+  database does not know `owner_host` and would run a host-bound row as generic work. Before enabling
+  `EnqueueForHost` submissions, **drain and upgrade every participating engine claimer to M25+**, and do
+  not dispatch or roll back an older binary against a database with active host-bound work. Old-database
+  readability by the new engine is not the same as safe mixed-version dispatch.
 
 **Removed (BREAKING):**
 - **`ScheduleSpec.WithCatchupOnce()`** (AUD-067). It was a `RESERVED:` public method that durably
