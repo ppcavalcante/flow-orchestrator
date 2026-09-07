@@ -42,6 +42,8 @@ type QueuedSubmission struct {
 	ParentSignal    string // "" when not a sub-workflow child
 	Depth           int    // sub-workflow nesting depth (0 for a plain dispatch)
 	CancelRequested bool   // the durable operator-cancel intent flag is set
+	OwnerHost       string // §14.B2 designated-host binding ("" = generic, any worker); lets a caller
+	// validate/fail-closed on a run's durable host identity before driving it.
 }
 
 // InspectSubmission returns the authoritative durable record for workflowID BY ID, or ErrNotFound when there
@@ -64,14 +66,15 @@ func (s *SQLiteStore) InspectSubmission(workflowID string) (*QueuedSubmission, e
 	var (
 		sub                    = &QueuedSubmission{WorkflowID: workflowID}
 		parentID, parentSignal sql.NullString
+		ownerHost              sql.NullString
 		depth                  sql.NullInt64
 		cancelReq              sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT type, input, state, attempts, enqueued_at, updated_at, parent_id, parent_signal, depth, cancel_requested
+		`SELECT type, input, state, attempts, enqueued_at, updated_at, parent_id, parent_signal, depth, cancel_requested, owner_host
 		 FROM work_queue WHERE workflow_id=?`, workflowID).
 		Scan(&sub.Type, &sub.Input, &sub.State, &sub.Attempts, &sub.EnqueuedAt, &sub.UpdatedAt,
-			&parentID, &parentSignal, &depth, &cancelReq)
+			&parentID, &parentSignal, &depth, &cancelReq, &ownerHost)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, fmt.Errorf("%w: no submission for %q", ErrNotFound, workflowID)
@@ -83,6 +86,7 @@ func (s *SQLiteStore) InspectSubmission(workflowID string) (*QueuedSubmission, e
 	sub.ParentSignal = parentSignal.String
 	sub.Depth = int(depth.Int64)
 	sub.CancelRequested = cancelReq.Valid
+	sub.OwnerHost = ownerHost.String
 	return sub, nil
 }
 
@@ -142,7 +146,7 @@ func (s *SQLiteStore) ListSubmissions(states []string, limit int, after *Submiss
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	query := `SELECT workflow_id, type, input, state, attempts, enqueued_at, updated_at, parent_id, parent_signal, depth, cancel_requested
+	query := `SELECT workflow_id, type, input, state, attempts, enqueued_at, updated_at, parent_id, parent_signal, depth, cancel_requested, owner_host
 	          FROM work_queue`
 	var (
 		conds []string
@@ -177,11 +181,12 @@ func (s *SQLiteStore) ListSubmissions(states []string, limit int, after *Submiss
 		var (
 			sub                    QueuedSubmission
 			parentID, parentSignal sql.NullString
+			ownerHost              sql.NullString
 			depth                  sql.NullInt64
 			cancelReq              sql.NullInt64
 		)
 		if err := rows.Scan(&sub.WorkflowID, &sub.Type, &sub.Input, &sub.State, &sub.Attempts,
-			&sub.EnqueuedAt, &sub.UpdatedAt, &parentID, &parentSignal, &depth, &cancelReq); err != nil {
+			&sub.EnqueuedAt, &sub.UpdatedAt, &parentID, &parentSignal, &depth, &cancelReq, &ownerHost); err != nil {
 			return SubmissionPage{}, fmt.Errorf("%w: scan submission row: %w", ErrCorruptData, err)
 		}
 		sub.Input = copyBytes(sub.Input)
@@ -189,6 +194,7 @@ func (s *SQLiteStore) ListSubmissions(states []string, limit int, after *Submiss
 		sub.ParentSignal = parentSignal.String
 		sub.Depth = int(depth.Int64)
 		sub.CancelRequested = cancelReq.Valid
+		sub.OwnerHost = ownerHost.String
 		page.Items = append(page.Items, sub)
 	}
 	if err := rows.Err(); err != nil {

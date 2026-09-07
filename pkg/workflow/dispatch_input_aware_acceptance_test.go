@@ -155,13 +155,13 @@ func TestInputAware_A1_W3_NestedDecodeNodeReadsSeed(t *testing.T) {
 //	    action runs, and the re-driven parent RESOLVES FAILURE (never re-parks).
 //	(b) A queue child that is `done` with NO journal is an INTEGRITY error (ErrCorruptData), surfaced on the
 //	    parent's re-drive — never a silent success and never an indefinite park.
-//
-// The pure "constructor accepts, seedInput rejects" observation for the input-aware path is exercised at
-// DISPATCH level by W5 (accept-any + a non-object seed → failed, not retried) — a parent-awaited input-aware
-// child cannot itself reach a seed rejection, because seedInput rejects only NON-OBJECT input and a parent
-// declares its child input as a JSON object (WithInput(map)); an input-aware child then enforces durable ==
-// declared input, so a non-object child input can never be presented by a parent. This structural note is
-// recorded in the A-receipt.
+//	(c) THE REAL "constructor accepts, seedInput rejects" case (independent-review §15 R4/A2): a parent
+//	    declares a JSON-OBJECT child input carrying a number that OVERFLOWS float64 (json.Number("1e1000")).
+//	    The constructor accepts the object (it decodes into a struct that ignores that key), but the worker's
+//	    seedInput — which unmarshals into map[string]interface{} (float64) — REJECTS it before any child
+//	    journal exists. Observed: zero child actions, durable terminal failure, completion notification, and
+//	    the parent converging on failure. (An earlier receipt wrongly called this combination "not
+//	    constructible"; a valid JSON object can still fail float64 seeding — that claim is retracted.)
 func TestInputAware_A2_W5_EarlyFailureAndIntegrity(t *testing.T) {
 	t.Run("constructor_fails_at_worker_parent_resolves_failure", func(t *testing.T) {
 		s := mkQueueStore(t)
@@ -224,6 +224,47 @@ func TestInputAware_A2_W5_EarlyFailureAndIntegrity(t *testing.T) {
 		require.ErrorIs(t, rerr, ErrCorruptData, "the missing-journal integrity violation is surfaced")
 		require.NotErrorIs(t, rerr, ErrSuspended, "and it is not an indefinite park")
 	})
+
+	t.Run("constructor_accepts_object_but_seed_rejects_float64_overflow", func(t *testing.T) {
+		s := mkQueueStore(t)
+		reg := NewRegistry()
+		var childActions atomic.Int32
+		// The constructor decodes into a struct that IGNORES the overflowing key, so it ACCEPTS the object;
+		// only the worker's seedInput (map[string]interface{} → float64) rejects the 1e1000 value.
+		require.NoError(t, reg.RegisterWithInput("seedReject", func(input []byte) (*DAG, error) {
+			var cfg struct {
+				Label string `json:"label"`
+			}
+			if err := json.Unmarshal(input, &cfg); err != nil { // ignores "huge" → accepts the object
+				return nil, fmt.Errorf("%w: %w", ErrValidation, err)
+			}
+			return oneNode(t, "n", func(*WorkflowData) error { childActions.Add(1); return nil }), nil
+		}))
+		// A valid JSON object whose numeric value overflows float64 — accepted by the constructor, rejected by seed.
+		pw, childID := mkAwareParent(t, s, reg, "seedReject",
+			map[string]any{"label": "ok", "huge": json.Number("1e1000")})
+
+		ran, rerr := RunNext(context.Background(), s, reg, "worker")
+		require.True(t, ran, "the worker handled the child")
+		require.Error(t, rerr, "seedInput rejected the float64-overflowing value")
+		require.NotErrorIs(t, rerr, ErrBusy, "a seed rejection is not an infra retry")
+		require.Equal(t, wqFailed, wqState(t, s, childID), "durable terminal failure")
+		require.EqualValues(t, 0, childActions.Load(), "no child action ran (seed failed before execution)")
+		_, lerr := s.Load(childID)
+		require.ErrorIs(t, lerr, ErrNotFound, "no child journal was written")
+
+		// The worker woke the parent; re-driving converges on failure (not a forever-park).
+		box, terr := s.TakeSignals("parent-wf")
+		require.NoError(t, terr)
+		require.Len(t, box, 1, "the worker delivered the completion trigger after the seed failure")
+		require.NoError(t, s.DeliverSignal("parent-wf", box[0]))
+		rerr2 := pw.Execute(context.Background())
+		require.Error(t, rerr2)
+		require.NotErrorIs(t, rerr2, ErrSuspended, "the parent resolves failure, not a forever-park")
+		final, err := s.Load("parent-wf")
+		require.NoError(t, err)
+		assertNodeStatus(t, final, "sub", Failed)
+	})
 }
 
 // mkAwareParent builds a parent whose queued node "sub" awaits an input-aware child of childType with the
@@ -242,21 +283,21 @@ func mkAwareParent(t *testing.T, s *SQLiteStore, reg *Registry, childType string
 	return pw, SubWorkflowChildID("parent-wf", "sub")
 }
 
-// A3 — W6 settings and PROGRESSED DATA survive reclaim. A replacement worker/registry (worker defaults
-// deliberately different from the queued configuration) reclaims a lapsed-claimed run: it rebuilds the
-// original per-run behavior FROM THE DURABLE INPUT, skips the committed first stage, and resumes the pending
-// stage reading PROGRESSED JOURNAL KV (a data value written by the first stage) rather than reseeding the
-// initial values. Asserts behavior AND data, not only constructor arguments.
+// A3 — W6 settings and PROGRESSED DATA survive reclaim, with a GENUINELY different worker default. Each worker
+// registry carries its OWN default "mode" (the original worker's differs from the replacement worker's). The
+// effective per-run mode = the DURABLE input's mode when present, else the worker default. A run is submitted
+// WITH an input mode; worker A commits a partial journal (n0 done + a progressed KV) then dies; the REPLACEMENT
+// worker B — whose default mode is deliberately different — reclaims and must (i) skip the committed n0, (ii)
+// resume n1 reading the PROGRESSED KV (not reseeded), and (iii) use the DURABLE input mode, NOT B's own default.
 func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1000, 0))
 	s := mkDispatchStore(t, withSQLiteClock(clk), withSQLiteLeaseTTL(5*time.Second))
 	ctr := newRunCounter()
 	var inputsSeen []string
 
-	// The REPLACEMENT worker's registry. Its factory reads the per-run "mode" from the DURABLE input (a
-	// worker "default" would differ — the point is the reconstruction honors the queued config, not a
-	// worker-local default). n1 records both the input-derived mode AND the progressed KV artifact.
-	mkReg := func() *Registry {
+	// mkReg(workerDefault) builds a registry whose factory falls back to workerDefault when the durable input
+	// carries no "mode" — so two workers can have DIFFERENT defaults and we can prove the durable input wins.
+	mkReg := func(workerDefault string) *Registry {
 		reg := NewRegistry()
 		require.NoError(t, reg.RegisterWithInput("staged", func(input []byte) (*DAG, error) {
 			inputsSeen = append(inputsSeen, string(input))
@@ -265,6 +306,10 @@ func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) 
 			}
 			if err := json.Unmarshal(input, &cfg); err != nil {
 				return nil, fmt.Errorf("%w: %w", ErrValidation, err)
+			}
+			effectiveMode := cfg.Mode
+			if effectiveMode == "" {
+				effectiveMode = workerDefault // the worker-local default — deliberately different per worker
 			}
 			d := newDAGForTest("staged")
 			if err := d.addNode(newNode("n0", ActionFunc(func(_ context.Context, wd *WorkflowData) error {
@@ -278,7 +323,7 @@ func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) 
 				ctr.inc("n1")
 				art, _ := wd.Get("artifact") // the PROGRESSED KV from n0 (must survive reclaim, not be reseeded away)
 				wd.Set("n1_saw_artifact", art)
-				wd.Set("n1_saw_mode", cfg.Mode) // input-derived per-run behavior on the reclaim rebuild
+				wd.Set("n1_effective_mode", effectiveMode) // input-derived per-run behavior on the reclaim rebuild
 				return nil
 			}))); err != nil {
 				return nil, err
@@ -289,21 +334,22 @@ func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) 
 	}
 	input := jsonInput(t, map[string]interface{}{"mode": "configured-mode"})
 
-	// Worker A claims (token 1) and durably commits a PARTIAL journal: n0 Completed WITH its progressed KV
-	// artifact, n1 Pending. Then A "dies" before MarkDone (n0 counter stays 0 — staged as if A ran it).
+	// Worker A (default "orig-default") claims (token 1) and durably commits a PARTIAL journal: n0 Completed
+	// WITH its progressed KV artifact, n1 Pending. Then A "dies" before MarkDone (n0 counter stays 0).
 	_, err := s.Enqueue("wf", "staged", input)
 	require.NoError(t, err)
 	_, err = s.ClaimNext("A", "staged")
 	require.NoError(t, err)
+	_ = mkReg("orig-default") // A's registry existed with its own default (recorded for symmetry)
 	partial := NewWorkflowData("wf")
 	partial.SetNodeStatus("n0", Completed)
 	partial.SetNodeStatus("n1", Pending)
 	partial.Set("artifact", "built-by-n0") // the committed progressed KV
 	require.NoError(t, s.Save(partial))
 
-	// A dies → lapse the lease. A FRESH worker/registry B reclaims via RunNext.
+	// A dies → lapse the lease. The REPLACEMENT worker B has a DIFFERENT default ("repl-default").
 	clk.Advance(6 * time.Second)
-	ran, rerr := RunNext(context.Background(), s, mkReg(), "B")
+	ran, rerr := RunNext(context.Background(), s, mkReg("repl-default"), "B")
 	require.NoError(t, rerr)
 	require.True(t, ran, "worker B reclaimed the lapsed-claimed run")
 	require.Equal(t, wqDone, wqState(t, s, "wf"), "the reclaimed run resumed to done")
@@ -316,9 +362,11 @@ func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) 
 	sawArt, ok := loaded.Get("n1_saw_artifact")
 	require.True(t, ok)
 	require.Equal(t, "built-by-n0", sawArt, "n1 read the PROGRESSED KV — the reclaim did NOT reseed initial values over it")
-	sawMode, ok := loaded.Get("n1_saw_mode")
+	sawMode, ok := loaded.Get("n1_effective_mode")
 	require.True(t, ok)
-	require.Equal(t, "configured-mode", sawMode, "the reclaim rebuild honored the DURABLE per-run config, not a worker default")
+	require.Equal(t, "configured-mode", sawMode,
+		"the reclaim honored the DURABLE input mode, NOT worker B's different default (repl-default)")
+	require.NotEqual(t, "repl-default", sawMode, "the replacement worker's default did NOT win")
 
 	require.NotEmpty(t, inputsSeen)
 	for _, in := range inputsSeen {
@@ -465,60 +513,68 @@ func TestInputAware_A5_W8_ConcurrentConfigIsolationAndCap(t *testing.T) {
 	require.Equal(t, "B", gotB, "iso-B ran with its own input (no leakage from iso-A)")
 }
 
-// A6 — W9 lease loss through the new factory path. Two handles over one queue: A claims (token 1) then stalls;
-// the lease lapses; B RECLAIMS through the input-aware path (token 2 — bumped). While the row is still claimed
-// under B, A's late failure-disposition (a stale-owner terminalization) is FENCED — refused by the token guard,
-// so it cannot flip B's live row. B then rebuilds from the durable input and drives to done. The checkpoint-CAS
-// fencing is the shared M16 mechanism, byte-unchanged by this additive feature.
+// A6 — W9 lease loss through the new factory path, as an ACTUAL worker losing its lease during RunNext. Two
+// handles over one queue. Worker A drives via RunNext and STALLS inside its input-aware constructor (a barrier)
+// AFTER claiming (token 1) — a real mid-RunNext stall, not a manual stage. Its lease lapses; worker B reclaims
+// through RunNext (token 2) and drives the run to done. When A is finally released, its own RunNext resumes and
+// its late write is FENCED (token 1 < durable token 2) — it cannot change B's committed result. No manual
+// ClaimNext/MarkFailed/entry.build; both drives are real RunNext.
 func TestInputAware_A6_W9_LeaseLossOnNewPath(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1000, 0))
 	s1, s2 := mkSharedStores(t, withSQLiteClock(clk), withSQLiteLeaseTTL(5*time.Second))
-	var inputsSeen []string
-	reg := NewRegistry()
-	require.NoError(t, reg.RegisterWithInput("leased", func(input []byte) (*DAG, error) {
-		inputsSeen = append(inputsSeen, string(input))
-		return oneNode(t, "n", func(d *WorkflowData) error { d.Set("winner", "B"); return nil }), nil
-	}))
-	input := jsonInput(t, map[string]interface{}{"tag": "leased"})
 
+	buildStarted := make(chan struct{})
+	release := make(chan struct{})
+	var barrierUsed atomic.Bool
+	// mkReg(marker) — the node stamps `winner=marker` so we can tell WHICH worker's write landed. Only the
+	// FIRST construction (worker A) blocks at the barrier; the reclaiming worker B constructs freely.
+	mkReg := func(marker string) *Registry {
+		reg := NewRegistry()
+		require.NoError(t, reg.RegisterWithInput("leased", func([]byte) (*DAG, error) {
+			if !barrierUsed.Swap(true) {
+				close(buildStarted)
+				<-release
+			}
+			return oneNode(t, "n", func(d *WorkflowData) error { d.Set("winner", marker); return nil }), nil
+		}))
+		return reg
+	}
+	input := jsonInput(t, map[string]interface{}{"tag": "leased"})
 	_, err := s1.Enqueue("wf", "leased", input)
 	require.NoError(t, err)
-	// A claims (token 1) on handle 1 and then stalls (writes no journal).
-	_, err = s1.ClaimNext("A", "leased")
-	require.NoError(t, err)
-	require.EqualValues(t, 1, leaseToken(t, s1, "wf"), "A holds token 1")
 
-	// Lease lapses → B reclaims the lapsed-claimed row on the other handle (token 2 — A fenced). Still claimed.
+	// Worker A drives via RunNext and stalls inside construction (having claimed token 1).
+	aDone := make(chan error, 1)
+	go func() { _, e := RunNext(context.Background(), s1, mkReg("A"), "A"); aDone <- e }()
+	select {
+	case <-buildStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker A did not enter construction")
+	}
+	require.EqualValues(t, 1, leaseToken(t, s1, "wf"), "A claimed token 1 before stalling")
+
+	// A's lease lapses → worker B reclaims through RunNext (token 2) and drives to done.
 	clk.Advance(6 * time.Second)
-	item, err := s2.ClaimNext("B", "leased")
-	require.NoError(t, err)
-	require.EqualValues(t, 2, leaseToken(t, s2, "wf"), "the reclaim bumped the fencing token (A fenced)")
-	require.EqualValues(t, 2, item.Token, "B holds the bumped token")
-	require.Equal(t, wqClaimed, wqState(t, s2, "wf"), "the row is claimed under B")
-
-	// A's LATE failure-disposition under its stale token 1 is FENCED — the row is still `claimed`, yet A's
-	// terminalize is refused purely by the token guard (not merely because the row is already terminal).
-	flipped, ferr := s1.MarkFailed("wf")
-	require.NoError(t, ferr)
-	require.False(t, flipped, "A's stale-owner terminalization is fenced (token 1 < durable token 2)")
-	require.Equal(t, wqClaimed, wqState(t, s2, "wf"), "the stale owner did NOT flip B's live row")
-
-	// B rebuilds from the DURABLE input (the new path) and drives to done — its outcome stands.
-	entry, ok := reg.lookup(item.Type)
-	require.True(t, ok)
-	dag, ferr2 := entry.build(item.Input)
-	require.NoError(t, ferr2)
-	wB := &Workflow{dag: dag, WorkflowID: "wf", Store: s2}
-	require.NoError(t, wB.Execute(context.Background()))
-	done, err := s2.MarkDone("wf")
-	require.NoError(t, err)
-	require.True(t, done, "B terminalizes done under its live token")
+	ranB, errB := RunNext(context.Background(), s2, mkReg("B"), "B")
+	require.NoError(t, errB)
+	require.True(t, ranB, "B reclaimed the run A stalled on")
 	require.Equal(t, wqDone, wqState(t, s2, "wf"))
 	loaded, err := s2.Load("wf")
 	require.NoError(t, err)
 	winner, _ := loaded.Get("winner")
-	require.Equal(t, "B", winner, "the durable journal is the successor's")
-	require.NotEmpty(t, inputsSeen, "B rebuilt from the durable input")
+	require.Equal(t, "B", winner, "the successor committed the result")
+
+	// Release A: its RunNext resumes and its late CHECKPOINT is FENCED (token 1 < durable token 2) — the drive
+	// surfaces the superseded error and disposeExecErr aborts without touching the queue row.
+	close(release)
+	aErr := <-aDone
+	require.Error(t, aErr, "A's stalled drive is fenced when it resumes after losing its lease")
+	require.ErrorContains(t, aErr, "fenced out", "the stale checkpoint is rejected by the fencing token")
+	require.Equal(t, wqDone, wqState(t, s1, "wf"), "the queue outcome is unchanged (still done)")
+	loaded2, err := s2.Load("wf")
+	require.NoError(t, err)
+	winner2, _ := loaded2.Get("winner")
+	require.Equal(t, "B", winner2, "the stale owner's late write did NOT overwrite the successor's result")
 }
 
 // A7 — W10 the input-aware CHILD itself parks and resumes. Distinct parent/child payloads, an input-selected
@@ -601,11 +657,16 @@ func TestInputAware_A7_W10_InputAwareChildParksResumes(t *testing.T) {
 //
 //	(1) Operator cancellation BEFORE any action begins → the input-aware run terminalizes `cancelled`; no
 //	    action runs and the constructor is not even reached (the post-claim cancel re-read precedes the build).
-//	(2) A graceful drain leaves committed progress `claimed` (not dead-lettered); a later reclaim RESUMES it
-//	    to done through the input-aware path.
-//	(3) A constructor error wrapping an infrastructure class (ErrIO/ErrBusy) stays a TERMINAL validation
-//	    failure — it is NOT requeued as retryable work. (The genuine bare-infra retry budget in disposeExecErr
-//	    is registration-form-independent and covered by the shared MarkForRetry suites — cited in the receipt.)
+//	(2) A REAL graceful drain: the parent ctx handed to RunNext is cancelled mid-run (a node is executing);
+//	    the disposition leaves committed progress `claimed` (AF1 — NOT dead-lettered), and a later reclaim
+//	    RESUMES it to done through the input-aware path. (Not a manually-staged journal — an actual ctx drain.)
+//	(3) The REAL bounded infra-retry state machine: a transient bare-infra fault (ErrBusy) requeues attempts
+//	    1..maxAttempts-1 and dead-letters at the budget, with EXACTLY maxAttempts drives and no further one.
+//	    The fault is injected at disposeExecErr — the exact disposition seam runNext feeds a real checkpoint/
+//	    claim fault into — because a node-logic error is POISON by design (never retryable), so the only way
+//	    to exhibit an infra retry is at this seam (the engine's own retry oracle does the same).
+//	(4) A constructor error wrapping an infrastructure class (ErrIO/ErrBusy) stays a TERMINAL validation
+//	    failure — it is NOT requeued as retryable work (a bad payload is not infra).
 func TestInputAware_A8_W13_CancelDrainRetryOnNewPath(t *testing.T) {
 	t.Run("operator_cancel_before_action", func(t *testing.T) {
 		s := mkDispatchStore(t)
@@ -629,18 +690,32 @@ func TestInputAware_A8_W13_CancelDrainRetryOnNewPath(t *testing.T) {
 		require.EqualValues(t, 0, built.Load(), "the constructor was not reached (cancel re-read precedes build)")
 	})
 
-	t.Run("drain_leaves_claimed_then_reclaim_resumes", func(t *testing.T) {
+	t.Run("real_ctx_drain_leaves_claimed_then_reclaim_resumes", func(t *testing.T) {
 		clk := NewFakeClock(time.Unix(1000, 0))
 		s := mkDispatchStore(t, withSQLiteClock(clk), withSQLiteLeaseTTL(5*time.Second))
 		ctr := newRunCounter()
+		n1Started := make(chan struct{}, 1)
+		var drained atomic.Bool
 		mkReg := func() *Registry {
 			reg := NewRegistry()
 			require.NoError(t, reg.RegisterWithInput("drainAware", func([]byte) (*DAG, error) {
 				d := newDAGForTest("drainAware")
-				if err := d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n0"); return nil }))); err != nil {
+				if err := d.addNode(newNode("n0", ActionFunc(func(_ context.Context, wd *WorkflowData) error {
+					ctr.inc("n0")
+					wd.Set("n0_data", "committed")
+					return nil
+				}))); err != nil {
 					return nil, err
 				}
-				if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
+				if err := d.addNode(newNode("n1", ActionFunc(func(ctx context.Context, _ *WorkflowData) error {
+					ctr.inc("n1")
+					if !drained.Swap(true) { // only the FIRST drive drains at this node
+						n1Started <- struct{}{}
+						<-ctx.Done() // block until the drive ctx is cancelled (the graceful drain)
+						return ctx.Err()
+					}
+					return nil // the resume drive completes normally
+				}))); err != nil {
 					return nil, err
 				}
 				return d, d.addDependency("n0", "n1")
@@ -649,23 +724,61 @@ func TestInputAware_A8_W13_CancelDrainRetryOnNewPath(t *testing.T) {
 		}
 		_, err := s.Enqueue("wf", "drainAware", jsonInput(t, map[string]interface{}{"x": 1}))
 		require.NoError(t, err)
-		// Model a graceful drain: A claims, commits partial progress (n0 done), and the row is LEFT claimed
-		// (a drain leaves it claimed for later reclaim — NOT dead-lettered).
-		_, err = s.ClaimNext("A", "drainAware")
-		require.NoError(t, err)
-		partial := NewWorkflowData("wf")
-		partial.SetNodeStatus("n0", Completed)
-		partial.SetNodeStatus("n1", Pending)
-		require.NoError(t, s.Save(partial))
-		require.Equal(t, wqClaimed, wqState(t, s, "wf"), "a drain leaves the row claimed, not failed")
 
+		// Worker A drives; n0 commits at the level-0 barrier, n1 begins, then the drive ctx is drained.
+		runCtx, cancel := context.WithCancel(context.Background())
+		aDone := make(chan error, 1)
+		go func() { _, e := RunNext(runCtx, s, mkReg(), "A"); aDone <- e }()
+		select {
+		case <-n1Started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("n1 did not start")
+		}
+		cancel() // graceful drain of the in-flight worker
+		<-aDone
+		require.Equal(t, wqClaimed, wqState(t, s, "wf"), "a real drain leaves the row claimed (AF1), not dead-lettered")
+		require.Equal(t, 1, ctr.get("n0"), "n0 committed once at the level barrier before the drain")
+
+		// The drained row's lease lapses → a reclaim resumes it from the committed frontier to done.
 		clk.Advance(6 * time.Second)
 		ran, rerr := RunNext(context.Background(), s, mkReg(), "B")
-		require.NoError(t, rerr)
-		require.True(t, ran, "the drained run is reclaimed and resumed")
+		require.NoError(t, rerr, "the drained run is not a poison failure — it resumes")
+		require.True(t, ran)
 		require.Equal(t, wqDone, wqState(t, s, "wf"), "committed progress resumed to done (never dead-lettered)")
-		require.Equal(t, 0, ctr.get("n0"), "the committed stage was not re-run")
-		require.Equal(t, 1, ctr.get("n1"), "the pending stage resumed")
+		require.Equal(t, 1, ctr.get("n0"), "the committed stage was NOT re-run on resume")
+		resumed, err := s.Load("wf")
+		require.NoError(t, err)
+		v, ok := resumed.Get("n0_data")
+		require.True(t, ok)
+		require.Equal(t, "committed", v, "the committed progress data survived the drain/reclaim")
+	})
+
+	t.Run("real_infra_retry_budget_through_dispatch", func(t *testing.T) {
+		s := mkDispatchStore(t, withSQLiteLeaseTTL(time.Hour))
+		const maxAttempts = defaultMaxAttempts // 3
+		reg := NewRegistry()
+		require.NoError(t, reg.RegisterWithInput("retryAware", func([]byte) (*DAG, error) {
+			return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+		}))
+		_, err := s.Enqueue("wf", "retryAware", jsonInput(t, map[string]interface{}{"x": 1}))
+		require.NoError(t, err)
+
+		// Drive the REAL queue retry lifecycle: each real ClaimNext bumps attempts; disposeExecErr (the seam
+		// runNext feeds a real bare-infra checkpoint/claim fault into) requeues under budget then dead-letters.
+		drives := 0
+		for {
+			item, cerr := s.ClaimNext("solo", "retryAware")
+			if errors.Is(cerr, ErrNoWork) {
+				break // requeued→pending is re-claimable; a dead-letter (failed) is terminal → ErrNoWork ends it
+			}
+			require.NoError(t, cerr)
+			drives++
+			require.LessOrEqual(t, drives, maxAttempts, "infra retry is bounded by maxAttempts (drive %d)", drives)
+			disp := disposeExecErr(s, item.WorkflowID, maxAttempts, fmt.Errorf("%w: transient checkpoint fault", ErrBusy))
+			require.ErrorIs(t, disp, ErrBusy, "the disposition surfaces the infra fault")
+		}
+		require.Equal(t, maxAttempts, drives, "attempts 1..2 requeue, attempt 3 fails, and there is NO 4th drive")
+		require.Equal(t, wqFailed, wqState(t, s, "wf"), "budget exhausted → terminal failed")
 	})
 
 	t.Run("constructor_error_wrapping_infra_stays_terminal", func(t *testing.T) {

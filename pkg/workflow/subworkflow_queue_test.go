@@ -187,7 +187,7 @@ func TestQueueSubWorkflow_CancelPropagation(t *testing.T) {
 	// A worker runs the child in a goroutine — it will block in "block" until cancelled.
 	done := make(chan struct{})
 	go func() {
-		_, _ = runNext(context.Background(), s, reg, "worker", "", 3) //nolint:errcheck // the child is cancelled mid-run
+		_, _ = runNext(context.Background(), s, reg, "worker", "", "", 3) //nolint:errcheck // the child is cancelled mid-run
 		close(done)
 	}()
 

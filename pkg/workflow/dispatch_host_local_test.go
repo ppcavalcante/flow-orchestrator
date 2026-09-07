@@ -213,4 +213,134 @@ func TestHostLocal_EmptyHostRejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrValidation)
 	_, err = RunNextForHost(context.Background(), s, reg, "w", "")
 	require.ErrorIs(t, err, ErrValidation)
+	_, err = s.ClaimSpecificForHost("w", "", "wf")
+	require.ErrorIs(t, err, ErrValidation)
+	_, err = s.ClaimSpecificForHost("w", "host-A", "")
+	require.ErrorIs(t, err, ErrValidation)
+	_, err = RunSpecificForHost(context.Background(), s, reg, "w", "", "wf")
+	require.ErrorIs(t, err, ErrValidation)
+	_, err = RunSpecificForHost(context.Background(), s, reg, "w", "host-A", "")
+	require.ErrorIs(t, err, ErrValidation)
+}
+
+// R1 / B2-SEC-1 — the consumer's reproducer: with two legitimate same-host/same-type pending rows, driving the
+// SPECIFICALLY requested run executes ONLY it, leaving the older row untouched (no host-scoped-FIFO substitution).
+func TestB2Security_SpecificRequestedRun(t *testing.T) {
+	s := mkDispatchStore(t)
+	var executed []string
+	reg := NewRegistry()
+	require.NoError(t, reg.RegisterWithInput("job", func(input []byte) (*DAG, error) {
+		return oneNode(t, "n", func(d *WorkflowData) error { executed = append(executed, d.GetWorkflowID()); return nil }), nil
+	}))
+	_, err := s.EnqueueForHost("older", "job", nil, "host-A")
+	require.NoError(t, err)
+	_, err = s.EnqueueForHost("requested", "job", nil, "host-A")
+	require.NoError(t, err)
+
+	ran, err := RunSpecificForHost(context.Background(), s, reg, "cli-requested", "host-A", "requested")
+	require.NoError(t, err)
+	require.True(t, ran)
+	require.Equal(t, []string{"requested"}, executed, "only the specifically requested run executed")
+	require.Equal(t, wqDone, wqState(t, s, "requested"))
+	require.Equal(t, wqPending, wqState(t, s, "older"), "the older same-host row is untouched (no FIFO substitution)")
+}
+
+// R1 / B2-SEC-1 — specific-run selection FAILS CLOSED (ran=false, no fallback to other work) when the requested
+// run is absent, terminal, bound to a different host, or over a shared cap; and it validates the durable host
+// binding (a run bound to host-A is not drivable as host-B).
+func TestB2Security_SpecificRun_FailsClosed(t *testing.T) {
+	t.Run("absent_requested_id", func(t *testing.T) {
+		s := mkDispatchStore(t)
+		var executed []string
+		reg := recordingReg(t, &executed)
+		_, err := s.EnqueueForHost("other", "job", nil, "host-A")
+		require.NoError(t, err)
+		ran, err := RunSpecificForHost(context.Background(), s, reg, "cli", "host-A", "ghost")
+		require.NoError(t, err)
+		require.False(t, ran, "an absent requested id drives nothing")
+		require.Empty(t, executed, "no fallback to other host work")
+		require.Equal(t, wqPending, wqState(t, s, "other"))
+	})
+
+	t.Run("wrong_host_binding", func(t *testing.T) {
+		s := mkDispatchStore(t)
+		var executed []string
+		reg := recordingReg(t, &executed)
+		_, err := s.EnqueueForHost("bound-A", "job", nil, "host-A")
+		require.NoError(t, err)
+		// Inspect proves the binding; driving it as host-B fails closed.
+		sub, err := s.InspectSubmission("bound-A")
+		require.NoError(t, err)
+		require.Equal(t, "host-A", sub.OwnerHost, "the durable host binding is inspectable")
+		ran, err := RunSpecificForHost(context.Background(), s, reg, "cli", "host-B", "bound-A")
+		require.NoError(t, err)
+		require.False(t, ran, "a run bound to host-A is not drivable as host-B")
+		require.Empty(t, executed)
+		require.Equal(t, wqPending, wqState(t, s, "bound-A"), "the row stays bound + pending")
+	})
+
+	t.Run("terminal_requested_id", func(t *testing.T) {
+		s := mkDispatchStore(t)
+		var executed []string
+		reg := recordingReg(t, &executed)
+		_, err := s.EnqueueForHost("term", "job", nil, "host-A")
+		require.NoError(t, err)
+		_, err = s.ClaimSpecificForHost("w", "host-A", "term")
+		require.NoError(t, err)
+		_, err = s.MarkDone("term")
+		require.NoError(t, err)
+		ran, err := RunSpecificForHost(context.Background(), s, reg, "cli", "host-A", "term")
+		require.NoError(t, err)
+		require.False(t, ran, "a terminal requested run is not re-executed")
+		require.Empty(t, executed)
+	})
+
+	t.Run("over_shared_cap", func(t *testing.T) {
+		s := mkDispatchStore(t, WithCaps(Caps{PerType: map[string]int{"job": 1}}))
+		var executed []string
+		reg := recordingReg(t, &executed)
+		// Occupy the single job slot generically.
+		_, err := s.Enqueue("occupant", "job", nil)
+		require.NoError(t, err)
+		_, err = s.ClaimNext("occupant-w", "job")
+		require.NoError(t, err)
+		// The requested host-bound run is over the shared cap → fails closed (no bypass, no fallback).
+		_, err = s.EnqueueForHost("req", "job", nil, "host-A")
+		require.NoError(t, err)
+		ran, err := RunSpecificForHost(context.Background(), s, reg, "cli", "host-A", "req")
+		require.NoError(t, err)
+		require.False(t, ran, "a requested run over the shared cap is backpressured, not bypassed")
+		require.Empty(t, executed)
+		require.Equal(t, wqPending, wqState(t, s, "req"))
+	})
+}
+
+// recordingReg registers an input-aware "job" type whose node appends its workflow id to `executed`.
+func recordingReg(t *testing.T, executed *[]string) *Registry {
+	t.Helper()
+	reg := NewRegistry()
+	require.NoError(t, reg.RegisterWithInput("job", func([]byte) (*DAG, error) {
+		return oneNode(t, "n", func(d *WorkflowData) error { *executed = append(*executed, d.GetWorkflowID()); return nil }), nil
+	}))
+	return reg
+}
+
+// R1 — a lapsed host-bound requested run is reclaimable by ID by the same host (specific-run reclaim).
+func TestB2Security_SpecificRun_ReclaimByID(t *testing.T) {
+	clk := NewFakeClock(time.Unix(1000, 0))
+	s1, s2 := mkSharedStores(t, withSQLiteClock(clk), withSQLiteLeaseTTL(5*time.Second))
+	var executed []string
+	reg := recordingReg(t, &executed)
+	_, err := s1.EnqueueForHost("req", "job", nil, "host-A")
+	require.NoError(t, err)
+	// Host-A worker 1 claims the specific run then stalls.
+	_, err = s1.ClaimSpecificForHost("A-w1", "host-A", "req")
+	require.NoError(t, err)
+	// Lease lapses → the SAME host reclaims the specific run by ID and drives it.
+	clk.Advance(6 * time.Second)
+	ran, err := RunSpecificForHost(context.Background(), s2, reg, "A-w2", "host-A", "req")
+	require.NoError(t, err)
+	require.True(t, ran, "the same host reclaims the specific lapsed run by id")
+	require.Equal(t, wqDone, wqState(t, s2, "req"))
+	require.Equal(t, []string{"req"}, executed)
 }

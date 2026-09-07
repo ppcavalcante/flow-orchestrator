@@ -241,7 +241,7 @@ func (p *Pool) runWorker(ctx context.Context, idx int, store *SQLiteStore) error
 		// the Pool's maxAttempts budget (not RunNext's frozen defaultMaxAttempts). We deliberately do
 		// NOT wrap the drive in WithMultiProcessLocker — ClaimNext already claimed; a second Acquire
 		// would double-claim.
-		ran, rerr := runNext(ctx, store, p.reg, ownerID, "", p.maxAttempts)
+		ran, rerr := runNext(ctx, store, p.reg, ownerID, "", "", p.maxAttempts)
 		if rerr != nil && p.observer != nil {
 			// AUD-035: surface the error the loop otherwise swallows. runNext has already
 			// resolved the queue state (ran=true → the row was terminalized; ran=false → a

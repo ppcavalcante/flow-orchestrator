@@ -236,7 +236,7 @@ func buildTypeFilter(typeFilter []string) (clause string, args []interface{}) {
 // one write lock, so exactly one claims any given row; a terminal row is NEVER returned (the
 // `state='pending'` scan filter — C2). Requires mp mode.
 func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem, error) {
-	return s.claimNext(ownerID, "", typeFilter)
+	return s.claimNext(ownerID, "", "", typeFilter)
 }
 
 // ClaimNextForHost is ClaimNext scoped to a DESIGNATED HOST (M25 §14.B2): it claims (and reclaims) ONLY rows
@@ -245,18 +245,38 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 // host-bound row (owner_host IS NULL), so a generic worker can never steal host-bound work. Reclaim is
 // host-scoped too: a lapsed host-bound row is reclaimable ONLY by its host, so a dead host's work is never
 // silently executed elsewhere (its durable owner_host identity persists until the same host returns). Same
-// shared caps + fencing + lifecycle as ClaimNext. `host` must be non-empty.
+// shared caps + fencing + lifecycle as ClaimNext. `host` must be non-empty. This claims the host's OLDEST
+// eligible row (host-scoped FIFO); to drive a SPECIFIC requested run use ClaimSpecificForHost.
 func (s *SQLiteStore) ClaimNextForHost(ownerID, host string, typeFilter ...string) (WorkItem, error) {
 	if host == "" {
 		return WorkItem{}, fmt.Errorf("%w: ClaimNextForHost requires a non-empty host (use ClaimNext for generic work)", ErrValidation)
 	}
-	return s.claimNext(ownerID, host, typeFilter)
+	return s.claimNext(ownerID, host, "", typeFilter)
+}
+
+// ClaimSpecificForHost claims the SPECIFICALLY REQUESTED run `workflowID` through the same atomic host-bound,
+// capped, fenced claim as ClaimNextForHost — and NOTHING ELSE (M25 §14.B2, B2-SEC-1). It fails CLOSED with
+// ErrNoWork (never a fallback to other work) when the requested row is: absent, terminal, not bound to `host`
+// (bound elsewhere or generic), claimed-live under another owner, or currently over a shared cap. It validates
+// the requested row's durable host binding by construction — the `owner_host = host` predicate means a row
+// bound to a different host (or unbound) simply is not claimable here. Reclaim of a lapsed host-bound row is
+// supported (host-scoped, like ClaimNextForHost). `host` and `workflowID` must be non-empty.
+func (s *SQLiteStore) ClaimSpecificForHost(ownerID, host, workflowID string) (WorkItem, error) {
+	if host == "" {
+		return WorkItem{}, fmt.Errorf("%w: ClaimSpecificForHost requires a non-empty host", ErrValidation)
+	}
+	if err := validateWorkflowID(workflowID); err != nil {
+		return WorkItem{}, err
+	}
+	return s.claimNext(ownerID, host, workflowID, nil)
 }
 
 // claimNext is the shared claim body. host=="" is a GENERIC claim (owner_host IS NULL — every pre-B2 row, so
-// byte-behavior-unchanged); host!="" is a HOST-SCOPED claim (owner_host = host). The host predicate is the ONLY
-// difference between the two forms — the scan/claim/flip/cap/fencing machinery is identical.
-func (s *SQLiteStore) claimNext(ownerID, host string, typeFilter []string) (WorkItem, error) {
+// byte-behavior-unchanged); host!="" is a HOST-SCOPED claim (owner_host = host). wantID!="" narrows the scan to
+// the single requested row (workflow_id = wantID), so an unavailable/at-cap/terminal/other-host requested row
+// yields ErrNoWork with NO fallback to other work (B2-SEC-1). These predicates are the ONLY difference between
+// the forms — the scan/claim/flip/cap/fencing machinery is identical.
+func (s *SQLiteStore) claimNext(ownerID, host, wantID string, typeFilter []string) (WorkItem, error) {
 	if !s.dur.mp {
 		return WorkItem{}, fmt.Errorf("%w: ClaimNext requires a multi-process store (WithMultiProcess)", ErrValidation)
 	}
@@ -289,6 +309,15 @@ func (s *SQLiteStore) claimNext(ownerID, host string, typeFilter []string) (Work
 		hostClause = " AND owner_host = ?"
 		hostArgs = []interface{}{host}
 	}
+	// SPECIFIC-RUN SELECTION (M25 §14.B2, B2-SEC-1): narrow the scan to the single requested row. Composed with
+	// the state/host/cap predicates, an unavailable requested row (terminal, other-host, at-cap, claimed-live)
+	// matches nothing → ErrNoWork, with NO fallback to other work. Its bind follows the host bind in text order.
+	wantClause := ""
+	var wantArgs []interface{}
+	if wantID != "" {
+		wantClause = " AND workflow_id = ?"
+		wantArgs = []interface{}{wantID}
+	}
 
 	// A claimed workflow_id is excluded from the RE-SCAN on a rare ErrClaimLost (a scanned pending row
 	// whose lease is momentarily LIVE under another owner — a lapsed-then-relive edge). The re-scan
@@ -313,11 +342,11 @@ func (s *SQLiteStore) claimNext(ownerID, host string, typeFilter []string) (Work
 		                   OR (state='claimed'
 		                       AND EXISTS (SELECT 1 FROM leases l
 		                                   WHERE l.workflow_id = work_queue.workflow_id AND l.expiry < ?)))` +
-			hostClause + typeClause + excludeClause + `
+			hostClause + wantClause + typeClause + excludeClause + `
 		            ORDER BY enqueued_at LIMIT 1`
-		// Bind order follows the SQL text: reclaim-expiry (`?` in the EXISTS) FIRST, then the host bind (if any),
-		// then the type/exclude clauses.
-		scanArgs := append(append(append(append([]interface{}{}, reclaimNow), hostArgs...), typeArgs...), excludeArgs...)
+		// Bind order follows the SQL text: reclaim-expiry (`?` in the EXISTS) FIRST, then the host bind, then the
+		// specific-run bind (if any), then the type/exclude clauses.
+		scanArgs := append(append(append(append(append([]interface{}{}, reclaimNow), hostArgs...), wantArgs...), typeArgs...), excludeArgs...)
 
 		var (
 			wf, typ, state         string

@@ -115,15 +115,15 @@ func TestCancel2ProcWorkerEntry(t *testing.T) {
 
 	switch role {
 	case "W": // BITE A: one drive; the watcher observes the operator cancel and terminalizes.
-		_, rerr := runNext(context.Background(), s, reg, owner, "", 3)
+		_, rerr := runNext(context.Background(), s, reg, owner, "", "", 3)
 		if rerr != nil {
 			t.Logf("W_DRIVE_ERR=%v", rerr)
 		}
 		t.Logf("W_RESULT=%s", canWQState(s))
 	case "A": // BITE B: claim + enter Execute, block in n0 forever — the parent SIGKILLs us mid-flight.
 		// A single drive that will block in n0's <-ctx.Done() until killed; it never returns.
-		_, _ = runNext(context.Background(), s, reg, owner, "", 3) //nolint:errcheck // killed mid-flight; never reached
-		t.Logf("A_UNEXPECTED_RETURN=%s", canWQState(s))            // should never print (we get SIGKILL'd)
+		_, _ = runNext(context.Background(), s, reg, owner, "", "", 3) //nolint:errcheck // killed mid-flight; never reached
+		t.Logf("A_UNEXPECTED_RETURN=%s", canWQState(s))                // should never print (we get SIGKILL'd)
 	case "B": // BITE B: reclaim loop — drain until the row is terminal (or a wall bound).
 		deadline := time.Now().Add(20 * time.Second)
 		for time.Now().Before(deadline) {
@@ -131,7 +131,7 @@ func TestCancel2ProcWorkerEntry(t *testing.T) {
 				t.Logf("B_RESULT=%s", st)
 				return
 			}
-			_, _ = runNext(context.Background(), s, reg, owner, "", 3) //nolint:errcheck // oracle reads store state
+			_, _ = runNext(context.Background(), s, reg, owner, "", "", 3) //nolint:errcheck // oracle reads store state
 			time.Sleep(15 * time.Millisecond)
 		}
 		t.Logf("B_RESULT=%s", canWQState(s)) // whatever it converged to (parent oracle is authoritative)

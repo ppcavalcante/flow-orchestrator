@@ -31,7 +31,7 @@ func drainWorkers(ctx context.Context, t *testing.T, s *SQLiteStore, reg *Regist
 			defer wg.Done()
 			owner := "w" + string(rune('a'+id))
 			for ctx.Err() == nil {
-				ran, err := runNext(ctx, s, reg, owner, "", 3)
+				ran, err := runNext(ctx, s, reg, owner, "", "", 3)
 				if err != nil || !ran {
 					// no work / transient — brief backoff (ctx-cancellable)
 					select {
@@ -151,7 +151,7 @@ func TestCap_ParkedChild_SeedBreak_Deadlocks(t *testing.T) {
 	// Drive the K parents so they all park (each spawns its child + parks). One worker, sequential, so no
 	// child is claimed yet — we only want the parents parked to fill the (broken) count.
 	for i := 0; i < K; i++ {
-		_, _ = runNext(context.Background(), s, reg, "driver", "", 3) //nolint:errcheck // best-effort park
+		_, _ = runNext(context.Background(), s, reg, "driver", "", "", 3) //nolint:errcheck // best-effort park
 	}
 	// All K parents are now claimed∧parked (they spawned their children + returned ErrSuspended).
 	require.Equal(t, K, parkedCount(t, s), "K parents parked")
