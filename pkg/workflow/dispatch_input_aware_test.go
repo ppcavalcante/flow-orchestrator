@@ -339,6 +339,39 @@ func TestInputAware_W11_ControlPlaneSeparation(t *testing.T) {
 	require.Equal(t, 1, item.Depth, "depth is engine-derived (parent depth + 1), not the forged 0")
 }
 
+// W12 — static-inspection honesty: legacy cycle detection still finds a declared legacy cycle; a
+// registry containing ANY input-aware factory returns the specified unsupported-inspection refusal
+// WITHOUT invoking an invented-input factory (and not a false cycle claim).
+func TestInputAware_W12_CycleHelperRefusesInputAware(t *testing.T) {
+	// Legacy-only: A queues B queues A → the cycle is still detected.
+	reg := NewRegistry()
+	require.NoError(t, reg.Register("A", func() (*DAG, error) {
+		b := NewWorkflowBuilder()
+		b.AddSubWorkflowQueued("toB", "B")
+		return b.Build()
+	}))
+	require.NoError(t, reg.Register("B", func() (*DAG, error) {
+		b := NewWorkflowBuilder()
+		b.AddSubWorkflowQueued("toA", "A")
+		return b.Build()
+	}))
+	require.ErrorIs(t, reg.ValidateNoTypeCycles(), ErrSubWorkflowTypeCycle, "a declared legacy cycle is still detected")
+
+	// Any input-aware factory → explicit unsupported-inspection refusal, not a cycle error, and the
+	// input-aware factory is never invoked with invented input.
+	reg2 := NewRegistry()
+	require.NoError(t, reg2.Register("legacy", func() (*DAG, error) { return newDAGForTest("x"), nil }))
+	var awareCalled atomic.Bool
+	require.NoError(t, reg2.RegisterWithInput("aware", func([]byte) (*DAG, error) {
+		awareCalled.Store(true)
+		return newDAGForTest("y"), nil
+	}))
+	err := reg2.ValidateNoTypeCycles()
+	require.ErrorIs(t, err, ErrValidation, "an input-aware registry gets the unsupported-inspection refusal")
+	require.NotErrorIs(t, err, ErrSubWorkflowTypeCycle, "the refusal is NOT a false cycle claim")
+	require.False(t, awareCalled.Load(), "the input-aware factory was NOT invoked with invented input")
+}
+
 // workQueueInput reads the durable work_queue.input bytes for a workflow id (identity assertions).
 func workQueueInput(t *testing.T, s *SQLiteStore, wf string) []byte {
 	t.Helper()

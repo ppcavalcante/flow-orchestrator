@@ -195,6 +195,18 @@ var ErrSubWorkflowTypeCycle = fmt.Errorf("%w: registered sub-workflow types form
 // refusal stays at the drive: (*DAG).Execute and (*Workflow).executeLocked (and childRunFailed
 // for the ph92 parked verdict path).
 func (r *Registry) ValidateNoTypeCycles() error {
+	// INPUT-AWARE REFUSAL (C11, M25): an input-aware factory's spawn edges depend on the per-run input,
+	// which this no-input helper cannot supply. Inventing a nil/sample input and treating its graph as
+	// representative would be a FALSE clean check, so refuse EXPLICITLY when any registered type is
+	// input-aware — and NOT with ErrSubWorkflowTypeCycle (no cycle was found). The refusal never invokes
+	// an input-aware factory. The runtime depth ceiling (ErrSubWorkflowMaxDepth) still bounds EVERY chain,
+	// declarable or not, so omitting this opt-in build-time check never weakens the DoS guarantee.
+	for _, typ := range r.Types() {
+		if e, ok := r.lookup(typ); ok && e.wantsInput {
+			return fmt.Errorf("%w: ValidateNoTypeCycles cannot inspect input-dependent factory %q (registered via RegisterWithInput); omit this opt-in static check — the runtime depth ceiling still bounds every spawn chain",
+				ErrValidation, typ)
+		}
+	}
 	// edges[t] = the set of types t statically spawns (via a queue sub-workflow node in t's DAG).
 	edges := make(map[string][]string)
 	for _, typ := range r.Types() {
