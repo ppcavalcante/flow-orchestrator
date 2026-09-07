@@ -304,10 +304,18 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 // parent — parked on the child — was never woken to render the failure. deliverSubWorkflowCompletion
 // is a no-op for a plain M17 dispatch (ParentID == ""); for a child it fires now that the row is
 // terminal `failed`. Centralizing it means a NEW failure path cannot forget the wake.
-func failClaimedItem(store *SQLiteStore, item WorkItem, err error) (bool, error) {
-	_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // terminalize; the parent is woken next
+func failClaimedItem(store *SQLiteStore, item WorkItem, cause error) (bool, error) {
+	if _, mferr := store.MarkFailed(item.WorkflowID); mferr != nil {
+		// The terminalize itself FAULTED (store busy/IO): the row is NOT recorded `failed` — it stays
+		// `claimed` and is reclaimed on lease lapse. Do NOT report a clean recorded failure (§5A: a store
+		// failure must not be reported as a successfully recorded failure) — surface the persistence error
+		// JOINED with the cause so the strand is visible and the caller's retry/alerting can see the ErrIO/
+		// ErrBusy class. No completion is delivered: the child is not terminal, so deliverSubWorkflowCompletion
+		// would be a no-op, and firing it would wrongly wake the parent on an unrecorded failure.
+		return true, errors.Join(cause, fmt.Errorf("failed to record terminal failure for %q (row remains claimed; reclaimed on lease lapse): %w", item.WorkflowID, mferr))
+	}
 	deliverSubWorkflowCompletion(store, item)
-	return true, err
+	return true, cause
 }
 
 // deliverSubWorkflowCompletion delivers a bare completion trigger to a sub-workflow child's PARENT

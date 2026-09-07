@@ -66,14 +66,15 @@ func TestInputAware_W4_LegacyAndMixedRegistry(t *testing.T) {
 }
 
 // W1 — variable graph: the SAME registered type carries different concurrency in two runs, and each
-// graph HONORS its own validated bound. Proven by an atomic active-count that blocks until exactly the
-// input-selected number of nodes run concurrently (a constructor that ignored input would let the width
-// run and never settle at the requested bound).
+// graph HONORS its own validated bound. Proven DETERMINISTICALLY by a start-barrier — each branch signals
+// as it starts then holds a slot, so the test blocks until exactly `concurrency` branches are concurrently
+// live and then proves no further branch can start while they are held (no timing poll on the positive bound).
 func TestInputAware_W1_VariableGraphConcurrency(t *testing.T) {
 	s := mkDispatchStore(t)
 	reg := NewRegistry()
 	const width = 6
-	var active, peak atomic.Int32
+	var peak atomic.Int32
+	var started chan struct{} // each branch signals here as it starts, then blocks on release
 	var release chan struct{}
 
 	require.NoError(t, reg.RegisterWithInput("variable", func(input []byte) (*DAG, error) {
@@ -87,17 +88,19 @@ func TestInputAware_W1_VariableGraphConcurrency(t *testing.T) {
 			return nil, fmt.Errorf("%w: concurrency must be >= 1", ErrValidation)
 		}
 		b := NewWorkflowBuilder().WithExecutionConfig(ExecutionConfig{MaxConcurrency: cfg.Concurrency})
+		var live atomic.Int32
 		for i := 0; i < width; i++ {
 			b.AddStartNode(fmt.Sprintf("n%d", i)).WithAction(ActionFunc(func(context.Context, *WorkflowData) error {
-				cur := active.Add(1)
+				cur := live.Add(1)
 				for { // atomic max into peak
 					p := peak.Load()
 					if cur <= p || peak.CompareAndSwap(p, cur) {
 						break
 					}
 				}
-				<-release // hold the slot occupied so the concurrent set is observable
-				active.Add(-1)
+				started <- struct{}{} // signal AFTER recording peak, then hold the slot occupied
+				<-release
+				live.Add(-1)
 				return nil
 			}))
 		}
@@ -105,19 +108,28 @@ func TestInputAware_W1_VariableGraphConcurrency(t *testing.T) {
 	}))
 
 	runOne := func(wf string, concurrency int) int32 {
-		active.Store(0)
 		peak.Store(0)
+		started = make(chan struct{}, width)
 		release = make(chan struct{})
 		_, err := s.Enqueue(wf, "variable", jsonInput(t, map[string]interface{}{"concurrency": concurrency}))
 		require.NoError(t, err)
 		done := make(chan error, 1)
 		go func() { _, e := RunNext(context.Background(), s, reg, "worker"); done <- e }()
-		// The bound is honored iff EXACTLY `concurrency` nodes are simultaneously blocked (the rest wait
-		// for a slot). If the constructor ignored input (default bound), active would rise to `width` and
-		// never equal `concurrency` → this fails, catching the bug deterministically (no timing guess).
-		want := int32(concurrency)
-		require.Eventually(t, func() bool { return active.Load() == want }, 3*time.Second, 5*time.Millisecond,
-			"exactly %d nodes run concurrently (the input-selected bound)", want)
+
+		// Block until exactly `concurrency` branches have started concurrently (each signals then holds).
+		for i := 0; i < concurrency; i++ {
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("only %d of %d branches started concurrently — the input-selected bound was not honored", i, concurrency)
+			}
+		}
+		// The bound is a CEILING: no (concurrency+1)th branch may start while these are held.
+		select {
+		case <-started:
+			t.Fatalf("more than %d branches ran concurrently — MaxConcurrency=%d not honored", concurrency, concurrency)
+		case <-time.After(150 * time.Millisecond):
+		}
 		observed := peak.Load()
 		close(release)
 		require.NoError(t, <-done)
@@ -126,10 +138,55 @@ func TestInputAware_W1_VariableGraphConcurrency(t *testing.T) {
 	}
 
 	peak1 := runOne("run-c1", 1)
-	require.EqualValues(t, 1, peak1, "concurrency=1 → at most one node runs at a time")
+	require.EqualValues(t, 1, peak1, "concurrency=1 → at most one branch runs at a time")
 	peak3 := runOne("run-c3", 3)
-	require.EqualValues(t, 3, peak3, "concurrency=3 → exactly three nodes run concurrently")
+	require.EqualValues(t, 3, peak3, "concurrency=3 → exactly three branches run concurrently")
 	require.NotEqual(t, peak1, peak3, "a constructor that IGNORED input would produce equal peaks")
+}
+
+// W2 — actual width bound: the input selects the fan-out width cap; an at-bound fan-out runs every
+// branch and an over-bound fan-out fails LOUD (ErrFanOutMaxWidth) rather than silently truncating.
+// Setting a width without enforcing it would let the over-bound case pass.
+func TestInputAware_W2_FanOutWidthBound(t *testing.T) {
+	s := mkDispatchStore(t)
+	reg := NewRegistry()
+	var branches atomic.Int32
+	require.NoError(t, reg.RegisterWithInput("fanout", func(input []byte) (*DAG, error) {
+		var cfg struct {
+			MaxWidth int `json:"max_width"`
+		}
+		if err := json.Unmarshal(input, &cfg); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrValidation, err)
+		}
+		expander := func(context.Context, *WorkflowData) ([]interface{}, error) {
+			return []interface{}{1, 2, 3, 4}, nil // the expander always resolves 4 branches
+		}
+		branchAction := ActionFunc(func(context.Context, *WorkflowData) error { branches.Add(1); return nil })
+		b := NewWorkflowBuilder()
+		b.AddFanOut("fan", expander, branchAction).WithMaxWidth(cfg.MaxWidth)
+		return b.Build()
+	}))
+
+	// At-bound: cap 4, 4 items → every branch runs, run done.
+	branches.Store(0)
+	_, err := s.Enqueue("at-bound", "fanout", jsonInput(t, map[string]interface{}{"max_width": 4}))
+	require.NoError(t, err)
+	ran, rerr := RunNext(context.Background(), s, reg, "worker")
+	require.True(t, ran)
+	require.NoError(t, rerr, "4 items <= width 4 → all branches run")
+	require.Equal(t, wqDone, wqState(t, s, "at-bound"))
+	require.EqualValues(t, 4, branches.Load(), "every branch executed (no silent truncation)")
+
+	// Over-bound: cap 2, 4 items → the input-selected bound is enforced (loud), never truncated to 2.
+	branches.Store(0)
+	_, err = s.Enqueue("over-bound", "fanout", jsonInput(t, map[string]interface{}{"max_width": 2}))
+	require.NoError(t, err)
+	ran, rerr = RunNext(context.Background(), s, reg, "worker")
+	require.True(t, ran)
+	require.Error(t, rerr, "4 items > width 2 → the fan-out must fail, not truncate")
+	require.ErrorIs(t, rerr, ErrFanOutMaxWidth, "over-width fan-out fails loud (ErrFanOutMaxWidth)")
+	require.Equal(t, wqFailed, wqState(t, s, "over-bound"))
+	require.EqualValues(t, 0, branches.Load(), "no branch ran — the bound was enforced before expansion, not silently truncated")
 }
 
 // W5 — invalid and absent input: a constructor refusal (even wrapping ErrIO — it must NOT be requeued as
@@ -306,6 +363,67 @@ func TestInputAware_W10_QueuedChildInputSelectsPolicy(t *testing.T) {
 	cerr := pw2.Execute(context.Background())
 	require.Error(t, cerr, "a conflicting child redefinition must not silently proceed")
 	require.ErrorIs(t, cerr, ErrValidation, "the conflicting input-aware child redefinition is refused")
+}
+
+// Independent-review defect: a queued child under this parent+node is enqueued as type A; a re-drive
+// declaring a DIFFERENT type B (even with identical input) must be REFUSED — the childID collides with a
+// different-type durable child. The original C9 guard compared only the input, so a type-only conflict
+// slipped through and the parent re-suspended instead of refusing.
+func TestInputAware_QueuedChildTypeConflict_Refused(t *testing.T) {
+	s := mkQueueStore(t)
+	reg := NewRegistry()
+	require.NoError(t, reg.RegisterWithInput("typeA", func([]byte) (*DAG, error) {
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+	require.NoError(t, reg.RegisterWithInput("typeB", func([]byte) (*DAG, error) {
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+
+	pbA := NewWorkflowBuilder().WithWorkflowID("p")
+	pbA.AddSubWorkflowQueued("sub", "typeA").WithInput(map[string]interface{}{"k": "v"})
+	dagA, err := pbA.Build()
+	require.NoError(t, err)
+	pwA := newWorkflowForTest(s)
+	pwA.WorkflowID = "p"
+	pwA.dag = dagA
+	pwA.registry = reg
+	require.ErrorIs(t, pwA.Execute(context.Background()), ErrSuspended, "parent enqueues child as typeA + parks")
+
+	// Re-drive the SAME parent+node with a different TYPE and identical input → durable-type conflict.
+	pbB := NewWorkflowBuilder().WithWorkflowID("p")
+	pbB.AddSubWorkflowQueued("sub", "typeB").WithInput(map[string]interface{}{"k": "v"})
+	dagB, err := pbB.Build()
+	require.NoError(t, err)
+	pwB := newWorkflowForTest(s)
+	pwB.WorkflowID = "p"
+	pwB.dag = dagB
+	pwB.registry = reg
+	rerr := pwB.Execute(context.Background())
+	require.Error(t, rerr, "a queued child re-declared with a different type must not silently proceed")
+	require.ErrorIs(t, rerr, ErrValidation, "a durable-type conflict is refused")
+	require.NotErrorIs(t, rerr, ErrSuspended, "must not re-suspend on a type conflict")
+}
+
+// Independent-review defect: when RECORDING a factory failure faults (the store rejects MarkFailed),
+// RunNext must SURFACE the persistence error, not silently return only the factory's validation error
+// while the row stays claimed and the store fault is discarded (§5A).
+func TestInputAware_FactoryFailure_RecordingFaultSurfaced(t *testing.T) {
+	s := mkDispatchStore(t)
+	reg := NewRegistry()
+	// The factory drops work_queue during construction (after the claim), so the subsequent MarkFailed
+	// UPDATE faults — modeling a store rejection of the failure record.
+	require.NoError(t, reg.RegisterWithInput("self-fault", func([]byte) (*DAG, error) {
+		_, _ = s.db.Exec("DROP TABLE work_queue") //nolint:errcheck // deliberate fault injection
+		return nil, fmt.Errorf("%w: factory boom", ErrValidation)
+	}))
+	_, err := s.Enqueue("wf", "self-fault", jsonInput(t, map[string]interface{}{"x": 1}))
+	require.NoError(t, err)
+
+	ran, rerr := RunNext(context.Background(), s, reg, "worker")
+	require.True(t, ran)
+	require.Error(t, rerr)
+	require.ErrorIs(t, rerr, ErrValidation, "the factory cause is still surfaced")
+	require.ErrorContains(t, rerr, "failed to record terminal failure", "the persistence fault is SURFACED, not discarded")
 }
 
 // W11 — control-plane separation: forged parent/signal/depth-looking KEYS in the child payload cannot

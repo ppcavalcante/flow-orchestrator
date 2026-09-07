@@ -105,19 +105,26 @@ func (a *queueSubWorkflowAction) Execute(ctx context.Context, parentData *Workfl
 	}
 	childID := SubWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
 
-	// AUTHORITATIVE INPUT (C9): for an INPUT-AWARE child, once the queue row exists its DURABLE input is
-	// the authority — a parent re-drive reconstructs from THAT, and refuses a conflicting candidate rather
-	// than silently reinterpreting the child (whose durable type/input already decided its worker run). A
-	// NEW child (or a legacy, input-ignoring child) uses a.input as declared. Legacy replay behavior is
-	// unchanged (the guard is scoped to entry.wantsInput).
+	// AUTHORITATIVE TYPE + INPUT (C9): once the queue row exists, its DURABLE type and input are the
+	// authority — a parent re-drive reconstructs from THEM and refuses a conflicting candidate rather than
+	// silently reinterpreting the child (whose durable type/input already decided its worker run). A
+	// changed TYPE is always a conflict (the childID collides with a different-type child) — checked
+	// regardless of input-awareness, since a re-drive of the SAME parent DAG always presents the same type
+	// (so normal legacy replay never trips it). A changed INPUT is a conflict for an input-aware child; a
+	// NEW child uses a.input as declared.
 	authInput := a.input
-	if entry.wantsInput {
-		if durInput, exists, ierr := sqlStore.queueChildInput(childID); ierr != nil {
-			return fmt.Errorf("queue sub-workflow %q: read durable child input %q: %w", a.nodeName, childID, ierr)
-		} else if exists && !bytes.Equal(durInput, a.input) {
-			return fmt.Errorf("%w: queue sub-workflow %q: child %q already exists with different input — the durable queued input is authoritative; refuse silent redefinition",
-				ErrValidation, a.nodeName, childID)
-		} else if exists {
+	if durType, durInput, exists, ierr := sqlStore.queueChildTypeInput(childID); ierr != nil {
+		return fmt.Errorf("queue sub-workflow %q: read durable child type/input %q: %w", a.nodeName, childID, ierr)
+	} else if exists {
+		if durType != a.childType {
+			return fmt.Errorf("%w: queue sub-workflow %q: child %q already exists as type %q, not %q — the durable queued type is authoritative; refuse silent redefinition",
+				ErrValidation, a.nodeName, childID, durType, a.childType)
+		}
+		if entry.wantsInput {
+			if !bytes.Equal(durInput, a.input) {
+				return fmt.Errorf("%w: queue sub-workflow %q: child %q already exists with different input — the durable queued input is authoritative; refuse silent redefinition",
+					ErrValidation, a.nodeName, childID)
+			}
 			authInput = durInput // reconstruct the parent's coe-verdict DAG from the SAME bytes the child ran with.
 		}
 	}

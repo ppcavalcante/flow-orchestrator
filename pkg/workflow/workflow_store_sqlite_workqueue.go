@@ -155,25 +155,25 @@ func (s *SQLiteStore) queueTerminalState(childID string) (state string, exists b
 	return state, true, nil
 }
 
-// queueChildInput reads the DURABLE queued input for a child id (exists=false when there is no row).
-// The queue row's input is authoritative for an input-aware child once it exists: a parent re-drive
-// reconstructs from THIS, and refuses a conflicting candidate rather than silently reinterpreting the
-// child (C9). Mirrors queueTerminalState's not-found handling.
-func (s *SQLiteStore) queueChildInput(childID string) (input []byte, exists bool, err error) {
+// queueChildTypeInput reads the DURABLE queued TYPE + input for a child id (exists=false when there is
+// no row). Both are authoritative for a queued child once it exists: a parent re-drive reconstructs from
+// THESE and refuses a conflicting candidate (a changed type OR, for an input-aware child, a changed
+// input) rather than silently reinterpreting the child (C9). Mirrors queueTerminalState's not-found handling.
+func (s *SQLiteStore) queueChildTypeInput(childID string) (typ string, input []byte, exists bool, err error) {
 	if verr := validateWorkflowID(childID); verr != nil {
-		return nil, false, verr
+		return "", nil, false, verr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err = s.db.QueryRowContext(context.Background(),
-		`SELECT input FROM work_queue WHERE workflow_id=?`, childID).Scan(&input)
+		`SELECT type, input FROM work_queue WHERE workflow_id=?`, childID).Scan(&typ, &input)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return nil, false, nil // no queue row yet → the caller enqueues fresh.
+		return "", nil, false, nil // no queue row yet → the caller enqueues fresh.
 	case err != nil:
-		return nil, false, classifyTxErr("queuechildinput", err)
+		return "", nil, false, classifyTxErr("queuechildtypeinput", err)
 	}
-	return input, true, nil
+	return typ, input, true, nil
 }
 
 // buildTypeFilter renders the optional `AND type IN (?,?,…)` clause + its args for a ClaimNext scan.
