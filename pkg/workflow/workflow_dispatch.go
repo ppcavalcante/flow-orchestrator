@@ -44,7 +44,7 @@ type InputDAGFactory func(input []byte) (*DAG, error)
 // (C1). wantsInput records the form for the static cycle helper (which cannot inspect an input-dependent
 // factory — C11) and for tests; it never forks the dispatch path.
 type registryEntry struct {
-	build     func(input []byte) (*DAG, error)
+	build      func(input []byte) (*DAG, error)
 	wantsInput bool
 }
 

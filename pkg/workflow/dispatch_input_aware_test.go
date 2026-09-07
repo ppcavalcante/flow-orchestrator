@@ -268,7 +268,7 @@ func TestInputAware_W10_QueuedChildInputSelectsPolicy(t *testing.T) {
 		pw.dag = pdag
 		pw.registry = reg
 		require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "parent enqueues + parks")
-		ran, _ := RunNext(context.Background(), s, reg, "worker") // rerr carries the child's own failure when !tolerate — expected; the queue state + parent outcome below are the assertions
+		ran, _ := RunNext(context.Background(), s, reg, "worker") //nolint:errcheck // the child's own failure when !tolerate is expected; the queue state + parent outcome below are the assertions
 		require.True(t, ran, "worker ran the child")
 		perr := pw.Execute(context.Background()) // wake the parent on the child's terminal queue outcome
 		return wqState(t, s, SubWorkflowChildID(parentWF, "sub")), perr
