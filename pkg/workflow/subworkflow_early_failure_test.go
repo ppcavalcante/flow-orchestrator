@@ -13,6 +13,8 @@ package workflow
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -101,4 +103,45 @@ func TestQueueChild_PendingWithoutJournal_ParentStillParks(t *testing.T) {
 	// Re-drive without running the child: still pending → the parent must re-park.
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "a pending queue child → the parent re-parks")
 	require.Equal(t, wqPending, wqState(t, s, childID), "the child is still pending")
+}
+
+// A2 — BUG-1: when a queued child fails CONSTRUCTION at the worker (factory error), runNext must WAKE
+// the parent (deliver the completion trigger) so it is not stranded parked. Combined with A1, the woken
+// parent then resolves failure on re-drive.
+func TestQueueChild_WorkerFactoryFailure_WakesParent(t *testing.T) {
+	s := mkQueueStore(t)
+	reg := NewRegistry()
+	// A factory that SUCCEEDS on the parent's enqueue-time resolve (call 1) but FAILS at the worker
+	// (call 2) — the realistic "dependency available at enqueue, gone at claim" shape that reaches the
+	// factory-error terminal path in runNext.
+	var calls atomic.Int32
+	require.NoError(t, reg.Register("flakyChild", func() (*DAG, error) {
+		if calls.Add(1) == 1 {
+			return childProducing(t, "result", nil), nil
+		}
+		return nil, errors.New("factory boom at the worker")
+	}))
+	pw, childID := mkFailParent(t, s, reg, "flakyChild") // parent enqueues + parks (factory call 1)
+
+	// The worker claims the child + calls the factory (call 2) → it fails → MarkFailed.
+	ran, rerr := RunNext(context.Background(), s, reg, "worker")
+	require.True(t, ran, "the worker handled the item")
+	require.Error(t, rerr, "the worker's factory failed")
+	require.ErrorIs(t, rerr, ErrValidation, "a broken factory is a terminal validation failure")
+	require.Equal(t, wqFailed, wqState(t, s, childID), "the child row is terminally failed")
+
+	// THE BITE: the parent's mailbox carries the completion trigger (the wake). Without the A2 fix this
+	// is empty and the parent is never woken.
+	box, terr := s.TakeSignals("parent-wf")
+	require.NoError(t, terr)
+	require.Len(t, box, 1, "runNext woke the parent after the child failed construction")
+	require.Equal(t, completionSignalName("sub"), box[0].Name, "the wake trigger is named for the parked node")
+
+	// End-to-end (A1+A2): re-driving the parent resolves failure, not a forever-park.
+	rerr2 := pw.Execute(context.Background())
+	require.Error(t, rerr2)
+	require.NotErrorIs(t, rerr2, ErrSuspended, "the parent resolves failure, not a forever-park")
+	final, err := s.Load("parent-wf")
+	require.NoError(t, err)
+	assertNodeStatus(t, final, "sub", Failed)
 }

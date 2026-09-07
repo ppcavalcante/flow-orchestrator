@@ -140,14 +140,12 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		// invariant violation (a registry mutated between Types() and lookup — a programmer error in the
 		// single-worker model). TERMINALIZE the claimed row (review ph81-F1: do NOT leak it `claimed` —
 		// every RunNext error path terminalizes so a live worker never strands a runnable item).
-		_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // terminalize the un-runnable row
-		return true, fmt.Errorf("%w: claimed type %q is not registered (registry mutated mid-claim?)", ErrValidation, item.Type)
+		return failClaimedItem(store, item, fmt.Errorf("%w: claimed type %q is not registered (registry mutated mid-claim?)", ErrValidation, item.Type))
 	}
 
 	dag, ferr := factory()
 	if ferr != nil {
-		_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // a broken factory is a terminal failure
-		return true, fmt.Errorf("%w: factory for type %q failed: %w", ErrValidation, item.Type, ferr)
+		return failClaimedItem(store, item, fmt.Errorf("%w: factory for type %q failed: %w", ErrValidation, item.Type, ferr))
 	}
 
 	// Seed the input as KV BEFORE Execute — but ONLY on a truly-FRESH run (no existing journal). The
@@ -168,19 +166,16 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 			// FRESH run — no prior journal → safe to seed the input.
 			seed := NewWorkflowData(item.WorkflowID)
 			if serr := seedInput(seed, item.Input); serr != nil {
-				_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // bad input is terminal
-				return true, fmt.Errorf("%w: seed input for %q: %w", ErrValidation, item.WorkflowID, serr)
+				return failClaimedItem(store, item, fmt.Errorf("%w: seed input for %q: %w", ErrValidation, item.WorkflowID, serr))
 			}
 			if sverr := store.Save(seed); sverr != nil {
 				// A transient seed-Save failure (ErrBusy/ErrIO under MP contention) must TERMINALIZE the row,
 				// not leak it `claimed` (review ph81-F2 — consistent with every other error path; retry is ph82).
-				_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // terminalize on seed-Save failure
-				return true, fmt.Errorf("seed save for %q: %w", item.WorkflowID, sverr)
+				return failClaimedItem(store, item, fmt.Errorf("seed save for %q: %w", item.WorkflowID, sverr))
 			}
 		} else if lerr != nil && !errors.Is(lerr, ErrNotFound) {
 			// A non-not-found Load error (corrupt/IO) is a terminal failure — don't seed over a bad read.
-			_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // terminalize on a corrupt/IO Load
-			return true, fmt.Errorf("seed freshness-check load for %q: %w", item.WorkflowID, lerr)
+			return failClaimedItem(store, item, fmt.Errorf("seed freshness-check load for %q: %w", item.WorkflowID, lerr))
 		}
 		// else: a prior journal EXISTS (re-claim) → do NOT re-seed; Execute resumes from the committed frontier.
 	}
@@ -241,6 +236,19 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 	// The child is durably `done` → deliver the completion signal to the parent (if a sub-workflow).
 	deliverSubWorkflowCompletion(store, item)
 	return true, nil
+}
+
+// failClaimedItem terminalizes a claimed item as `failed`, then WAKES its parent (if it is a
+// sub-workflow child), returning (ran=true, err). Every pre-Execute construction/seed failure routes
+// through here so a waiting parent is never stranded parked on a child that failed BEFORE running
+// (BUG-1): the old paths MarkFailed'd the row but never delivered the completion trigger, so the
+// parent — parked on the child — was never woken to render the failure. deliverSubWorkflowCompletion
+// is a no-op for a plain M17 dispatch (ParentID == ""); for a child it fires now that the row is
+// terminal `failed`. Centralizing it means a NEW failure path cannot forget the wake.
+func failClaimedItem(store *SQLiteStore, item WorkItem, err error) (bool, error) {
+	_, _ = store.MarkFailed(item.WorkflowID) //nolint:errcheck // terminalize; the parent is woken next
+	deliverSubWorkflowCompletion(store, item)
+	return true, err
 }
 
 // deliverSubWorkflowCompletion delivers a bare completion trigger to a sub-workflow child's PARENT
