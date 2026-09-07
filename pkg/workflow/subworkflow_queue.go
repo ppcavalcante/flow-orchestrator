@@ -98,11 +98,14 @@ func (a *queueSubWorkflowAction) Execute(ctx context.Context, parentData *Workfl
 	}
 	// Resolve the child type → DAG (the SAME factory the worker uses) for the coe-verdict on wake, and
 	// to VALIDATE the type exists before enqueuing (a loud error beats a pending-forever unregistered row).
-	factory, known := reg.lookup(a.childType)
+	entry, known := reg.lookup(a.childType)
 	if !known {
 		return fmt.Errorf("%w: queue sub-workflow %q: child type %q is not registered", ErrValidation, a.nodeName, a.childType)
 	}
-	childDAG, ferr := factory()
+	// Build the child from ITS OWN input (a.input, set via WithInput) — a legacy child factory ignores
+	// it, an input-aware child constructs from it (M25). The child's input is the SAME bytes enqueued
+	// below and re-read by the worker, so the parent-drive build and the worker-drive build agree (C9).
+	childDAG, ferr := entry.build(a.input)
 	if ferr != nil {
 		return fmt.Errorf("%w: queue sub-workflow %q: child factory for type %q failed: %w", ErrValidation, a.nodeName, a.childType, ferr)
 	}
@@ -177,11 +180,14 @@ func (r *Registry) ValidateNoTypeCycles() error {
 	// edges[t] = the set of types t statically spawns (via a queue sub-workflow node in t's DAG).
 	edges := make(map[string][]string)
 	for _, typ := range r.Types() {
-		factory, ok := r.lookup(typ)
+		entry, ok := r.lookup(typ)
 		if !ok {
 			continue
 		}
-		dag, err := factory()
+		// NOTE (Phase D closes this): an input-aware entry cannot be inspected without inventing input;
+		// ValidateNoTypeCycles gains an explicit unsupported-inspection refusal there. Here (legacy-only
+		// callers) the input-ignoring adapter makes build(nil) == the zero-arg factory, unchanged.
+		dag, err := entry.build(nil)
 		if err != nil || dag == nil {
 			continue // opaque/failing factory → its edges are unknowable; the depth ceiling backstops it.
 		}

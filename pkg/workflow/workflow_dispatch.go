@@ -18,47 +18,97 @@ import (
 
 // DAGFactory builds the *DAG for a workflow type. It carries the CODE (actions as closures) — the
 // registry maps a DATA `type` string to it. Input is seeded separately as KV (it is DATA the nodes
-// read, not graph structure), so the factory takes no arguments; a type whose input shapes the graph
-// would add an additive input-taking variant later (not needed for ph81's KV-input model).
+// read, not graph structure), so the factory takes no arguments. A type whose input SHAPES the graph
+// (per-run concurrency/fan-out width, validated policy) uses the additive InputDAGFactory via
+// RegisterWithInput instead — both forms share one dispatch lifecycle.
 type DAGFactory func() (*DAG, error)
 
-// Registry maps a workflow `type` to the DAGFactory that builds it. Per-worker, in-process, explicit
-// registration. A type with no registered factory is un-runnable by THIS worker (RunNext's type
-// filter leaves it pending+visible in the queue rather than claim-fail-releasing it).
+// InputDAGFactory builds the *DAG for a workflow type FROM the queued input, BEFORE graph construction.
+// Register it via RegisterWithInput when one registered type must construct different, validated
+// per-run graphs (e.g. per-run concurrency or fan-out width) without mutable closures, per-run type
+// names, or an application copy of dispatch.
+//
+// Contract (the input stays opaque to the engine — the application decodes its own envelope):
+//   - `input` is the ORIGINAL queued payload bytes. It is a DEFENSIVE COPY: mutating the slice cannot
+//     alter the persisted input, the initial journal seed, or a child submission (C2).
+//   - Return a FRESH graph and perform NO external effects. The factory MAY be invoked multiple times
+//     (incl. while preparing a queued child before its own worker claims it), so it must be pure:
+//     decode / validate / build locally only — no network, model calls, or long-running work. This is
+//     an embedder contract, not a sandbox.
+//   - It is TRUSTED application code (actions stay CODE — the moat holds), not user-supplied executable
+//     payload; this adds no new arbitrary-callback panic-recovery policy.
+type InputDAGFactory func(input []byte) (*DAG, error)
+
+// registryEntry is one type's builder. Both Register and RegisterWithInput store exactly one entry with
+// a SINGLE invocation path (build), so dispatch has ONE lifecycle regardless of the registration form
+// (C1). wantsInput records the form for the static cycle helper (which cannot inspect an input-dependent
+// factory — C11) and for tests; it never forks the dispatch path.
+type registryEntry struct {
+	build     func(input []byte) (*DAG, error)
+	wantsInput bool
+}
+
+// Registry maps a workflow `type` to the builder that constructs it. Per-worker, in-process, explicit
+// registration. A type with no registered entry is un-runnable by THIS worker (RunNext's type filter
+// leaves it pending+visible in the queue rather than claim-fail-releasing it).
 type Registry struct {
-	mu        sync.RWMutex
-	factories map[string]DAGFactory
+	mu      sync.RWMutex
+	entries map[string]registryEntry
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
-	return &Registry{factories: make(map[string]DAGFactory)}
+	return &Registry{entries: make(map[string]registryEntry)}
 }
 
-// Register maps `typ` to `factory`. Returns an error on an empty type, a nil factory, or a duplicate
-// registration (fail-loud — a silent overwrite would make dispatch depend on registration order).
+// Register maps `typ` to a zero-argument `factory` (input is seeded separately as KV — see seedInput).
+// Returns an error on an empty type, a nil factory, or a duplicate registration — including a duplicate
+// across RegisterWithInput (one namespace; a silent overwrite would make dispatch depend on
+// registration order). Stored as an input-ignoring adapter so there is one invocation path.
 func (r *Registry) Register(typ string, factory DAGFactory) error {
-	if typ == "" {
-		return fmt.Errorf("%w: Register requires a non-empty type", ErrValidation)
-	}
 	if factory == nil {
 		return fmt.Errorf("%w: Register requires a non-nil factory for type %q", ErrValidation, typ)
 	}
+	return r.register(typ, registryEntry{build: func(_ []byte) (*DAG, error) { return factory() }})
+}
+
+// RegisterWithInput maps `typ` to an INPUT-AWARE `factory` that receives the original queued payload
+// before graph construction. Same namespace, claim filtering and dispatch lifecycle as Register; a
+// duplicate across EITHER method is refused and does NOT replace the original registration. See
+// InputDAGFactory for the constructor contract (fresh graph, no effects, defensive-copy input).
+func (r *Registry) RegisterWithInput(typ string, factory InputDAGFactory) error {
+	if factory == nil {
+		return fmt.Errorf("%w: RegisterWithInput requires a non-nil factory for type %q", ErrValidation, typ)
+	}
+	// Defensive copy (C2), bounded and ONLY on the input-aware path: the constructor cannot retain a
+	// reference that later mutates the persisted input, the initial journal seed, or a child submission.
+	build := func(in []byte) (*DAG, error) {
+		cp := append([]byte(nil), in...)
+		return factory(cp)
+	}
+	return r.register(typ, registryEntry{build: build, wantsInput: true})
+}
+
+// register is the shared, locked insertion for both forms: empty-type + cross-method duplicate refusal.
+func (r *Registry) register(typ string, e registryEntry) error {
+	if typ == "" {
+		return fmt.Errorf("%w: registration requires a non-empty type", ErrValidation)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, dup := r.factories[typ]; dup {
+	if _, dup := r.entries[typ]; dup {
 		return fmt.Errorf("%w: type %q is already registered", ErrValidation, typ)
 	}
-	r.factories[typ] = factory
+	r.entries[typ] = e
 	return nil
 }
 
-// lookup returns the factory for `typ` (ok=false if unregistered).
-func (r *Registry) lookup(typ string) (DAGFactory, bool) {
+// lookup returns the entry for `typ` (ok=false if unregistered).
+func (r *Registry) lookup(typ string) (registryEntry, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	f, ok := r.factories[typ]
-	return f, ok
+	e, ok := r.entries[typ]
+	return e, ok
 }
 
 // Types returns the registered type names — the ClaimNext type filter (DEC-M17-TYPEFILTER), so a
@@ -66,8 +116,8 @@ func (r *Registry) lookup(typ string) (DAGFactory, bool) {
 func (r *Registry) Types() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]string, 0, len(r.factories))
-	for t := range r.factories {
+	out := make([]string, 0, len(r.entries))
+	for t := range r.entries {
 		out = append(out, t)
 	}
 	return out
@@ -134,7 +184,7 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		return true, nil // ran=true (we handled the item — terminalized cancelled, did not Execute)
 	}
 
-	factory, ok := reg.lookup(item.Type)
+	entry, ok := reg.lookup(item.Type)
 	if !ok {
 		// Claimed a type with no factory. Given the len(types)>0 guard + the type filter, this is an
 		// invariant violation (a registry mutated between Types() and lookup — a programmer error in the
@@ -143,9 +193,18 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		return failClaimedItem(store, item, fmt.Errorf("%w: claimed type %q is not registered (registry mutated mid-claim?)", ErrValidation, item.Type))
 	}
 
-	dag, ferr := factory()
+	// Build from the DURABLE queued input. A legacy Register'd type ignores it (input-ignoring adapter);
+	// an input-aware type constructs its per-run graph from it (a defensive copy — C2). Construction runs
+	// here, AFTER the capped ClaimNext + cancel re-read and OUTSIDE any registry lock / claim txn (C3/C4);
+	// on a re-claim the SAME durable input rebuilds an equivalent fresh graph (C5).
+	dag, ferr := entry.build(item.Input)
 	if ferr != nil {
 		return failClaimedItem(store, item, fmt.Errorf("%w: factory for type %q failed: %w", ErrValidation, item.Type, ferr))
+	}
+	if dag == nil {
+		// A factory that returns (nil, nil) is a validation failure, caught BEFORE any action runs (C7) —
+		// never a nil-DAG drive. Mirrors the queue path's nil-child guard.
+		return failClaimedItem(store, item, fmt.Errorf("%w: factory for type %q returned a nil DAG", ErrValidation, item.Type))
 	}
 
 	// Seed the input as KV BEFORE Execute — but ONLY on a truly-FRESH run (no existing journal). The

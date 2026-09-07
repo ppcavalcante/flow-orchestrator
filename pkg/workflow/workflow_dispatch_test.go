@@ -201,7 +201,7 @@ func TestRunNext_ReconciliationSeam_Idempotent(t *testing.T) {
 	require.Equal(t, FencingToken(2), tokB, "the lapsed lease re-claim bumped the token (A fenced)")
 
 	// B rebuilds the DAG (same registry) + re-Executes on the SAME store (checkpoint CAS reads token 2).
-	dag, ferr := reg.factories["chain"]()
+	dag, ferr := reg.entries["chain"].build(nil)
 	require.NoError(t, ferr)
 	wB := &Workflow{dag: dag, WorkflowID: "wf", Store: s}
 	require.NoError(t, wB.Execute(context.Background()), "re-Execute of a complete journal is a clean NO-OP")

@@ -28,9 +28,9 @@ func mkQueueStore(t *testing.T) *SQLiteStore {
 // child ID.
 func childApprovalNonce(t *testing.T, reg *Registry, childID, childType, node string) string {
 	t.Helper()
-	factory, ok := reg.lookup(childType)
+	entry, ok := reg.lookup(childType)
 	require.True(t, ok, "child type %q must be registered to compute its approval nonce", childType)
-	dag, err := factory()
+	dag, err := entry.build(nil)
 	require.NoError(t, err)
 	return ApprovalNonce(childID, node, dag.DefinitionDigest())
 }
