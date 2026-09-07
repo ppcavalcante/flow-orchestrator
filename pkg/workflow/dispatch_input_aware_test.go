@@ -426,6 +426,43 @@ func TestInputAware_FactoryFailure_RecordingFaultSurfaced(t *testing.T) {
 	require.ErrorContains(t, rerr, "failed to record terminal failure", "the persistence fault is SURFACED, not discarded")
 }
 
+// A9 (compatibility declaration): the durable-type conflict guard is UNCONDITIONAL — it applies to
+// LEGACY (zero-arg) child registrations too. Ordinary same-type legacy replay is unaffected (a re-drive
+// of the same parent DAG presents the same type → proceeds); only a different-type reuse of the same
+// deterministic child ID is refused. This distinguishes the two.
+func TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused(t *testing.T) {
+	s := mkQueueStore(t)
+	reg := NewRegistry()
+	require.NoError(t, reg.Register("legA", func() (*DAG, error) {
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+	require.NoError(t, reg.Register("legB", func() (*DAG, error) {
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+
+	mkParent := func(childType string) *Workflow {
+		pb := NewWorkflowBuilder().WithWorkflowID("p")
+		pb.AddSubWorkflowQueued("sub", childType)
+		dag, err := pb.Build()
+		require.NoError(t, err)
+		pw := newWorkflowForTest(s)
+		pw.WorkflowID = "p"
+		pw.dag = dag
+		pw.registry = reg
+		return pw
+	}
+
+	// Enqueue child as legA + park.
+	require.ErrorIs(t, mkParent("legA").Execute(context.Background()), ErrSuspended, "enqueue legA + park")
+	// Ordinary same-type legacy replay → still parks (NOT refused) — unchanged behavior.
+	require.ErrorIs(t, mkParent("legA").Execute(context.Background()), ErrSuspended, "same-type legacy replay is unaffected")
+	// Different-type reuse of the same child ID → refused (the durable-type integrity guard).
+	rerr := mkParent("legB").Execute(context.Background())
+	require.Error(t, rerr)
+	require.ErrorIs(t, rerr, ErrValidation, "a different-type reuse of the same child ID is refused, even for legacy")
+	require.NotErrorIs(t, rerr, ErrSuspended)
+}
+
 // W11 — control-plane separation: forged parent/signal/depth-looking KEYS in the child payload cannot
 // change the engine-derived child identity, completion destination, or runtime depth (those live in
 // trusted control columns set by EnqueueSubWorkflow, never the input BLOB).

@@ -44,13 +44,23 @@ two prerequisite lifecycle corrections landed on `main`, TDD, additive and backw
 | `pkg/workflow/workflow_dispatch.go` | `InputDAGFactory` + `RegisterWithInput`; unified one-entry registry (`registryEntry.build`) with an input-ignoring adapter for `Register`; defensive input copy; `runNext` builds from `item.Input`; nil-DAG guard; `failClaimedItem` (terminalize+wake) for all construction/seed failures (BUG-1). |
 | `pkg/workflow/subworkflow_queue.go` | queued-child built from its own input; durable-input authority + conflicting-redefinition refusal (C9); `ValidateNoTypeCycles` explicit input-aware refusal (C11). |
 | `pkg/workflow/subworkflow_parked.go` | parked-await consults queue authority before a missing journal → resolves a terminal queue child without a journal (BUG-2 / C15). |
-| `pkg/workflow/workflow_store_sqlite_workqueue.go` | `queueChildInput` (private durable-input read). |
+| `pkg/workflow/workflow_store_sqlite_workqueue.go` | `queueChildTypeInput` (private durable type+input read). |
 | `pkg/workflow/*_test.go` (dispatch_input_aware, subworkflow_early_failure, +2 adapted) | witnesses + 2 tests adapted to the private registry representation. |
 | `docs/guides/dispatch.md`, `CHANGELOG.md` | new-API docs + changelog. |
 
-**Deviations from the contract:** none material. Naming follows the handoff. The private
-representation is one `registryEntry{build, wantsInput}` per type (the handoff left this to us).
-Input ownership is the recommended defensive byte-copy, on the input-aware path only.
+**Deviations from the contract (declared, A9).** One compatibility broadening beyond §5B:
+
+> A parent re-drive attempting to reuse an existing deterministic child ID with a **different registered
+> type** now refuses with `ErrValidation`, **including legacy-only registrations**. Ordinary same-type
+> legacy replay remains supported and unchanged. Input-conflict enforcement remains input-aware-specific.
+> This broadens the original handoff's compatibility scope; it is **not** unchanged behavior for
+> different-type reuse of the same child ID.
+
+This is the fix for reproduced defect E01-QA-1 (a type-only conflict was silently accepted). Witness:
+`TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` (same-type legacy replay parks unchanged;
+different-type reuse refused). Otherwise no deviations: naming follows the handoff, the private
+representation is one `registryEntry{build, wantsInput}` per type, input ownership is the recommended
+defensive byte-copy on the input-aware path only, and no persisted-format migration is introduced.
 
 ## 3. Witness → test mapping (all real-SQLite dispatch)
 
