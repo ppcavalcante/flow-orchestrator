@@ -20,6 +20,28 @@ must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a
 - **`Observability.ListSchedules() ([]ScheduleInfo, error)`** — the operator read-model can now enumerate
   every schedule (soonest next-fire first, one atomic SELECT), including paused ones, closing the only
   read-model asymmetry (create/pause/resume/delete existed; no read did). (OBS-RM-06.)
+- **`Registry.RegisterWithInput(typ string, factory InputDAGFactory)`** + the new
+  **`InputDAGFactory func(input []byte) (*DAG, error)`** type — an **input-aware** registered DAG factory
+  that receives the queued input **before** graph construction, so one registered type can build different
+  validated per-run graphs (per-run concurrency, fan-out width, validated policy) through the SAME
+  capped/fenced dispatch lifecycle — without mutable closures, per-run type names, or an application copy
+  of dispatch. Additive: the zero-argument `Register`/`DAGFactory` form is unchanged and fully supported.
+  The input is a defensive copy (a constructor cannot mutate the persisted input, the initial journal
+  seed, or a child submission); a build error or a `nil` DAG is a terminal validation failure before any
+  action runs (never a retry); a reclaim rebuilds from the **durable** queued input; a queued
+  sub-workflow child (`AddSubWorkflowQueued` + `WithInput`) can be input-aware and its durable input is
+  authoritative on re-drive (a conflicting redefinition is refused); `ValidateNoTypeCycles` explicitly
+  refuses an input-aware registry (its edges are input-dependent). (Requested by a downstream consumer.)
+
+**Fixed:**
+- A queued sub-workflow child that failed **construction** (unregistered type, factory error, bad seed)
+  *before running* stranded its parent parked forever: the worker terminalized the child but never
+  delivered the completion trigger, and even a manual re-drive re-parked because the parked-await consulted
+  the (absent) child journal before the queue authority. Now every construction/seed failure wakes the
+  parent, and the parked-await resolves a terminal queue child (`failed`/`cancelled`) that has no journal
+  as a failure (a `done` row with no journal is a typed integrity error; manual/non-queue children retain
+  journal-based waiting). Pre-existing lifecycle bugs, reachable with a zero-arg factory that fails at the
+  worker after enqueue — far more likely with input-aware factories.
 
 **Removed (BREAKING):**
 - **`ScheduleSpec.WithCatchupOnce()`** (AUD-067). It was a `RESERVED:` public method that durably

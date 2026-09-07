@@ -72,9 +72,9 @@ func (a *parkedSubWorkflowAction) Execute(ctx context.Context, parentData *Workf
 			// BUG-2 / C15: a QUEUE child can terminalize WITHOUT ever writing a journal — a constructor
 			// or seed failure at the worker leaves a terminal `failed`/`cancelled` work_queue row and no
 			// journal (nothing ran). Consult the queue authority BEFORE treating a missing journal as
-			// unfinished work, else the parent parks forever on a child that is already terminal. A
-			// MANUAL/non-queue child has no work_queue row (exists=false) → falls through to the
-			// journal-based park below, byte-unchanged.
+			// unfinished work — otherwise the parent would re-park on every wake and never converge on a
+			// child that is already terminal. A MANUAL/non-queue child has no work_queue row
+			// (exists=false) → falls through to the journal-based park below, byte-unchanged.
 			if sq, ok := store.(*SQLiteStore); ok {
 				if wqState, exists, qerr := sq.queueTerminalState(childID); qerr == nil && exists {
 					switch wqState {

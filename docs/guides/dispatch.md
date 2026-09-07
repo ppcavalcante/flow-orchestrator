@@ -47,6 +47,54 @@ claim-fail-release loop.
 > them can drift; the drifted resume is dead-lettered (`ErrValidation`), not silently mis-run.
 > Rolling a factory change out means draining the pool, not a mixed-version fleet.
 
+### Input-aware factories — one type, per-run graphs
+
+Sometimes one registered type must build **different, validated graphs per run** — a per-run
+concurrency limit, a fan-out width, a validated execution policy — without mutable closures,
+per-run type names, or an application copy of dispatch. Register an **input-aware** factory that
+receives the queued input **before** graph construction:
+
+```go
+reg.RegisterWithInput("triage", func(input []byte) (*workflow.DAG, error) {
+    var cfg triageConfig
+    if err := json.Unmarshal(input, &cfg); err != nil {
+        return nil, fmt.Errorf("%w: %w", workflow.ErrValidation, err) // a bad payload is a terminal failure, never a retry
+    }
+    b := workflow.NewWorkflowBuilder().
+        WithExecutionConfig(workflow.ExecutionConfig{MaxConcurrency: cfg.Concurrency})
+    // ... build the per-run graph from cfg ...
+    return b.Build()
+})
+```
+
+`RegisterWithInput` shares the **same** namespace, claim filtering and dispatch lifecycle as
+`Register` (a duplicate across either method is refused). The constructor contract:
+
+- **Input is the original queued bytes, as a defensive copy** — mutating the slice cannot alter the
+  persisted input, the initial journal seed, or a child submission. The engine keeps its own copy.
+- **Return a fresh graph and perform no external effects.** The factory may be invoked **multiple
+  times** (including while preparing a queued child before its own worker claims it, and on a
+  reclaim after a worker dies — it always rebuilds from the *durable* queued input, never worker
+  defaults). Decode / validate / build locally only: no network, model calls, or long-running work.
+- **It is trusted application code** (actions stay CODE — the moat holds), not user-supplied
+  executable payload; this adds no arbitrary-callback panic policy.
+- A build error or a `nil` DAG is a **typed validation failure before any action runs** — no
+  fallback graph, no hot retry loop for an invalid payload.
+
+A queued **sub-workflow child** can be input-aware too (`AddSubWorkflowQueued` + `WithInput`): the
+child is built from *its own* input, and once its queue row exists that durable input is
+authoritative — a parent re-drive that declares a conflicting input is refused, not silently
+reinterpreted. Control-plane fields (parent address, completion signal, nesting depth) stay
+engine-set trusted columns; similarly-named payload keys cannot change them.
+
+> **`ValidateNoTypeCycles` and input-aware types.** The opt-in static cycle check cannot inspect an
+> input-dependent factory (its edges depend on the per-run input), so a registry containing any
+> input-aware type returns an explicit `ErrValidation` from that helper — omit the optional check;
+> the runtime depth ceiling (`ErrSubWorkflowMaxDepth`) still bounds every spawn chain.
+
+The zero-argument `Register`/`DAGFactory` form is unchanged and fully supported; input-aware
+factories are purely additive.
+
 ## Enqueue → claim → run → terminalize
 
 ```go
