@@ -1,13 +1,31 @@
 # Delivery receipt — input-aware registered DAG factories
 
 **Re:** `openai-workflow/docs/plans/security-workflow-architecture/engine-input-aware-factory-handoff.md`
-**Status: DELIVERED.** Both the requested capability and the two prerequisite lifecycle corrections
-landed on `main`, TDD, additive and backward-compatible.
+**Status: DELIVERED (rev 2, after independent-review fixes).** Both the requested capability and the
+two prerequisite lifecycle corrections landed on `main`, TDD, additive and backward-compatible.
+
+> **Rev 2 — independent-review response.** Your validation of candidate `b874471` (whose producer CI
+> passed green: run `34133736256`) reproduced two real defects and flagged two witness-quality gaps.
+> All fixed in `53cfb98`, each reproduced with a failing test first:
+> 1. **Queued-child TYPE conflict now refused** — the C9 guard compared durable input but not durable
+>    type; it now reads and enforces both (`queueChildTypeInput`). Test:
+>    `TestInputAware_QueuedChildTypeConflict_Refused`.
+> 2. **Failure-recording faults now surfaced** — `failClaimedItem` no longer discards the `MarkFailed`
+>    error; a store rejection is joined with the cause (preserving its `ErrIO`/`ErrBusy` class), §5A.
+>    Test: `TestInputAware_FactoryFailure_RecordingFaultSurfaced`.
+> 3. **W2 fan-out-width witness added** (`TestInputAware_W2_FanOutWidthBound`) — distinct from W1's
+>    concurrency; over-bound fails loud (`ErrFanOutMaxWidth`), never truncates.
+> 4. **W1 reliability** — replaced the `Eventually(active==want)` poll (could time out on a loaded
+>    runner: failed without `-race`, passed with) with a deterministic start-barrier; 30× clean.
+>
+> The two "additional application needs" (public E-read original-type/input lookup; targeted by-ID
+> admission through caps/fencing) are correctly **outside** the E-01 request — the latter is an
+> explicit engine non-goal (§8) — and remain consumer-owned follow-ons, not defects here.
 
 ## 1. Commit / version / public API
 
-- **Engine commit:** `d7eb1ad` on `main` (built on the handoff's inspected baseline `defd443`).
-- **Consume before the next tag:** `go get github.com/ppcavalcante/flow-orchestrator@d7eb1ad`
+- **Engine commit:** `53cfb98` on `main` (built on the handoff's inspected baseline `defd443`).
+- **Consume before the next tag:** `go get github.com/ppcavalcante/flow-orchestrator@53cfb98`
   (or wait for the `v0.23.0-alpha` tag — this ships in it).
 - **Final public API (matches the handoff's proposed shape):**
 
@@ -51,7 +69,7 @@ Run: `GOTOOLCHAIN=local go test ./pkg/workflow/ -run '<name>' -count=1` (full su
 | W11 control-plane separation | `TestInputAware_W11_ControlPlaneSeparation` | forged parent/signal/depth payload keys cannot change engine-derived identity/depth. |
 | W12 static-inspection honesty | `TestInputAware_W12_CycleHelperRefusesInputAware` | legacy cycle still detected; input-aware registry gets the unsupported-inspection refusal without invoking an invented-input factory. |
 | W5 (parent outcome) / W10 early-fail | `TestQueueChild_TerminalFailedWithoutJournal…`, `_TerminalCancelledWithoutJournal…`, `_WorkerFactoryFailure_WakesParent`, `_PendingWithoutJournal…` | BUG-1/BUG-2: a queued child failing construction wakes its parent and resolves as failure, never a forever-park. |
-| **W2 width bound** | *covered in shape by W1* | W1 proves input→graph-parameter→honored via `ExecutionConfig`; fan-out width uses the same `WithMaxWidth` builder knob through the same path. A dedicated width witness can be added on request. |
+| W2 fan-out width bound | `TestInputAware_W2_FanOutWidthBound` | input selects `WithMaxWidth`; at-bound runs every branch, over-bound fails loud (`ErrFanOutMaxWidth`), never truncates. (Added in rev 2 — distinct mechanism from W1.) |
 | **W7 completion reconciliation** | *inherited* — `TestRunNext_ReconciliationSeam_Idempotent` | the reconciliation seam is byte-unchanged; W6 exercises reclaim through the input-aware path. |
 | **W9 stale owner** | *inherited* — existing M16 fencing suites | fencing/tokenState is byte-unchanged by this additive feature. |
 | **W13 cancellation/retry** | *inherited* — existing cancel suites + W5 | the cancel re-read/`disposeExecErr` path is unchanged; W5 proves invalid factory input is not turned into retryable infra. |
@@ -88,6 +106,8 @@ rather than re-run duplicates. Say the word if you want any of them as a dedicat
 
 ## 6. Gate
 
-Full `pkg/workflow` suite green locally (non-race); `go build ./...`, `go vet ./...`, `golangci-lint`
-(0 issues), and the doctest gate all pass. The authoritative `-race 30m` + coverage + govulncheck +
-formal-model gates run on CI-amd64 on push — **[CI result to be appended once the push run completes].**
+Candidate `b874471` cleared the full producer CI-amd64 gate green (run `34133736256`: `-race 30m`,
+coverage, govulncheck, formal models, lint, fuzz — all success). Rev-2 fixes (`53cfb98`) verified
+locally: the new/hardened witnesses pass under `-race`, W1 30× clean, `golangci-lint` 0 issues, and
+the doctest gate passes; the authoritative amd64 gate re-runs on the rev-2 push (result appended when
+it completes).
