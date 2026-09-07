@@ -32,6 +32,26 @@ must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a
   sub-workflow child (`AddSubWorkflowQueued` + `WithInput`) can be input-aware and its durable input is
   authoritative on re-drive (a conflicting redefinition is refused); `ValidateNoTypeCycles` explicitly
   refuses an input-aware registry (its edges are input-dependent). (Requested by a downstream consumer.)
+- **E-read — `SQLiteStore.InspectSubmission` + `ListSubmissions`** (+ `QueuedSubmission`, `SubmissionCursor`,
+  `SubmissionPage`, `Default/MaxSubmissionPageLimit`) — a read-only public surface over the durable
+  `work_queue` row. `InspectSubmission(id)` recovers the **original queued type + exact input** and lifecycle
+  BY ID for any submission, including terminal records that never obtained a journal (constructor/seed
+  failure, cancellation); a missing id is `ErrNotFound`, distinguishable from a storage failure. The input is
+  journal-independent (read from the queue row) and a defensive copy. `ListSubmissions(states, limit, after)`
+  is bounded (limit clamped to `[1,1000]`) and cursor-resumable via a keyset over the immutable
+  `(enqueued_at, workflow_id)`, includes terminal queue-only rows, and documents its point-in-time-per-page
+  concurrent-change semantics — never a silent `ListPending` substitute or unbounded dump. Additive; no
+  schema/behavior change. (§14.B1 — requested by a downstream consumer.)
+- **Targeted host-local dispatch — `SQLiteStore.EnqueueForHost` + `ClaimNextForHost` + `RunNextForHost`** — a
+  designated-host binding so a specific run executes on **its** host, not a generic worker. `EnqueueForHost`
+  stamps the run's `owner_host` **atomically** with admission (no theft window); the generic `ClaimNext` now
+  excludes host-bound rows (`owner_host IS NULL` — matches every pre-existing row, so unchanged), and
+  `ClaimNextForHost(host)` claims/reclaims **only** that host's bound rows, so the host drives its own work,
+  substitutes no other queued work, and a dead host's work is never silently run elsewhere (reclaim is
+  host-scoped; the durable identity persists until the same host returns). Shared caps, token-bound
+  execution/checkpoints, cancellation, bounded retries and durable recovery are all reused unchanged (no cap
+  bypass; stale-owner writes fenced). Backed by an additive nullable `work_queue.owner_host` column
+  (idempotent `ALTER`; `NULL` = generic). (§14.B2 — requested by a downstream consumer.)
 
 **Fixed:**
 - A queued sub-workflow child that failed **construction** (unregistered type, factory error, bad seed)
