@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS work_queue (
                                             -- running slots as state='claimed' AND parked IS NULL -- a parked child is NOT a
                                             -- slot (so K parked parents awaiting a capped child never deadlock the cap).
                                             -- SET at the runNext park path; CLEARED on the reclaim/re-claim flip (running again).
+    owner_host      TEXT                    -- M25 §14.B2: DESIGNATED-HOST binding for a host-local run. NULL =
+                                            -- generic (any worker's ClaimNext may claim/reclaim it — unchanged M17).
+                                            -- Non-NULL = HOST-BOUND: the generic ClaimNext scan EXCLUDES it
+                                            -- (owner_host IS NULL), so a generic worker can never steal it, and ONLY
+                                            -- ClaimNextForHost(host=owner_host) may claim OR reclaim it — so a dead
+                                            -- host's work is never silently executed elsewhere and keeps its durable
+                                            -- identity. Set atomically at EnqueueForHost (admission == enqueue, no
+                                            -- theft window). Additive/nullable; orthogonal to the fencing arbiter.
 );
 -- PARTIAL index over ONLY claimable rows: the ClaimNext scan (WHERE state='pending' [AND type IN …]
 -- ORDER BY enqueued_at) is fully index-covered, and terminal rows never bloat it.
@@ -316,6 +324,15 @@ func NewSQLiteStore(path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
 		return nil, fmt.Errorf("%w: schedules input migration: %w", ErrIO, err)
+	}
+	// M25 §14.B2: additive nullable `owner_host` column on work_queue (same idempotent ADD COLUMN pattern).
+	// NULLABLE with no default → an existing row backfills to NULL = "generic / not host-bound", exactly the
+	// prior behaviour (any worker's ClaimNext could claim it). Set only at EnqueueForHost; the generic
+	// ClaimNext scan gains `AND owner_host IS NULL`, which matches every pre-B2 row → byte-behavior-unchanged.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE work_queue ADD COLUMN owner_host TEXT`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		db.Close() //nolint:errcheck,gosec // best-effort cleanup on the error path
+		return nil, fmt.Errorf("%w: owner_host migration: %w", ErrIO, err)
 	}
 	// M16 (ph75): resolve the lease-liveness clock + TTL (defaults when unset). Lease liveness only.
 	clock := dur.clock

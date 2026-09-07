@@ -88,7 +88,7 @@ func TestKillStormWorkerEntry(t *testing.T) {
 	reg := ksRegistry()
 	deadline := time.Now().Add(20 * time.Second) // safety bound; the parent kills/ends us well before
 	for time.Now().Before(deadline) {
-		ran, rerr := runNext(context.Background(), s, reg, owner, maxAttempts)
+		ran, rerr := runNext(context.Background(), s, reg, owner, "", maxAttempts)
 		if rerr != nil {
 			// A drive failure is already terminalized/retried by disposeExecErr; keep draining. A
 			// transient claim fault self-heals on the next scan. We do NOT fail the worker here —

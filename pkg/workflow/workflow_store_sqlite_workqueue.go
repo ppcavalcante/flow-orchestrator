@@ -122,6 +122,44 @@ func (s *SQLiteStore) EnqueueSubWorkflow(childID, typ string, input []byte, pare
 	return n == 1, nil
 }
 
+// EnqueueForHost is Enqueue for a DESIGNATED-HOST run (M25 §14.B2): it durably submits workflowID with its
+// `owner_host` binding set ATOMICALLY on the pending row — so admission == enqueue and there is NO theft window
+// (a generic ClaimNext excludes host-bound rows; only ClaimNextForHost(host) may claim OR reclaim it). Idempotent
+// + detectable like Enqueue (ON CONFLICT DO NOTHING). `host` must be non-empty; the run is otherwise an ordinary
+// dispatch (same shared caps, same-store token-bound execution/checkpoints, cancellation, bounded retries and
+// durable terminal/recovery semantics). Requires mp mode.
+func (s *SQLiteStore) EnqueueForHost(workflowID, typ string, input []byte, host string) (queued bool, err error) {
+	if !s.dur.mp {
+		return false, fmt.Errorf("%w: EnqueueForHost requires a multi-process store (WithMultiProcess)", ErrValidation)
+	}
+	if err := validateWorkflowID(workflowID); err != nil {
+		return false, err
+	}
+	if typ == "" {
+		return false, fmt.Errorf("%w: EnqueueForHost requires a non-empty type", ErrValidation)
+	}
+	if host == "" {
+		return false, fmt.Errorf("%w: EnqueueForHost requires a non-empty host (use Enqueue for a generic run)", ErrValidation)
+	}
+	ctx := context.Background()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := unixNanoNow()
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO work_queue(workflow_id, type, input, enqueued_at, state, attempts, updated_at, owner_host)
+		 VALUES (?,?,?,?, 'pending', 0, ?, ?)
+		 ON CONFLICT(workflow_id) DO NOTHING`,
+		workflowID, typ, input, now, now, host)
+	if err != nil {
+		return false, classifyTxErr("enqueue for host", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("%w: enqueue-for-host rows: %w", ErrIO, err)
+	}
+	return n == 1, nil
+}
+
 // wqStates — the terminal set (never re-claimed; the C2 infinite-reclaim guard lives in ClaimNext's
 // `WHERE state='pending'` scan, but these name the lifecycle for the transition methods).
 const (
@@ -198,6 +236,27 @@ func buildTypeFilter(typeFilter []string) (clause string, args []interface{}) {
 // one write lock, so exactly one claims any given row; a terminal row is NEVER returned (the
 // `state='pending'` scan filter — C2). Requires mp mode.
 func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem, error) {
+	return s.claimNext(ownerID, "", typeFilter)
+}
+
+// ClaimNextForHost is ClaimNext scoped to a DESIGNATED HOST (M25 §14.B2): it claims (and reclaims) ONLY rows
+// bound to `host` (owner_host = host), and NEVER generic or other-host rows — so the host drive drives its OWN
+// designated work and substitutes no other queued work. Symmetrically, the generic ClaimNext EXCLUDES every
+// host-bound row (owner_host IS NULL), so a generic worker can never steal host-bound work. Reclaim is
+// host-scoped too: a lapsed host-bound row is reclaimable ONLY by its host, so a dead host's work is never
+// silently executed elsewhere (its durable owner_host identity persists until the same host returns). Same
+// shared caps + fencing + lifecycle as ClaimNext. `host` must be non-empty.
+func (s *SQLiteStore) ClaimNextForHost(ownerID, host string, typeFilter ...string) (WorkItem, error) {
+	if host == "" {
+		return WorkItem{}, fmt.Errorf("%w: ClaimNextForHost requires a non-empty host (use ClaimNext for generic work)", ErrValidation)
+	}
+	return s.claimNext(ownerID, host, typeFilter)
+}
+
+// claimNext is the shared claim body. host=="" is a GENERIC claim (owner_host IS NULL — every pre-B2 row, so
+// byte-behavior-unchanged); host!="" is a HOST-SCOPED claim (owner_host = host). The host predicate is the ONLY
+// difference between the two forms — the scan/claim/flip/cap/fencing machinery is identical.
+func (s *SQLiteStore) claimNext(ownerID, host string, typeFilter []string) (WorkItem, error) {
 	if !s.dur.mp {
 		return WorkItem{}, fmt.Errorf("%w: ClaimNext requires a multi-process store (WithMultiProcess)", ErrValidation)
 	}
@@ -220,6 +279,16 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 	}()
 
 	typeClause, typeArgs := buildTypeFilter(typeFilter)
+	// HOST BINDING (M25 §14.B2): a generic claim sees ONLY unbound rows (owner_host IS NULL — every pre-B2
+	// row, so unchanged); a host-scoped claim sees ONLY its own bound rows (owner_host = host). This one
+	// predicate both closes the theft window (generic can't take host-bound work) and keeps a host drive from
+	// substituting other queued work. Its bind (if any) follows the reclaim-expiry bind and precedes type/exclude.
+	hostClause := " AND owner_host IS NULL"
+	var hostArgs []interface{}
+	if host != "" {
+		hostClause = " AND owner_host = ?"
+		hostArgs = []interface{}{host}
+	}
 
 	// A claimed workflow_id is excluded from the RE-SCAN on a rare ErrClaimLost (a scanned pending row
 	// whose lease is momentarily LIVE under another owner — a lapsed-then-relive edge). The re-scan
@@ -244,10 +313,11 @@ func (s *SQLiteStore) ClaimNext(ownerID string, typeFilter ...string) (WorkItem,
 		                   OR (state='claimed'
 		                       AND EXISTS (SELECT 1 FROM leases l
 		                                   WHERE l.workflow_id = work_queue.workflow_id AND l.expiry < ?)))` +
-			typeClause + excludeClause + `
+			hostClause + typeClause + excludeClause + `
 		            ORDER BY enqueued_at LIMIT 1`
-		// The reclaim-expiry bind is FIRST — its `?` precedes the type/exclude clauses in the SQL text.
-		scanArgs := append(append(append([]interface{}{}, reclaimNow), typeArgs...), excludeArgs...)
+		// Bind order follows the SQL text: reclaim-expiry (`?` in the EXISTS) FIRST, then the host bind (if any),
+		// then the type/exclude clauses.
+		scanArgs := append(append(append(append([]interface{}{}, reclaimNow), hostArgs...), typeArgs...), excludeArgs...)
 
 		var (
 			wf, typ, state         string

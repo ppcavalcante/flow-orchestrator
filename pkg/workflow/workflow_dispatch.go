@@ -148,12 +148,31 @@ func RunNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 	if reg == nil {
 		return false, fmt.Errorf("%w: RunNext requires a non-nil registry", ErrValidation)
 	}
-	return runNext(ctx, store, reg, ownerID, defaultMaxAttempts)
+	return runNext(ctx, store, reg, ownerID, "", defaultMaxAttempts)
+}
+
+// RunNextForHost is RunNext scoped to a DESIGNATED HOST (M25 §14.B2): it claims + drives ONLY runs bound to
+// `host` (via EnqueueForHost), never generic or other-host work, so a host's own runner drives its designated
+// runs and substitutes no other queued work. A generic RunNext/Pool can never claim host-bound work (the bind
+// closes the theft window). Same shared caps, token-bound execution/checkpoints, cancellation, bounded retries
+// and durable recovery as RunNext. `host` must be non-empty.
+func RunNextForHost(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID, host string) (ran bool, err error) {
+	if store == nil {
+		return false, fmt.Errorf("%w: RunNextForHost requires a non-nil store", ErrValidation)
+	}
+	if reg == nil {
+		return false, fmt.Errorf("%w: RunNextForHost requires a non-nil registry", ErrValidation)
+	}
+	if host == "" {
+		return false, fmt.Errorf("%w: RunNextForHost requires a non-empty host (use RunNext for generic work)", ErrValidation)
+	}
+	return runNext(ctx, store, reg, ownerID, host, defaultMaxAttempts)
 }
 
 // runNext is RunNext's body with an explicit maxAttempts retry budget (DF-4). Internal so RunNext's public
-// signature stays frozen while the Pool injects its own budget.
-func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID string, maxAttempts int) (ran bool, err error) {
+// signature stays frozen while the Pool injects its own budget. host=="" is a generic claim; host!="" scopes
+// the claim to a designated host (§14.B2) — the ONLY difference is which ClaimNext form is used.
+func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID, host string, maxAttempts int) (ran bool, err error) {
 	types := reg.Types()
 	if len(types) == 0 {
 		// EMPTY REGISTRY (review ph81-F1): an empty type filter would make ClaimNext claim ANY pending
@@ -162,7 +181,7 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 		// short-circuit to ErrNoWork's outcome BEFORE claiming — never steal + strand a peer's item.
 		return false, nil
 	}
-	item, err := store.ClaimNext(ownerID, types...) // claim ONLY registered types (D3)
+	item, err := claimForRun(store, ownerID, host, types) // claim ONLY registered types (D3), host-scoped if set
 	if err != nil {
 		if errors.Is(err, ErrNoWork) {
 			return false, nil // nothing claimable — the poller backs off (ph82).
@@ -295,6 +314,16 @@ func runNext(ctx context.Context, store *SQLiteStore, reg *Registry, ownerID str
 	// The child is durably `done` → deliver the completion signal to the parent (if a sub-workflow).
 	deliverSubWorkflowCompletion(store, item)
 	return true, nil
+}
+
+// claimForRun claims the next runnable item for ownerID among the registered types — generically (host=="")
+// via ClaimNext, or scoped to a designated host via ClaimNextForHost (§14.B2). The single seam so runNext's
+// body is identical for both.
+func claimForRun(store *SQLiteStore, ownerID, host string, types []string) (WorkItem, error) {
+	if host == "" {
+		return store.ClaimNext(ownerID, types...)
+	}
+	return store.ClaimNextForHost(ownerID, host, types...)
 }
 
 // failClaimedItem terminalizes a claimed item as `failed`, then WAKES its parent (if it is a
