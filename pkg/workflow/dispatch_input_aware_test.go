@@ -372,6 +372,105 @@ func TestInputAware_W12_CycleHelperRefusesInputAware(t *testing.T) {
 	require.False(t, awareCalled.Load(), "the input-aware factory was NOT invoked with invented input")
 }
 
+// W6 — checkpoint reclaim: a partially-progressed input-aware run, its lease lapsed, is reclaimed by a
+// FRESH worker/registry and REBUILT FROM THE DURABLE INPUT (C5); completed work is not re-invoked and
+// the progressed journal survives (C6). The constructor sees the same durable bytes on every rebuild.
+func TestInputAware_W6_ReclaimRebuildsFromDurableInput(t *testing.T) {
+	clk := NewFakeClock(time.Unix(1000, 0))
+	s := mkDispatchStore(t, withSQLiteClock(clk), withSQLiteLeaseTTL(5*time.Second))
+	ctr := newRunCounter()
+	var inputsSeen []string
+	mkReg := func() *Registry {
+		reg := NewRegistry()
+		require.NoError(t, reg.RegisterWithInput("staged", func(input []byte) (*DAG, error) {
+			inputsSeen = append(inputsSeen, string(input))
+			d := newDAGForTest("staged")
+			if err := d.addNode(newNode("n0", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n0"); return nil }))); err != nil {
+				return nil, err
+			}
+			if err := d.addNode(newNode("n1", ActionFunc(func(context.Context, *WorkflowData) error { ctr.inc("n1"); return nil }))); err != nil {
+				return nil, err
+			}
+			return d, d.addDependency("n0", "n1")
+		}))
+		return reg
+	}
+	input := jsonInput(t, map[string]interface{}{"tag": "durable-X"})
+
+	// Worker A claims (token 1) and durably commits a PARTIAL journal (n0 done, n1 pending) — then "dies"
+	// before MarkDone (n0 counter stays 0: staged manually, as if A ran + checkpointed it).
+	_, err := s.Enqueue("wf", "staged", input)
+	require.NoError(t, err)
+	_, err = s.ClaimNext("A", "staged")
+	require.NoError(t, err)
+	partial := NewWorkflowData("wf")
+	partial.SetNodeStatus("n0", Completed)
+	partial.SetNodeStatus("n1", Pending)
+	require.NoError(t, s.Save(partial))
+
+	// A dies → lapse the lease. A FRESH worker B (fresh registry) reclaims via RunNext: it rebuilds from
+	// the DURABLE input, skips the seed (a journal exists), resumes n1, and terminalizes done.
+	clk.Advance(6 * time.Second)
+	ran, rerr := RunNext(context.Background(), s, mkReg(), "B")
+	require.NoError(t, rerr)
+	require.True(t, ran, "worker B reclaimed the lapsed-claimed run")
+	require.Equal(t, wqDone, wqState(t, s, "wf"), "the reclaimed run resumed to done")
+
+	require.Equal(t, 0, ctr.get("n0"), "n0 was Completed in the durable journal → NOT re-invoked on reclaim")
+	require.Equal(t, 1, ctr.get("n1"), "n1 resumed from the committed frontier")
+	require.NotEmpty(t, inputsSeen)
+	for _, in := range inputsSeen {
+		require.Equal(t, string(input), in, "every rebuild (incl. the reclaim) used the DURABLE queued input")
+	}
+}
+
+// W8 — construction holds neither the registry lock nor the claim transaction (C3/C4): while worker A is
+// blocked INSIDE an input-aware constructor (which itself calls Registry.Types without deadlocking),
+// worker B claims and runs a different item to completion on the same store.
+func TestInputAware_W8_ConstructionHoldsNoLockOrTxn(t *testing.T) {
+	s := mkDispatchStore(t)
+	reg := NewRegistry()
+	buildStarted := make(chan struct{})
+	release := make(chan struct{})
+	var barrierUsed atomic.Bool
+	require.NoError(t, reg.RegisterWithInput("barrier", func([]byte) (*DAG, error) {
+		if !barrierUsed.Swap(true) { // only the FIRST build blocks at the barrier
+			_ = reg.Types() // prove the constructor can inspect the registry without deadlocking
+			close(buildStarted)
+			<-release
+		}
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+	require.NoError(t, reg.Register("free", func() (*DAG, error) {
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+
+	_, err := s.Enqueue("w-barrier", "barrier", jsonInput(t, map[string]interface{}{"x": 1}))
+	require.NoError(t, err)
+	_, err = s.Enqueue("w-free", "free", nil)
+	require.NoError(t, err)
+
+	// Worker A claims w-barrier and blocks IN construction.
+	aDone := make(chan error, 1)
+	go func() { _, e := RunNext(context.Background(), s, reg, "workerA"); aDone <- e }()
+	select {
+	case <-buildStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker A did not enter construction")
+	}
+
+	// While A is held in construction, worker B claims + runs w-free to completion — proving A's
+	// construction holds neither the registry lock (B calls reg.lookup) nor a claim txn (B's ClaimNext).
+	ranB, errB := RunNext(context.Background(), s, reg, "workerB")
+	require.NoError(t, errB)
+	require.True(t, ranB, "worker B progressed while A was held in construction")
+	require.Equal(t, wqDone, wqState(t, s, "w-free"))
+
+	close(release) // let A finish
+	require.NoError(t, <-aDone)
+	require.Equal(t, wqDone, wqState(t, s, "w-barrier"))
+}
+
 // workQueueInput reads the durable work_queue.input bytes for a workflow id (identity assertions).
 func workQueueInput(t *testing.T, s *SQLiteStore, wf string) []byte {
 	t.Helper()
