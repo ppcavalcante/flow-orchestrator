@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 )
@@ -102,10 +103,29 @@ func (a *queueSubWorkflowAction) Execute(ctx context.Context, parentData *Workfl
 	if !known {
 		return fmt.Errorf("%w: queue sub-workflow %q: child type %q is not registered", ErrValidation, a.nodeName, a.childType)
 	}
-	// Build the child from ITS OWN input (a.input, set via WithInput) — a legacy child factory ignores
-	// it, an input-aware child constructs from it (M25). The child's input is the SAME bytes enqueued
-	// below and re-read by the worker, so the parent-drive build and the worker-drive build agree (C9).
-	childDAG, ferr := entry.build(a.input)
+	childID := SubWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
+
+	// AUTHORITATIVE INPUT (C9): for an INPUT-AWARE child, once the queue row exists its DURABLE input is
+	// the authority — a parent re-drive reconstructs from THAT, and refuses a conflicting candidate rather
+	// than silently reinterpreting the child (whose durable type/input already decided its worker run). A
+	// NEW child (or a legacy, input-ignoring child) uses a.input as declared. Legacy replay behavior is
+	// unchanged (the guard is scoped to entry.wantsInput).
+	authInput := a.input
+	if entry.wantsInput {
+		if durInput, exists, ierr := sqlStore.queueChildInput(childID); ierr != nil {
+			return fmt.Errorf("queue sub-workflow %q: read durable child input %q: %w", a.nodeName, childID, ierr)
+		} else if exists && !bytes.Equal(durInput, a.input) {
+			return fmt.Errorf("%w: queue sub-workflow %q: child %q already exists with different input — the durable queued input is authoritative; refuse silent redefinition",
+				ErrValidation, a.nodeName, childID)
+		} else if exists {
+			authInput = durInput // reconstruct the parent's coe-verdict DAG from the SAME bytes the child ran with.
+		}
+	}
+
+	// Build the child from its authoritative input — a legacy factory ignores it, an input-aware child
+	// constructs from it (M25). The build is repeatable + side-effect-free (it can occur on both the
+	// parent drive and the child worker drive), and rebuilding from authInput keeps them in agreement.
+	childDAG, ferr := entry.build(authInput)
 	if ferr != nil {
 		return fmt.Errorf("%w: queue sub-workflow %q: child factory for type %q failed: %w", ErrValidation, a.nodeName, a.childType, ferr)
 	}
@@ -119,8 +139,6 @@ func (a *queueSubWorkflowAction) Execute(ctx context.Context, parentData *Workfl
 		return fmt.Errorf("%w: queue sub-workflow %q: child factory for type %q returned a nil DAG", ErrValidation, a.nodeName, a.childType)
 	}
 
-	childID := SubWorkflowChildID(parentData.GetWorkflowID(), a.nodeName)
-
 	// Enqueue the child (idempotent by childID — a re-drive of the parked parent does not re-enqueue).
 	// The parent address (this workflow ID + the completion-signal name) rides the trusted control
 	// columns, NEVER the input BLOB (DEC-P94-PARENT-ADDRESS-COLUMN).
@@ -130,7 +148,7 @@ func (a *queueSubWorkflowAction) Execute(ctx context.Context, parentData *Workfl
 	// about to be spawned. NEVER user-supplied — same defense-by-construction as the address columns: a user
 	// cannot forge a low depth to bypass the ceiling. RunNext re-seeds this into the child's drive ctx.
 	childDepth := len(driveStackFrom(ctx)) + 1
-	if _, err := sqlStore.EnqueueSubWorkflow(childID, a.childType, a.input,
+	if _, err := sqlStore.EnqueueSubWorkflow(childID, a.childType, authInput,
 		parentData.GetWorkflowID(), completionSignalName(a.nodeName), childDepth); err != nil {
 		return fmt.Errorf("queue sub-workflow %q: enqueue child %q: %w", a.nodeName, childID, err)
 	}

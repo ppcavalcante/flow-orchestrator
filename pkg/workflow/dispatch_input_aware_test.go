@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -230,6 +231,112 @@ func TestInputAware_W3_PayloadSeedIdentity(t *testing.T) {
 
 	// The DURABLE queue input is byte-unchanged (the constructor mutated only its private copy).
 	require.Equal(t, submitted, workQueueInput(t, s, "w-identity"), "the persisted queue input is the original bytes")
+}
+
+// W10 — queued-child correctness: the child's INPUT selects its tolerated-failure policy; the child's
+// execution decides the queue outcome; the parent HONORS that queue outcome (no graph reclassification);
+// and a re-drive with a conflicting input-aware child candidate is REFUSED, not silently reinterpreted.
+func TestInputAware_W10_QueuedChildInputSelectsPolicy(t *testing.T) {
+	s := mkQueueStore(t)
+	reg := NewRegistry()
+	// An input-aware CHILD: a node "work" that always fails; input.tolerate decides continue-on-error
+	// (child succeeds → done) vs not (child fails → failed).
+	require.NoError(t, reg.RegisterWithInput("policyChild", func(input []byte) (*DAG, error) {
+		var cfg struct {
+			Tolerate bool `json:"tolerate"`
+		}
+		if err := json.Unmarshal(input, &cfg); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrValidation, err)
+		}
+		b := NewWorkflowBuilder()
+		nb := b.AddStartNode("work").WithAction(ActionFunc(func(context.Context, *WorkflowData) error {
+			return errors.New("work always fails")
+		}))
+		if cfg.Tolerate {
+			nb.WithContinueOnError()
+		}
+		return b.Build()
+	}))
+
+	run := func(parentWF string, tolerate bool) (childState string, parentErr error) {
+		pb := NewWorkflowBuilder().WithWorkflowID(parentWF)
+		pb.AddSubWorkflowQueued("sub", "policyChild").WithInput(map[string]interface{}{"tolerate": tolerate})
+		pdag, err := pb.Build()
+		require.NoError(t, err)
+		pw := newWorkflowForTest(s)
+		pw.WorkflowID = parentWF
+		pw.dag = pdag
+		pw.registry = reg
+		require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "parent enqueues + parks")
+		ran, _ := RunNext(context.Background(), s, reg, "worker") // rerr carries the child's own failure when !tolerate — expected; the queue state + parent outcome below are the assertions
+		require.True(t, ran, "worker ran the child")
+		perr := pw.Execute(context.Background()) // wake the parent on the child's terminal queue outcome
+		return wqState(t, s, SubWorkflowChildID(parentWF, "sub")), perr
+	}
+
+	cs, pe := run("parent-tol", true)
+	require.Equal(t, wqDone, cs, "input tolerate=true → the child's failure is tolerated → child done")
+	require.NoError(t, pe, "the parent honors the child's done outcome")
+
+	cs2, pe2 := run("parent-notol", false)
+	require.Equal(t, wqFailed, cs2, "input tolerate=false → the child fails")
+	require.Error(t, pe2, "the parent honors the child's failed queue outcome (INV-01)")
+	require.NotErrorIs(t, pe2, ErrSuspended, "a terminal child resolves the parent, not a park")
+
+	// Replay conflict (C9): a parent parks having enqueued the child with input X; a re-drive that
+	// declares a DIFFERENT child input is refused — the durable queued input is authoritative.
+	pb := NewWorkflowBuilder().WithWorkflowID("parent-conflict")
+	pb.AddSubWorkflowQueued("sub", "policyChild").WithInput(map[string]interface{}{"tolerate": true})
+	pdag, err := pb.Build()
+	require.NoError(t, err)
+	pw := newWorkflowForTest(s)
+	pw.WorkflowID = "parent-conflict"
+	pw.dag = pdag
+	pw.registry = reg
+	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "enqueues child (tolerate=true) + parks")
+
+	pb2 := NewWorkflowBuilder().WithWorkflowID("parent-conflict")
+	pb2.AddSubWorkflowQueued("sub", "policyChild").WithInput(map[string]interface{}{"tolerate": false})
+	pdag2, err := pb2.Build()
+	require.NoError(t, err)
+	pw2 := newWorkflowForTest(s)
+	pw2.WorkflowID = "parent-conflict"
+	pw2.dag = pdag2
+	pw2.registry = reg
+	cerr := pw2.Execute(context.Background())
+	require.Error(t, cerr, "a conflicting child redefinition must not silently proceed")
+	require.ErrorIs(t, cerr, ErrValidation, "the conflicting input-aware child redefinition is refused")
+}
+
+// W11 — control-plane separation: forged parent/signal/depth-looking KEYS in the child payload cannot
+// change the engine-derived child identity, completion destination, or runtime depth (those live in
+// trusted control columns set by EnqueueSubWorkflow, never the input BLOB).
+func TestInputAware_W11_ControlPlaneSeparation(t *testing.T) {
+	s := mkQueueStore(t)
+	reg := NewRegistry()
+	require.NoError(t, reg.RegisterWithInput("cpChild", func([]byte) (*DAG, error) {
+		return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+	}))
+	forged := map[string]interface{}{
+		"parent_id": "attacker-wf", "parent_signal": "attacker-sig", "depth": 0, "result": "x",
+	}
+	pb := NewWorkflowBuilder().WithWorkflowID("real-parent")
+	pb.AddSubWorkflowQueued("sub", "cpChild").WithInput(forged)
+	pdag, err := pb.Build()
+	require.NoError(t, err)
+	pw := newWorkflowForTest(s)
+	pw.WorkflowID = "real-parent"
+	pw.dag = pdag
+	pw.registry = reg
+	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended, "parent enqueues + parks")
+
+	// Claim the child as a worker would; the TRUSTED control columns are engine-derived, not the payload.
+	item, err := s.ClaimNext("worker", "cpChild")
+	require.NoError(t, err)
+	require.Equal(t, SubWorkflowChildID("real-parent", "sub"), item.WorkflowID, "child id is engine-derived")
+	require.Equal(t, "real-parent", item.ParentID, "parent address is the trusted column, not the forged payload key")
+	require.Equal(t, completionSignalName("sub"), item.ParentSignal, "completion destination is engine-derived")
+	require.Equal(t, 1, item.Depth, "depth is engine-derived (parent depth + 1), not the forged 0")
 }
 
 // workQueueInput reads the durable work_queue.input bytes for a workflow id (identity assertions).
