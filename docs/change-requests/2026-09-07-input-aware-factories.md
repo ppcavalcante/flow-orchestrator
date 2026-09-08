@@ -1,11 +1,30 @@
 # Receipt A — input-aware registered DAG factories (E-01 completion)
 
 **Re:** `openai-workflow/docs/plans/security-workflow-architecture/engine-input-aware-factory-handoff.md` §14.A
-**Status: E-01 COMPLETE (rev 3).** The requested capability, the two prerequisite lifecycle corrections, and
-the full §14.A acceptance set (A1–A10) landed on `main`, TDD, additive and backward-compatible. This is the
-**A** receipt (E-01 completion); the two additional engine requests are delivered separately as **B1** (public
-submission inspection/discovery) and **B2** (targeted host-local admission), each with its own receipt.
+**Status: E-01 COMPLETE (rev 5).** The requested capability, the two prerequisite lifecycle corrections, and
+the full §14.A acceptance set (A1–A10) landed on `main`, TDD, and additive — backward-compatible **with one
+declared exception**: a parent re-drive that reuses an existing deterministic child ID with a *different*
+registered type is now refused (`ErrValidation`), including legacy-only registrations (see §2 "Deviations" and
+`## Input-aware factories` in the dispatch guide + CHANGELOG **Compatibility notes**). Ordinary same-type legacy
+replay is unchanged. This is the **A** receipt (E-01 completion); the two additional engine requests are
+delivered separately as **B1** (public submission inspection/discovery) and **B2** (targeted host-local
+admission), each with its own receipt.
 
+> **Rev 5 — §16 recheck response (final subject `ef51e67`).** The §16 recheck of `5496a20` confirmed R1 CLOSED
+> and R2/R3/R5/A9 closed, but the exact-head CI was red on formatting + one flaky test, plus receipt-truth items.
+> All fixed at `ef51e67`:
+> - **gofmt** on `workflow_store_sqlite_eread.go` (the R3 comment reword left a list abutting a paragraph) — the
+>   CI Test jobs stopped here before their race tests. Formatter run; `gofmt`/`golangci-lint` now clean.
+> - **`TestQueueAdversarial_TwoWorkersReclaimParkedChild_ExactlyOneResumes`** (Coverage job) — a pre-existing
+>   40ms real-clock flake that could not tell fencing from a legitimate sequential reclaim. Rewritten with a
+>   frozen FakeClock so exactly one worker holds a live claim during the race (deterministic 20×/10×-race).
+> - **A8 retry** — replaced the helper-call version with a REAL trigger-based checkpoint fault THROUGH `RunNext`
+>   (attempts 1..2 requeue, 3 dead-letters, no 4th, at-least-once); corrected the misleading "only way" comment.
+> - **A3** — honestly scoped (worker B's reclaim is real; worker A's frontier is staged, the standard technique).
+> - Receipt truth: removed the duplicated "independent-review" block and the stale "impossible" claim, reconciled
+>   the W13 mapping (all four sub-cases are real dispatch), qualified the compatibility headline with the declared
+>   exception, and corrected B2's host-facing entry-point count.
+>
 > **Rev 4 — §15 recheck response.** The full-delivery recheck of `b4fba05` (§15) kept both defects closed and
 > confirmed A1–A8 runtime behavior, but asked us to correct several witnesses that STAGED intermediate state
 > rather than driving the real transition, and retracted one false claim. All addressed at `2246b97`:
@@ -27,17 +46,12 @@ submission inspection/discovery) and **B2** (targeted host-local admission), eac
 >   `bfa1a92`). See §3 for the per-witness new-path-vs-shared mapping and §7 for the A1–A10 dispositions.
 > - **A9** — the compatibility broadening is declared (below, and in `CHANGELOG.md` / `docs/guides/dispatch.md`).
 > - **A10** — final evidence + commands + module version in §3/§6/§7.
-> - The genuinely-impossible sub-case (a *parent-awaited* input-aware child reaching a **seedInput rejection**)
->   is called out with its precise structural reason in §7.A2 — not silently waived. This is same-model
->   self-review, not independent certification.
+> - The A2 "seed rejection" sub-case is now a real witness (see the Rev-4 note above and §7.A2); the earlier
+>   "not constructible" claim is retracted. This is same-model self-review, not independent certification.
 
-> **Rev 2 — independent-review response.** Your validation of candidate `b874471` (whose producer CI
-> passed green: run `34133736256`) reproduced two real defects and flagged two witness-quality gaps.
-> All fixed in `53cfb98`, each reproduced with a failing test first:
-
-> **Rev 2 — independent-review response.** Your validation of candidate `b874471` (whose producer CI
-> passed green: run `34133736256`) reproduced two real defects and flagged two witness-quality gaps.
-> All fixed in `53cfb98`, each reproduced with a failing test first:
+> **Rev 2 — recheck response** (the consumer's own same-model recheck, not third-party certification). Your
+> validation of candidate `b874471` (whose producer CI passed green: run `34133736256`) reproduced two real
+> defects and flagged two witness-quality gaps. All fixed in `53cfb98`, each reproduced with a failing test first:
 > 1. **Queued-child TYPE conflict now refused** — the C9 guard compared durable input but not durable
 >    type; it now reads and enforces both (`queueChildTypeInput`). Test:
 >    `TestInputAware_QueuedChildTypeConflict_Refused`.
@@ -55,11 +69,12 @@ submission inspection/discovery) and **B2** (targeted host-local admission), eac
 
 ## 1. Commit / version / public API
 
-- **Final engine commit (E-01 complete, after the §15 recheck):** `2246b97` on `main` (feature + fixes
-  `53cfb98`; A1–A8 witnesses `bfa1a92`; §15 R4 real-transition witness corrections `2246b97`; built on the
+- **Final engine commit (E-01 complete, after the §16 recheck):** `ef51e67` on `main` (feature + fixes
+  `53cfb98`; A1–A8 witnesses `bfa1a92`; §15 R4 real-transition corrections `2246b97`; §16 fixes — gofmt, the
+  deterministic parked-child reclaim test, and the real trigger-based A8 retry — `ef51e67`; built on the
   handoff's inspected baseline `defd443`).
-- **Canonical module version:** `v0.22.4-alpha.0.20260907180132-2246b979a37c`.
-- **Consume before the next tag:** `go get github.com/ppcavalcante/flow-orchestrator@2246b97`
+- **Canonical module version:** `v0.22.4-alpha.0.20260908053020-ef51e67df4db`.
+- **Consume before the next tag:** `go get github.com/ppcavalcante/flow-orchestrator@ef51e67`
   (or wait for the `v0.23.0-alpha` tag — this ships in it).
 - **Final public API (matches the handoff's proposed shape):**
 
@@ -117,7 +132,7 @@ its existing green coverage. Every W1–W13 now has a **new-path** witness.
 | W10 queued-child correctness + **child parks/resumes** | input selects child policy; parent honors queue outcome; conflicting re-drive refused (W10). A7: the input-aware **child itself** parks on a wait-for-signal and resumes through the input-aware path, progress preserved, parent resolves from the queue outcome | `TestInputAware_W10_QueuedChildInputSelectsPolicy`, `TestInputAware_A7_W10_InputAwareChildParksResumes` | NEW-PATH |
 | W11 control-plane separation | forged parent/signal/depth payload keys cannot change engine-derived identity/depth | `TestInputAware_W11_ControlPlaneSeparation` | NEW-PATH |
 | W12 static-inspection honesty | legacy cycle still detected; input-aware registry gets the unsupported-inspection refusal without invoking an invented-input factory | `TestInputAware_W12_CycleHelperRefusesInputAware` | NEW-PATH |
-| W13 cancel/drain/retry | A8: operator cancel before any action (constructor not reached); drain leaves committed progress claimed then reclaim resumes; constructor error wrapping `ErrBusy` stays terminal, not requeued | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` | NEW-PATH; genuine bare-infra retry budget = SHARED (`disposeExecErr` / `MarkForRetry` suites, registration-form-independent) |
+| W13 cancel/drain/retry | A8: operator cancel before any action (constructor not reached); a REAL ctx drain leaves committed progress claimed then reclaim resumes; the REAL infra-retry budget THROUGH `RunNext` (a SQLite trigger faults every node checkpoint → attempts 1..2 requeue, attempt 3 dead-letters, no 4th, at-least-once); constructor error wrapping `ErrBusy` stays terminal, not requeued | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` (4 sub-cases) | NEW-PATH (all four sub-cases drive real dispatch) |
 | A9 legacy replay vs different-type refusal | same-type legacy replay parks unchanged; different-type reuse of the same child ID refused | `TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` | LEGACY-PATH (a legacy-registration behavior test, not the input-aware path) |
 
 W1's negative concurrency-ceiling assertion uses a bounded 150ms observation window — it is not a timing-free
@@ -151,7 +166,7 @@ proof, only a strong bound; stated per the handoff's request.
 
 ## 6. Gate (A10 — final reproducible checks)
 
-Commands run against the final subject `2246b97`:
+Commands run against the final subject `ef51e67`:
 
 ```text
 GOTOOLCHAIN=local go test ./pkg/workflow/ -run '^(TestInputAware_|TestB2Security_|TestHostLocal_|TestERead_|TestQueueChild_|TestQueuedChild_|TestRunNext|TestClaimNext|TestPool|TestCancel|TestCaps|TestAdversarial)' -race -count=1 -timeout=600s
@@ -162,8 +177,8 @@ golangci-lint run pkg/workflow/                                            → 0
 GOTOOLCHAIN=local go test ./internal/doctest/                              → ok (fenced-Go + live-corpus doc guards)
 ```
 
-- The `2246b97` change is the R4 witness corrections (real transitions) over the E-01 production code; the
-  authoritative amd64 gate runs on the push. **Bind any CI receipt to its exact SHA** — do not attribute a
+- The `ef51e67` change adds the §16 fixes (gofmt, the deterministic parked-child reclaim test, the real
+  trigger-based A8 retry) over the E-01 production code; the authoritative amd64 gate runs on the push. **Bind any CI receipt to its exact SHA** — do not attribute a
   doc-only successor's run to a code commit. (The earlier `0f8ae60` Coverage re-run passed; its first failure was
   a pre-existing unrelated flake, `TestCancel_WinsOverGenuineFailure`, tracked separately — not part of E-01.)
 - Assurance level: **same-model fresh-context self-review**, not independent certification (any earlier
@@ -176,14 +191,14 @@ GOTOOLCHAIN=local go test ./internal/doctest/                              → o
 |---|---|---|
 | A1 (W3 end-to-end decode + node reads seed) | **DONE** | `TestInputAware_A1_W3_NestedDecodeNodeReadsSeed` |
 | A2 (W5 early failure + missing-data integrity) | **DONE** — §15 R4: added the real float64-seed-reject case; impossibility claim retracted (below) | `TestInputAware_A2_W5_EarlyFailureAndIntegrity` (3 sub-cases) (+ `TestQueueChild_*`) |
-| A3 (W6 settings + progressed KV survive reclaim) | **DONE** — §15 R4: now sets a genuinely different worker default that the durable input overrides | `TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim` |
+| A3 (W6 settings + progressed KV survive reclaim) | **DONE** — genuinely different worker default overridden by the durable input; worker B's reclaim+resume is REAL, worker A's committed frontier is honestly STAGED (§16 action 3; real drain/lease-loss are A6/A8) | `TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim` |
 | A4 (W7 input-aware completion reconciliation) | **DONE** | `TestInputAware_A4_W7_CompletionReconciliation` |
 | A5 (W8 concurrent config isolation + capped admission) | **DONE** | `TestInputAware_A5_W8_ConcurrentConfigIsolationAndCap` |
 | A6 (W9 lease loss on the new path) | **DONE** — §15 R4: an actual worker losing its lease during `RunNext` (barrier + real reclaim); the stale checkpoint is fenced (`ErrFencedOut`) | `TestInputAware_A6_W9_LeaseLossOnNewPath` |
 | A7 (W10 the input-aware child parks/resumes) | **DONE** | `TestInputAware_A7_W10_InputAwareChildParksResumes` |
-| A8 (W13 cancel/drain/bounded-retry) | **DONE** — §15 R4: real ctx drain + the real bounded infra-retry state machine (exactly `maxAttempts` drives) | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` (4 sub-cases) |
+| A8 (W13 cancel/drain/bounded-retry) | **DONE** — real ctx drain + the real infra-retry budget THROUGH `RunNext` (SQLite checkpoint-fault trigger: exactly `maxAttempts` drives, no 4th; §16 action 3) | `TestInputAware_A8_W13_CancelDrainRetryOnNewPath` (4 sub-cases) |
 | A9 (declare the compatibility broadening) | **DONE** — now in the dispatch guide (`## Input-aware factories`) + `CHANGELOG.md` **Compatibility notes**, not only this receipt; witness labeled LEGACY-PATH | witness `TestQueuedChild_LegacyReplay_SameTypeOK_DifferentTypeRefused` |
-| A10 (final mapping + commands + version) | **DONE** | §3 mapping, §6 commands, §1 version `v0.22.4-alpha.0.20260907180132-2246b979a37c` |
+| A10 (final mapping + commands + version) | **DONE** | §3 mapping, §6 commands, §1 version `v0.22.4-alpha.0.20260908053020-ef51e67df4db` |
 
 **A2 — retraction of the earlier "not constructible" claim (§15 R4).** An earlier revision wrongly argued this
 combination was structurally impossible on the reasoning that `seedInput` rejects only a *non-object* payload.

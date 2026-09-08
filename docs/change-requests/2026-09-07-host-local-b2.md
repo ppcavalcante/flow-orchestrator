@@ -19,9 +19,9 @@ certification.
 
 ## 1. Exact subject
 
-- **Engine commit:** `2246b97` on `main` (B2 landed at `a11fa5a`; R1 specific-run + R5 `OwnerHost` at `2246b97`).
-- **Module version:** `v0.22.4-alpha.0.20260907180132-2246b979a37c`.
-- **Consume:** `go get github.com/ppcavalcante/flow-orchestrator@2246b97`.
+- **Engine commit:** `ef51e67` on `main` (B2 landed at `a11fa5a`; R1 specific-run + R5 `OwnerHost` at `2246b97`).
+- **Module version:** `v0.22.4-alpha.0.20260908053020-ef51e67df4db`.
+- **Consume:** `go get github.com/ppcavalcante/flow-orchestrator@ef51e67`.
 - Files: `workflow_store_sqlite.go` (schema + migration), `workflow_store_sqlite_workqueue.go`
   (`EnqueueForHost`, `ClaimNextForHost`, `ClaimSpecificForHost`, the host/wantID predicates),
   `workflow_dispatch.go` (`RunNextForHost`, `RunSpecificForHost`), `workflow_store_sqlite_eread.go`
@@ -121,7 +121,8 @@ All in `dispatch_host_local_test.go`, real SQLite:
 
 ## 5. Compatibility
 
-- **Additive.** Three new methods + one nullable column. Existing signatures, the generic dispatch behavior,
+- **Additive.** Five new host-facing entry points (`EnqueueForHost`, `ClaimNextForHost`, `RunNextForHost`,
+  `ClaimSpecificForHost`, `RunSpecificForHost`) + one nullable column. Existing signatures, the generic dispatch behavior,
   the journal, the fencing arbiter, and the cap semantics are unchanged. The `runNext` internal gained a `host`
   parameter (generic callers pass `""`); no exported signature changed.
 - The generic `ClaimNext` predicate change (`AND owner_host IS NULL`) is behavior-preserving for every
@@ -159,4 +160,4 @@ GOTOOLCHAIN=local go vet ./pkg/workflow/                                        
 golangci-lint run pkg/workflow/                                                                    → 0 issues on the new/changed files
 ```
 
-The authoritative amd64 gate runs on the push; bind any CI receipt to `2246b97`.
+The authoritative amd64 gate runs on the push; bind any CI receipt to `ef51e67`.
