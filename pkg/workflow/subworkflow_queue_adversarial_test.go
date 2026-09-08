@@ -334,11 +334,19 @@ func TestQueueAdversarial_ParkReclaim_PreservesRetryBudget(t *testing.T) {
 // hold on a parked-then-reclaimed child. Two workers race to reclaim the SAME lapsed-parked child; exactly
 // ONE claims + resumes it (the atomic BEGIN IMMEDIATE ClaimNext serializes the contenders). Race-safe.
 func TestQueueAdversarial_TwoWorkersReclaimParkedChild_ExactlyOneResumes(t *testing.T) {
-	const ttl = 40 * time.Millisecond
-	// Real clock here (concurrent goroutines + a FakeClock would need shared advance coordination); a
-	// short real TTL + a sleep past it is deterministic enough for the "exactly one" invariant.
+	const ttl = 5 * time.Second
+	// DETERMINISTIC contention via a FROZEN FakeClock (fix for the §16 action-2 flake): the earlier version
+	// used a 40ms REAL-clock TTL, which could not distinguish the fencing invariant ("only one worker holds a
+	// LIVE claim at once") from a legitimate SEQUENTIAL reclaim (the winner's tiny renewed lease lapsing AGAIN
+	// under load, letting the second worker validly reclaim → two ran=true, still one action, still done).
+	// Instead: advance the clock ONCE to lapse the first lease, then race the two reclaims with the clock
+	// FROZEN — so the winner's fresh lease (expiry = frozen_now + ttl) stays LIVE for the whole race and the
+	// loser's in-txn scan sees a live lease → ErrClaimLost → ErrNoWork. That makes "exactly one" a true M16
+	// fencing property, and preserves the regression: a genuine double-admission would show winners==2 or
+	// produceN==2, neither of which can occur under the frozen-lease window.
+	clk := NewFakeClock(time.Unix(1000, 0))
 	dbPath := filepath.Join(t.TempDir(), "race.db")
-	s, err := NewSQLiteStore(dbPath, WithMultiProcess(), WithLeaseTTL(ttl))
+	s, err := NewSQLiteStore(dbPath, WithMultiProcess(), WithLeaseTTL(ttl), withSQLiteClock(clk))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // cleanup
 
@@ -359,14 +367,16 @@ func TestQueueAdversarial_TwoWorkersReclaimParkedChild_ExactlyOneResumes(t *test
 	require.ErrorIs(t, pw.Execute(context.Background()), ErrSuspended)
 	childID := SubWorkflowChildID("parent", "sub")
 
-	// Drive #1: the child parks on its approval. Deliver the approval NOW so a reclaim resumes it fully.
+	// Drive #1: the child parks on its approval (worker-0 holds the lease). Deliver the approval NOW so a
+	// reclaim resumes it fully.
 	ran, err := RunNext(context.Background(), s, reg, "worker-0")
 	require.NoError(t, err)
 	require.True(t, ran)
 	require.NoError(t, s.DeliverSignal(childID, ApproveSignal("gate", "alice", "ok", "appr", childApprovalNonce(t, reg, childID, "approvalChild", "gate"))))
 
-	// Let the parked child's lease lapse, then TWO workers race a single reclaim each.
-	time.Sleep(ttl + 20*time.Millisecond)
+	// Lapse worker-0's lease (one advance), then FREEZE the clock and race two reclaims. The winner's fresh
+	// lease does not lapse during the race, so exactly one can claim — the other loses the fencing CAS.
+	clk.Advance(ttl + time.Second)
 	var (
 		wg      sync.WaitGroup
 		winners atomic.Int32
@@ -384,9 +394,9 @@ func TestQueueAdversarial_TwoWorkersReclaimParkedChild_ExactlyOneResumes(t *test
 	}
 	wg.Wait()
 
-	require.EqualValues(t, 1, winners.Load(), "exactly ONE worker reclaimed the lapsed-parked child (M16 fencing holds)")
+	require.EqualValues(t, 1, winners.Load(), "exactly ONE worker reclaimed the lapsed-parked child within the live-lease window (M16 fencing holds)")
 	require.Equal(t, wqDone, wqState(t, s, childID), "the winner resumed the child to done")
-	require.EqualValues(t, 1, produceN.Load(), "the child resumed exactly once — no double-drive under the reclaim race")
+	require.EqualValues(t, 1, produceN.Load(), "the child resumed exactly once — the loser never claimed, so no double-drive")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────

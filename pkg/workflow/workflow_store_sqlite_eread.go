@@ -129,6 +129,7 @@ type SubmissionPage struct {
 //     with a `cancelled`-only filter, if a row earlier in the key order transitions pending→cancelled AFTER the
 //     cursor has passed its position, this sweep will not return it (a later insertion ordered behind the cursor
 //     is likewise not caught). This is expected filtered-keyset behavior, not a cross-page snapshot guarantee.
+//
 // For completeness where membership changes concurrently, run a FRESH sweep (a new cursor from the beginning),
 // or track ids and re-InspectSubmission them, rather than treating a filtered continuation as an event stream.
 // A single forward sweep with a FIXED cursor sequence never skips or duplicates a row that stays in the filter,

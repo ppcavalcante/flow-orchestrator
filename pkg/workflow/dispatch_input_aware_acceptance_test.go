@@ -284,11 +284,16 @@ func mkAwareParent(t *testing.T, s *SQLiteStore, reg *Registry, childType string
 }
 
 // A3 — W6 settings and PROGRESSED DATA survive reclaim, with a GENUINELY different worker default. Each worker
-// registry carries its OWN default "mode" (the original worker's differs from the replacement worker's). The
-// effective per-run mode = the DURABLE input's mode when present, else the worker default. A run is submitted
-// WITH an input mode; worker A commits a partial journal (n0 done + a progressed KV) then dies; the REPLACEMENT
-// worker B — whose default mode is deliberately different — reclaims and must (i) skip the committed n0, (ii)
-// resume n1 reading the PROGRESSED KV (not reseeded), and (iii) use the DURABLE input mode, NOT B's own default.
+// registry carries its OWN default "mode" (the original worker's differs from the replacement worker's); the
+// effective per-run mode = the DURABLE input's mode when present, else the worker default.
+//
+// SCOPE (honest, §16 action 3): worker A's committed frontier is STAGED — n0 Completed + its progressed KV,
+// n1 Pending — exactly the standard reclaim-test technique (cf. TestRunNext_ReconciliationSeam_Idempotent). We
+// stage rather than kill a live worker mid-checkpoint because a drained node commits Failed (skipping its
+// downstream), which is a different transition than a lost committed frontier. The RECLAIM + RESUME by worker
+// B is REAL: B.RunNext reclaims the lapsed row, rebuilds from the durable input with a DIFFERENT default, skips
+// the committed n0, and resumes n1 — which reads the PROGRESSED KV (not reseeded) and uses the durable input
+// mode, NOT B's default. (Real drained/lease-loss transitions are covered by A6/A8.)
 func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) {
 	clk := NewFakeClock(time.Unix(1000, 0))
 	s := mkDispatchStore(t, withSQLiteClock(clk), withSQLiteLeaseTTL(5*time.Second))
@@ -334,34 +339,35 @@ func TestInputAware_A3_W6_SettingsAndProgressedDataSurviveReclaim(t *testing.T) 
 	}
 	input := jsonInput(t, map[string]interface{}{"mode": "configured-mode"})
 
-	// Worker A (default "orig-default") claims (token 1) and durably commits a PARTIAL journal: n0 Completed
-	// WITH its progressed KV artifact, n1 Pending. Then A "dies" before MarkDone (n0 counter stays 0).
+	// STAGE worker A's committed frontier (n0 Completed + progressed KV, n1 Pending) under a claim it holds.
+	// A's registry has default "orig-default"; A dies before finishing.
 	_, err := s.Enqueue("wf", "staged", input)
 	require.NoError(t, err)
 	_, err = s.ClaimNext("A", "staged")
 	require.NoError(t, err)
-	_ = mkReg("orig-default") // A's registry existed with its own default (recorded for symmetry)
+	_ = mkReg("orig-default") // A's registry existed with its own default (symmetry with B's different default)
 	partial := NewWorkflowData("wf")
 	partial.SetNodeStatus("n0", Completed)
 	partial.SetNodeStatus("n1", Pending)
 	partial.Set("artifact", "built-by-n0") // the committed progressed KV
 	require.NoError(t, s.Save(partial))
 
-	// A dies → lapse the lease. The REPLACEMENT worker B has a DIFFERENT default ("repl-default").
+	// A dies → lapse the lease. The REPLACEMENT worker B (a DIFFERENT default "repl-default") REALLY reclaims
+	// via RunNext, rebuilds from the durable input, skips n0, and resumes n1.
 	clk.Advance(6 * time.Second)
 	ran, rerr := RunNext(context.Background(), s, mkReg("repl-default"), "B")
 	require.NoError(t, rerr)
 	require.True(t, ran, "worker B reclaimed the lapsed-claimed run")
 	require.Equal(t, wqDone, wqState(t, s, "wf"), "the reclaimed run resumed to done")
 
-	require.Equal(t, 0, ctr.get("n0"), "n0 was Completed in the journal → NOT re-invoked on reclaim")
-	require.Equal(t, 1, ctr.get("n1"), "n1 resumed from the committed frontier")
+	require.Equal(t, 0, ctr.get("n0"), "n0 was Completed in the staged frontier → NOT re-invoked on reclaim")
+	require.Equal(t, 1, ctr.get("n1"), "n1 resumed on the replacement worker")
 
 	loaded, err := s.Load("wf")
 	require.NoError(t, err)
 	sawArt, ok := loaded.Get("n1_saw_artifact")
 	require.True(t, ok)
-	require.Equal(t, "built-by-n0", sawArt, "n1 read the PROGRESSED KV — the reclaim did NOT reseed initial values over it")
+	require.Equal(t, "built-by-n0", sawArt, "the resumed node read the PROGRESSED KV — the reclaim did NOT reseed initial values over it")
 	sawMode, ok := loaded.Get("n1_effective_mode")
 	require.True(t, ok)
 	require.Equal(t, "configured-mode", sawMode,
@@ -660,11 +666,12 @@ func TestInputAware_A7_W10_InputAwareChildParksResumes(t *testing.T) {
 //	(2) A REAL graceful drain: the parent ctx handed to RunNext is cancelled mid-run (a node is executing);
 //	    the disposition leaves committed progress `claimed` (AF1 — NOT dead-lettered), and a later reclaim
 //	    RESUMES it to done through the input-aware path. (Not a manually-staged journal — an actual ctx drain.)
-//	(3) The REAL bounded infra-retry state machine: a transient bare-infra fault (ErrBusy) requeues attempts
-//	    1..maxAttempts-1 and dead-letters at the budget, with EXACTLY maxAttempts drives and no further one.
-//	    The fault is injected at disposeExecErr — the exact disposition seam runNext feeds a real checkpoint/
-//	    claim fault into — because a node-logic error is POISON by design (never retryable), so the only way
-//	    to exhibit an infra retry is at this seam (the engine's own retry oracle does the same).
+//	(3) The REAL bounded infra-retry state machine, THROUGH DISPATCH: a SQLite trigger makes every node-status
+//	    CHECKPOINT write fail with an infra (`ErrIO`) fault while the node action itself succeeds — so each
+//	    `RunNext` runs the action then fails at the checkpoint, `disposeExecErr` requeues under budget, and the
+//	    row dead-letters at exactly `maxAttempts` drives with no further dispatch. (A node-logic error is POISON
+//	    by design — never retryable — so a genuine infra retry must come from the checkpoint/claim, which this
+//	    injects for real.) At-least-once holds: the action runs on each attempt before its checkpoint fails.
 //	(4) A constructor error wrapping an infrastructure class (ErrIO/ErrBusy) stays a TERMINAL validation
 //	    failure — it is NOT requeued as retryable work (a bad payload is not infra).
 func TestInputAware_A8_W13_CancelDrainRetryOnNewPath(t *testing.T) {
@@ -756,29 +763,40 @@ func TestInputAware_A8_W13_CancelDrainRetryOnNewPath(t *testing.T) {
 	t.Run("real_infra_retry_budget_through_dispatch", func(t *testing.T) {
 		s := mkDispatchStore(t, withSQLiteLeaseTTL(time.Hour))
 		const maxAttempts = defaultMaxAttempts // 3
+		var actions atomic.Int32
 		reg := NewRegistry()
-		require.NoError(t, reg.RegisterWithInput("retryAware", func([]byte) (*DAG, error) {
-			return oneNode(t, "n", func(*WorkflowData) error { return nil }), nil
+		require.NoError(t, reg.RegisterWithInput("retryCkpt", func([]byte) (*DAG, error) {
+			return oneNode(t, "n", func(*WorkflowData) error { actions.Add(1); return nil }), nil
 		}))
-		_, err := s.Enqueue("wf", "retryAware", jsonInput(t, map[string]interface{}{"x": 1}))
+		// A trigger that makes every node-status CHECKPOINT write fail (an infra fault, NOT node logic). The
+		// input seed writes only data_kv, so it still succeeds; the node action runs; the post-node checkpoint
+		// aborts → a real `ErrIO` surfaces from RunNext → the retry disposition requeues under budget.
+		_, err := s.db.Exec(`CREATE TRIGGER fail_node_ckpt BEFORE INSERT ON nodes BEGIN SELECT RAISE(ABORT,'injected checkpoint fault'); END;`)
+		require.NoError(t, err)
+		_, err = s.Enqueue("wf", "retryCkpt", jsonInput(t, map[string]interface{}{"x": 1}))
 		require.NoError(t, err)
 
-		// Drive the REAL queue retry lifecycle: each real ClaimNext bumps attempts; disposeExecErr (the seam
-		// runNext feeds a real bare-infra checkpoint/claim fault into) requeues under budget then dead-letters.
+		// Drive through RunNext until the row is terminal. Attempts 1..maxAttempts-1 requeue (pending); the
+		// last drive dead-letters (failed); there is no further dispatch.
 		drives := 0
 		for {
-			item, cerr := s.ClaimNext("solo", "retryAware")
-			if errors.Is(cerr, ErrNoWork) {
-				break // requeued→pending is re-claimable; a dead-letter (failed) is terminal → ErrNoWork ends it
+			ran, rerr := RunNext(context.Background(), s, reg, "solo")
+			if !ran {
+				break // terminal → ErrNoWork's outcome (ran=false) ends the loop
 			}
-			require.NoError(t, cerr)
 			drives++
 			require.LessOrEqual(t, drives, maxAttempts, "infra retry is bounded by maxAttempts (drive %d)", drives)
-			disp := disposeExecErr(s, item.WorkflowID, maxAttempts, fmt.Errorf("%w: transient checkpoint fault", ErrBusy))
-			require.ErrorIs(t, disp, ErrBusy, "the disposition surfaces the infra fault")
+			require.Error(t, rerr, "the checkpoint fault surfaces from RunNext")
+			require.ErrorIs(t, rerr, ErrIO, "a failed checkpoint write is a retryable infra fault")
+			if drives < maxAttempts {
+				require.Equal(t, wqPending, wqState(t, s, "wf"), "attempt %d requeued to pending", drives)
+			} else {
+				require.Equal(t, wqFailed, wqState(t, s, "wf"), "budget exhausted → terminal failed")
+			}
 		}
-		require.Equal(t, maxAttempts, drives, "attempts 1..2 requeue, attempt 3 fails, and there is NO 4th drive")
-		require.Equal(t, wqFailed, wqState(t, s, "wf"), "budget exhausted → terminal failed")
+		require.Equal(t, maxAttempts, drives, "exactly maxAttempts drives — attempts 1..2 requeue, attempt 3 fails, NO 4th dispatch")
+		require.Equal(t, wqFailed, wqState(t, s, "wf"))
+		require.GreaterOrEqual(t, actions.Load(), int32(1), "at-least-once: the action ran before each failed checkpoint")
 	})
 
 	t.Run("constructor_error_wrapping_infra_stays_terminal", func(t *testing.T) {
