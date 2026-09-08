@@ -568,52 +568,9 @@ func (s *SQLiteStore) Load(workflowID string) (*WorkflowData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Existence: the workflows row is the anchor (a workflow with no data/nodes still
-	// has its row). Absent → ErrNotFound.
-	var rollingBack, triggerCause int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT rolling_back, trigger_cause FROM workflows WHERE id = ?`, workflowID,
-	).Scan(&rollingBack, &triggerCause)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
-	}
+	data, err := loadSQLiteWorkflow(ctx, s.db, workflowID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: load workflow: %w", ErrCorruptData, err)
-	}
-
-	data := NewWorkflowData(workflowID)
-
-	// data_kv → typed values (mirror FB reconstruction).
-	rows, err := s.db.QueryContext(ctx, `SELECT key, kind, i_val, f_val, s_val FROM data_kv WHERE workflow_id = ?`, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: query data: %w", ErrCorruptData, err)
-	}
-	if err := scanDataKV(rows, data); err != nil {
 		return nil, err
-	}
-
-	// nodes → status (+ output if has_output).
-	nrows, err := s.db.QueryContext(ctx, `SELECT node_name, status, output, has_output FROM nodes WHERE workflow_id = ?`, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: query nodes: %w", ErrCorruptData, err)
-	}
-	if err := scanNodes(nrows, data); err != nil {
-		return nil, err
-	}
-
-	// waits → fireAt.
-	wrows, err := s.db.QueryContext(ctx, `SELECT node_name, fire_at FROM waits WHERE workflow_id = ?`, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: query waits: %w", ErrCorruptData, err)
-	}
-	if err := scanWaits(wrows, data); err != nil {
-		return nil, err
-	}
-
-	// run-level scalars.
-	data.SetRollingBack(rollingBack != 0)
-	if triggerCause >= 0 && triggerCause <= int64(TriggerDeadlineExceeded) {
-		data.SetTriggerCause(TriggerCause(triggerCause))
 	}
 
 	// ph67 resume-into: rebuild the incremental diff baseline from the just-loaded
@@ -632,6 +589,54 @@ func (s *SQLiteStore) Load(workflowID string) (*WorkflowData, error) {
 	}
 	s.shadow[workflowID] = sh
 
+	return data, nil
+}
+
+// sqliteWorkflowQueryer shares reconstruction between the writer and read snapshots.
+type sqliteWorkflowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadSQLiteWorkflow(ctx context.Context, q sqliteWorkflowQueryer, workflowID string) (*WorkflowData, error) {
+	// The workflows row anchors even a workflow without data or nodes.
+	var rollingBack, triggerCause int64
+	err := q.QueryRowContext(ctx,
+		`SELECT rolling_back, trigger_cause FROM workflows WHERE id = ?`, workflowID,
+	).Scan(&rollingBack, &triggerCause)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, workflowID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: load workflow: %w", ErrCorruptData, err)
+	}
+
+	data := NewWorkflowData(workflowID)
+	rows, err := q.QueryContext(ctx, `SELECT key, kind, i_val, f_val, s_val FROM data_kv WHERE workflow_id = ?`, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: query data: %w", ErrCorruptData, err)
+	}
+	if err := scanDataKV(rows, data); err != nil {
+		return nil, err
+	}
+	nrows, err := q.QueryContext(ctx, `SELECT node_name, status, output, has_output FROM nodes WHERE workflow_id = ?`, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: query nodes: %w", ErrCorruptData, err)
+	}
+	if err := scanNodes(nrows, data); err != nil {
+		return nil, err
+	}
+	wrows, err := q.QueryContext(ctx, `SELECT node_name, fire_at FROM waits WHERE workflow_id = ?`, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: query waits: %w", ErrCorruptData, err)
+	}
+	if err := scanWaits(wrows, data); err != nil {
+		return nil, err
+	}
+	data.SetRollingBack(rollingBack != 0)
+	if triggerCause >= 0 && triggerCause <= int64(TriggerDeadlineExceeded) {
+		data.SetTriggerCause(TriggerCause(triggerCause))
+	}
 	return data, nil
 }
 

@@ -336,6 +336,44 @@ See the [Persistence guide → Durability & Idempotency](docs/guides/persistence
 for the worked detail and the [API reference](docs/reference/api-reference.md#durable-crash-resume-added-v090)
 for the durable surface.
 
+## Inspecting an Existing SQLite Database
+
+The unreleased read-only API, `workflow.OpenSQLiteReader(path)`, returns a
+`*workflow.SQLiteReader` for inspection without running the writable store
+initializer. It requires an existing, nonempty regular database file and refuses
+missing paths, incompatible reader schemas, and recovery that requires a write.
+It does not create the parent directory or database, initialize or migrate the
+schema, repair the database, or modify application records.
+
+The reader exposes only five reads and `Close`; it is not a `WorkflowStore` and
+does not expose `Save`, dispatch operations, or an arbitrary SQL handle:
+
+| Method | Read contract |
+|---|---|
+| `ListWorkflows()` | Existing workflow IDs in lexical order. |
+| `ListPending(olderThan)` | Pending work with the store's inclusive age filter. |
+| `WorkflowStatus(id)` | Granular dispatch and node-status observations. |
+| `Load(id)` | Workflow data reconstructed from one committed read transaction. |
+| `ListSchedules()` | Existing schedules ordered by next-fire time. |
+| `Close()` | Release the owned connection without invoking writer checkpointing. |
+
+Each `Load` sees one snapshot, but separate method calls are **not** a combined
+snapshot. `WorkflowStatus` retains the store's two-query semantics: its dispatch
+and node observations can reflect different instants under a concurrent writer.
+This is a live reader, not an `immutable=1` shortcut; later calls can observe
+subsequent commits.
+
+**Read-only does not mean zero filesystem effects.** SQLite may create, update,
+remove, or retain its own `-wal`/`-shm` coordination files beside the configured
+database, including after a failed open and on `Close`. Use a trusted local path
+on a filesystem supported by SQLite WAL; concurrent caller-controlled replacement
+or deletion of that path is unsupported. Schema checks cover the tables and
+columns required by these reads, not whole-database integrity; row decoding
+retains the engine's typed errors.
+
+See the [reader API documentation](pkg/workflow/workflow_store_sqlite_reader.go)
+and [unreleased changes](CHANGELOG.md#unreleased) for the exact surface and limits.
+
 ## Conditional Branching
 
 A workflow can route execution down exactly **one** of several branches with a

@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 must be settled before any frozen 1.0, letting them soak across alphas; 1.0 is a later ratification.
 
 **Added:**
+- **`OpenSQLiteReader(path) (*SQLiteReader, error)`** — an existing-only inspection
+  handle exposing `ListWorkflows`, `ListPending`, `WorkflowStatus`, `Load`,
+  `ListSchedules`, and `Close`, without the writer initializer or write methods.
+  It never creates or repairs the database, initializes/migrates its schema, or
+  modifies application records. SQLite's own WAL/SHM coordination files may still
+  be created, updated, removed, or retained, including on failed opens and close.
+  `Load` reconstructs one committed read snapshot; separate calls are not a global
+  snapshot, and `WorkflowStatus` retains its granular two-query consistency.
+  Requires a trusted local path; no `immutable=1` shortcut for live databases.
+  Reader-schema checks are not a whole-database integrity check.
 - **`ScheduleSpec.WithInput([]byte)`** — a schedule now carries the JSON-object input its fire enqueues,
   so a scheduled run can be parameterized (e.g. per-tenant/per-engagement), not just typed. The input is
   copied verbatim into each fired run's `work_queue.input` (run provenance) and validated as a JSON object
